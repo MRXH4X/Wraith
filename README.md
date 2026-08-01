@@ -15,7 +15,7 @@
 
 Wraith egy AI asszisztens keretrendszer, ami Claude Code-ra épül. Saját AI csapatot építhetsz, akik Telegramon vagy Slacken kommunikálnak veled, önállóan dolgoznak, és egymással is együttműködnek.
 
-📄 [English project overview](docs/overview.html) — what Wraith is, how it works, and how to use it.
+📄 [English project overview](docs/overview.md) — what Wraith is, how it works, and how to use it.
 
 ## Funkciók
 
