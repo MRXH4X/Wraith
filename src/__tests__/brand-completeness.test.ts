@@ -67,11 +67,11 @@ describe('buildManifest brands the PWA manifest, default unchanged', () => {
 
 describe('buildGateMsg brands the email-gate deny message', () => {
   it('renders the governance message with the stock defaults', () => {
-    expect(buildGateMsg('Wraith', 'Szabolcs')).toBe(
+    expect(buildGateMsg('Wraith', 'Owner')).toBe(
       'Email-kuldes sub-agentkent tiltott (governance hard-gate). ' +
         'Kuldd a tervezett emailt (CIMZETT + TARGY + TELJES SZOVEG) Wraithnek inter-agent uzenetben ' +
         'jovahagyasra; a kimeno emailt Wraith kuldi. Csak VERIFIKALT cimre (soha nem nevbol talalt cim). ' +
-        'Soha ne irj ala Szabolcs nevevel, es soha ne kerj penzt senki neveben.',
+        'Soha ne irj ala Owner nevevel, es soha ne kerj penzt senki neveben.',
     )
   })
 
@@ -99,7 +99,7 @@ describe('readBrandEnv reads the install brand from .env', () => {
   })
 
   it('falls back to the stock defaults for missing keys', () => {
-    expect(readBrandEnv(() => 'WEB_PORT=3420\n')).toEqual({ botName: 'Wraith', ownerName: 'Szabolcs' })
+    expect(readBrandEnv(() => 'WEB_PORT=3420\n')).toEqual({ botName: 'Wraith', ownerName: 'Owner' })
   })
 
   it('falls back to the stock defaults when the file cannot be read', () => {
@@ -107,7 +107,7 @@ describe('readBrandEnv reads the install brand from .env', () => {
       readBrandEnv(() => {
         throw new Error('ENOENT')
       }),
-    ).toEqual({ botName: 'Wraith', ownerName: 'Szabolcs' })
+    ).toEqual({ botName: 'Wraith', ownerName: 'Owner' })
   })
 })
 

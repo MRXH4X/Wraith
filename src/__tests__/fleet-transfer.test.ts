@@ -91,7 +91,7 @@ vi.mock('../config.js', () => ({
   MAIN_AGENT_ID: 'wraith',
   BOT_NAME: 'Wraith',
   BRAND_NAME: 'Wraith',
-  OWNER_NAME: 'Szabolcs',
+  OWNER_NAME: 'TestOwner',
   CHANNEL_PROVIDER: 'telegram',
 }))
 

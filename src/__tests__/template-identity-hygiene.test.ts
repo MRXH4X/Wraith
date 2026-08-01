@@ -36,14 +36,17 @@ const HOME_PATH_RX = /\/(Users|home)\/(?!<)[A-Za-z0-9._-]+/
 // other install. example.com and the noreply providers are not listed.
 const PERSONAL_EMAIL_RX = /[A-Za-z0-9._%+-]+@(gmail|outlook|icloud|yahoo|hotmail)\.[A-Za-z]+/i
 
-// The canonical default OWNER_NAME from src/config.ts (`?? 'Szabolcs'`) and its
-// common Hungarian nickname (Szabi). It is one specific deployment's operator
-// name, so it must never be baked into a shipped template as a bare literal --
-// the placeholder {{OWNER_NAME}} carries it per host. Catching the literal
-// stops the exact regression where a task addresses the wrong person ("<owner>
-// is asleep", "escalate to <owner>") on every other install. No trailing \b:
-// the name takes Hungarian suffixes (Szabolcsnak, Szabihoz), and both the
-// inflected full name and the nickname were among the leaks fixed here. The
+// A specific prior operator's real first name (and its common Hungarian
+// nickname) that leaked into shipped templates/scripts in an earlier version
+// of this project, before the defaults were genericized to 'Owner' (see
+// src/config.ts's OWNER_NAME_PLACEHOLDER and scripts/email-send-gate.mjs's
+// fallback). It is one specific deployment's operator name, so it must never
+// be baked into a shipped template as a bare literal -- the placeholder
+// {{OWNER_NAME}} carries it per host. Catching the literal stops the exact
+// regression where a task addresses the wrong person ("<owner> is asleep",
+// "escalate to <owner>") on every other install. No trailing \b: the name
+// takes Hungarian suffixes (Szabolcsnak, Szabihoz), and both the inflected
+// full name and the nickname were among the leaks fixed here. The
 // `(olcs|i)` after the shared `Szab` stem avoids common words like szabaly /
 // szabad / szabas.
 const FOREIGN_DEFAULT_OWNER_RX = /\bSzab(olcs|i)/i

@@ -65,7 +65,7 @@ offer_claude_fallback() {
   fi
   echo ""
   echo -e "${ORANGE}$(_t macos.claude_available)${NC}"
-  local prompt="Wraith installer failed at step \"${step}\". Error: ${err_msg}. Script: install.sh${line_info}. Repo: https://github.com/mrx/wraith. OS: macOS $(sw_vers -productVersion 2>/dev/null || echo unknown). Node: $(node -v 2>/dev/null || echo missing). Dir: ${INSTALL_DIR}. Your task: diagnose this Wraith installer failure. The install scripts are install.sh (macOS) and install-linux.sh. Read the relevant section, check for missing dependencies or permission issues, and suggest concrete shell commands to fix."
+  local prompt="Wraith installer failed at step \"${step}\". Error: ${err_msg}. Script: install.sh${line_info}. Repo: https://github.com/MRXH4X/wraith. OS: macOS $(sw_vers -productVersion 2>/dev/null || echo unknown). Node: $(node -v 2>/dev/null || echo missing). Dir: ${INSTALL_DIR}. Your task: diagnose this Wraith installer failure. The install scripts are install.sh (macOS) and install-linux.sh. Read the relevant section, check for missing dependencies or permission issues, and suggest concrete shell commands to fix."
   if [ -t 0 ]; then
     read -rp "$(_t prompt_open_claude)" OPEN_CLAUDE
     OPEN_CLAUDE=${OPEN_CLAUDE:-n}
@@ -782,7 +782,7 @@ if [ "$CHANNEL_PROVIDER" = "telegram" ]; then
   PLUGIN_ID="telegram@claude-plugins-official"
   PLUGIN_SHORT="telegram"
 else
-  PLUGIN_MARKETPLACE="mrx/wraith-marketplace"
+  PLUGIN_MARKETPLACE="MRXH4X/wraith-marketplace"
   PLUGIN_ID="slack-channel@wraith-marketplace"
   PLUGIN_SHORT="slack-channel"
 fi

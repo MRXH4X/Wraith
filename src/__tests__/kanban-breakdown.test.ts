@@ -116,7 +116,7 @@ describe('kanban parent_id schema and subtask queries', () => {
 })
 
 describe('validateSubtasks (from llm-breakdown)', () => {
-  const validAssignees = new Set(['Szabolcs', 'Wraith', 'samu', 'zara'])
+  const validAssignees = new Set(['TestOwner', 'Wraith', 'samu', 'zara'])
 
   it('validates well-formed subtasks', () => {
     const input = [
@@ -174,13 +174,13 @@ describe('validateSubtasks (from llm-breakdown)', () => {
   it('accepts known assignees from the valid set', () => {
     const result = validateSubtasks(
       [
-        { title: 'T1', description: 'D', assignee: 'Szabolcs' },
+        { title: 'T1', description: 'D', assignee: 'TestOwner' },
         { title: 'T2', description: 'D', assignee: 'Wraith' },
         { title: 'T3', description: 'D', assignee: 'zara' },
       ],
       validAssignees,
     )
-    expect(result[0].assignee).toBe('Szabolcs')
+    expect(result[0].assignee).toBe('TestOwner')
     expect(result[1].assignee).toBe('Wraith')
     expect(result[2].assignee).toBe('zara')
   })

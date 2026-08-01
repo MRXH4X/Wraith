@@ -268,7 +268,7 @@ function maybeAlertSharedConfigCollision(name: string): void {
 // agent's project-scoped install lives in its own installed_plugins.json and can
 // never evict another's).
 //
-// AUTH (2026-06-28, addressing Szotasz's #459 review): we DELIBERATELY do NOT
+// AUTH (2026-06-28, addressing PR #459 review feedback): we DELIBERATELY do NOT
 // symlink or copy .credentials.json. On Linux/Windows Claude Code refreshes the
 // OAuth token atomically (temp file + rename), which would replace a symlink with
 // a standalone file -- the isolated agent's token then diverges from the shared

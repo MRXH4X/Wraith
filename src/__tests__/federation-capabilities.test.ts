@@ -77,7 +77,7 @@ describe('containsPrivateData (deterministic outbound scrub)', () => {
   it('ownerScrubNeedle: placeholder maps to empty (skipped), a real name passes through', () => {
     expect(ownerScrubNeedle('Owner')).toBe('')
     expect(ownerScrubNeedle('  owner  ')).toBe('')
-    expect(ownerScrubNeedle('Szabolcs')).toBe('Szabolcs')
+    expect(ownerScrubNeedle('TestOwner')).toBe('TestOwner')
     expect(ownerScrubNeedle('')).toBe('')
     expect(ownerScrubNeedle('Owner', 'CustomPlaceholder')).toBe('Owner')
   })

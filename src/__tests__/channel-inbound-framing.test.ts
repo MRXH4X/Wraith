@@ -53,7 +53,7 @@ describe('wrapChannelInbound', () => {
   it('a real buildHandoffContent block survives wrapChannelInbound with chat_id intact', () => {
     const content = buildHandoffContent({
       kind: 'message', chat_id: 1268077055, user_id: 1268077055,
-      username: 'szabolcs', message_id: 42, content: 'itt vagy?', tg_date: 1700000000,
+      username: 'testowner', message_id: 42, content: 'itt vagy?', tg_date: 1700000000,
     })
     const out = wrapChannelInbound(content)
     expect(out).toContain('<channel source="telegram"')

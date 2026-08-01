@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // PreToolUse hard-gate: blocks outbound email-send for sub-agents.
 //
-// Governance control (Szabi 2026-06-25, after the Boni incident: a sub-agent
-// autonomously emailed a fabricated address asking for money in Szabi's name).
-// Sub-agents may NOT send outbound email; any email must be routed through the
-// main agent (Wraith) for approval -- only Wraith retains email-send.
+// Governance control (added 2026-06-25 after an incident where a sub-agent
+// autonomously emailed a fabricated address asking for money in the owner's
+// name). Sub-agents may NOT send outbound email; any email must be routed
+// through the main agent (Wraith) for approval -- only Wraith retains
+// email-send.
 //
 // Why a hook and not a permissions deny-list: permissive security profiles
 // launch Claude Code with --dangerously-skip-permissions, which BYPASSES the
@@ -57,7 +58,10 @@ export function gateDecision(toolName, toolInput) {
 
 // Pure builder for the deny message, so the brand/owner substitution is
 // provable without spawning the hook. With the stock defaults (botName
-// 'Wraith', ownerName 'Szabolcs') the wording is byte-identical to before.
+// 'Wraith', ownerName 'Owner') the wording matches config.ts's own
+// OWNER_NAME_PLACEHOLDER fallback -- a bare/misconfigured install should
+// never leak any one specific operator's name into every other install's
+// generated files.
 export function buildGateMsg(botName, ownerName) {
   return (
     'Email-kuldes sub-agentkent tiltott (governance hard-gate). ' +
@@ -73,7 +77,7 @@ export function buildGateMsg(botName, ownerName) {
 // Any failure falls back to the stock defaults, so the gate never breaks and a
 // bare install keeps the original wording.
 export function readBrandEnv(readFile = (p) => readFileSync(p, 'utf-8')) {
-  const fallback = { botName: 'Wraith', ownerName: 'Szabolcs' }
+  const fallback = { botName: 'Wraith', ownerName: 'Owner' }
   try {
     const envPath = join(dirname(fileURLToPath(import.meta.url)), '..', '.env')
     const raw = readFile(envPath)

@@ -63,7 +63,7 @@ describe('costops API (route smoke)', () => {
     expect(await tryHandleCosts(ctx)).toBe(false)
   })
 
-  // Review blocker (Szotasz, PR #524): "the GET endpoint performs writes". Proven with a
+  // Review blocker (PR #524): "the GET endpoint performs writes". Proven with a
   // REAL fixed cost configured (not the empty default), so there is something a buggy
   // sync-on-GET would actually have inserted -- an empty-config test wouldn't distinguish
   // "no write call" from "nothing to write".

@@ -30,13 +30,13 @@ describe('mapUpdate', () => {
         date: 1700000000,
         text: 'szia',
         chat: { id: 1268077055 },
-        from: { id: 1268077055, username: 'szabolcs' },
+        from: { id: 1268077055, username: 'testowner' },
       },
     })!
     expect(ev.kind).toBe('message')
     expect(ev.chat_id).toBe(1268077055)
     expect(ev.user_id).toBe(1268077055)
-    expect(ev.username).toBe('szabolcs')
+    expect(ev.username).toBe('testowner')
     expect(ev.message_id).toBe(5)
     expect(ev.content).toBe('szia')
     expect(ev.tg_date).toBe(1700000000)
@@ -91,7 +91,7 @@ describe('ingest', () => {
     kind: 'message',
     chat_id: 1268077055,
     user_id: 1268077055,
-    username: 'szabolcs',
+    username: 'testowner',
     message_id: update_id,
     content: `msg ${update_id}`,
     meta: {},
@@ -324,7 +324,7 @@ describe('handoff content safety', () => {
       kind: 'message',
       chat_id: 1268077055,
       user_id: 1268077055,
-      username: 'szabolcs',
+      username: 'testowner',
       message_id: 522,
       content: 'itt vagy?',
       tg_date: 1700000000,

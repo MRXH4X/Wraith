@@ -68,7 +68,7 @@ describe('ensureIsolatedChannelConfigDir', () => {
   })
 
   it('does NOT symlink or copy .credentials.json (auth via CLAUDE_CODE_OAUTH_TOKEN env)', () => {
-    // Szotasz #459 review: a symlinked .credentials.json breaks on the first
+    // PR #459 review: a symlinked .credentials.json breaks on the first
     // atomic token refresh (temp+rename replaces the link, diverging the creds
     // and racing the single-use refresh token). The isolated dir must carry NO
     // credentials file at all -- the launcher injects a long-lived OAuth token.
@@ -146,7 +146,7 @@ describe('ensureIsolatedChannelConfigDir', () => {
 })
 
 // Source-level contract for the launcher wiring (startAgentProcess). These
-// guard the auth mechanism Szotasz asked for: no symlinked creds, a long-lived
+// guard the auth mechanism requested in PR #459: no symlinked creds, a long-lived
 // OAuth token injected via env, and isolation gated on that token's presence.
 const SRC = readFileSync(join(__dirname, '../web/agent-process.ts'), 'utf-8')
 
