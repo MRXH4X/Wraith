@@ -46,7 +46,7 @@ let updateStatusCache: UpdateStatus = {
   latest: '',
   behind: 0,
   commits: [],
-  remote: 'KZ5017/wraith',
+  remote: 'mrx/wraith',
   lastChecked: 0,
 }
 
@@ -86,7 +86,7 @@ export function parseGitHubRemote(): string {
     const m = url.match(/github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/i)
     if (m) return m[1]
   } catch { /* fall through */ }
-  return 'KZ5017/wraith'
+  return 'mrx/wraith'
 }
 
 type GhCompare = {

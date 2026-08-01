@@ -40,4 +40,4 @@ A Wraith saját licensze: [LICENSE](./LICENSE) (MIT).
 
 ---
 
-Ha hiányzó attribúciót észlelsz vagy korrekciót szeretnél, nyiss egy issue-t vagy PR-t: https://github.com/KZ5017/wraith.
+Ha hiányzó attribúciót észlelsz vagy korrekciót szeretnél, nyiss egy issue-t vagy PR-t: https://github.com/mrx/wraith.
