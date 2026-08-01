@@ -94,6 +94,13 @@
       "level": 1,
       "locked": true,
       "maxLevel": 1
+    },
+    {
+      "key": "pentest_risky_command",
+      "label": "Kockazatos pentest muvelet (destruktiv payload, elo C2 listener, celgep-modositas)",
+      "level": 1,
+      "locked": true,
+      "maxLevel": 1
     }
   ]
 }
