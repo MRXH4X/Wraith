@@ -101,6 +101,13 @@
       "level": 1,
       "locked": true,
       "maxLevel": 1
+    },
+    {
+      "key": "code_self_heal",
+      "label": "Onjavito kod-patch (crash/typecheck/teszt-hiba alapjan, PR-en at)",
+      "level": 1,
+      "locked": false,
+      "maxLevel": 2
     }
   ]
 }

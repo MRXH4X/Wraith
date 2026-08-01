@@ -16,6 +16,7 @@ Minden lap két szemszögből mutatja be a funkciót:
 | [Ügynök-flotta + inter-agent kommunikáció](agent-fleet.md) | Több specializált ügynök közös üzenetsoron keresztül |
 | [Föderáció](federation.md) | Több Wraith-példány összekötése: rendszer-minősített címzés (`teodor/backend-dev`) + HTTPS-híd, dashboard-menü, per-társ tokenek, automatikus ügynök-felkészítés, **képesség-alapú auto-routing** (LLM-katalógus) + fő-ügynök auto-drain, beépített rollback — opt-in, fail-closed |
 | [Skill-factory (öntanulás)](skill-factory.md) | Visszatérő munkafolyamatokból újrahasznosítható skill-ek |
+| [Code self-heal (önjavító kód-patch)](code-self-heal.md) | Crash/typecheck/teszt-hiba önálló diagnózisa + PR-alapú javítás, védett-útvonal-listával és 3. szintre szerkezetileg letiltott autonómiával |
 | [Channels (Telegram / Slack)](channels.md) | Natív üzenetküldő-integráció proaktív értesítésekkel |
 | [Hangüzenetek (voice)](voice.md) | Per-agent STT+TTS: helyben futó hang oda-vissza Telegramon, ügynökönként állítható móddal |
 | [Printing-press CLI-k](printing-press-cli.md) | API nélküli oldalakhoz is agent-natív CLI generálás |
