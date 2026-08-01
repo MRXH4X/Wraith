@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { scopeChannelPlugins, ownChannelProviderForScope, CHANNEL_PLUGIN_IDS } from '../web/agent-process.js'
 
 const TG = CHANNEL_PLUGIN_IDS.telegram     // telegram@claude-plugins-official
-const SL = CHANNEL_PLUGIN_IDS.slack        // slack-channel@marveen-marketplace
+const SL = CHANNEL_PLUGIN_IDS.slack        // slack-channel@wraith-marketplace
 const DI = CHANNEL_PLUGIN_IDS.discord      // discord@claude-plugins-official
 
 // scopeChannelPlugins keys on the EXPLICIT per-agent channelProvider (null when
@@ -66,7 +66,7 @@ describe('scopeChannelPlugins', () => {
 
 // CATASTROPHE-BRANCH regression guard: the spawn-time plugin scoping must NEVER
 // run for the MAIN agent, or scopeChannelPlugins(null) would disable the owner's
-// telegram channel (Szabi's primary line). marveen is structurally outside this
+// telegram channel (Szabi's primary line). wraith is structurally outside this
 // path (not in agents/, launched via channels.sh), but this locks the explicit
 // guard so a future refactor cannot regress it.
 describe('main-agent telegram channel is protected from spawn-time scoping', () => {

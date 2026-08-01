@@ -35,7 +35,7 @@ import urllib.parse
 
 # api.telegram.org publishes an AAAA record that is not routable from every host, and
 # Python's urllib has no happy-eyeballs fallback: each fresh connection stalls on the
-# IPv6 attempt before dropping to IPv4. MEASURED 2026-07-27 on the Marveen box: getFile
+# IPv6 attempt before dropping to IPv4. MEASURED 2026-07-27 on the Wraith box: getFile
 # took 25.1s with IPv6 allowed vs 0.0s IPv4-only, and a full transcribe ran 2m43s of
 # which only 5.5s was CPU. That silently blew the dashboard's 60s STT timeout, so
 # /api/voice/directive returned transcript=null and voice messages reached the agent

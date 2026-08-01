@@ -1,29 +1,29 @@
-/* === Anthropic Design Tokens === */
+/* === Wraith Design Tokens === */
 :root {
-  --bg: #faf9f5;
+  --bg: #e9edf2;
   --bg-card: #ffffff;
-  --bg-card-hover: #f5f4ed;
-  --bg-input: #f0eee6;
+  --bg-card-hover: #f2f5f8;
+  --bg-input: #e3e8ee;
   --bg-modal: #ffffff;
-  --bg-code: #f0eee6;
-  --text: #141413;
-  --text-secondary: #30302e;
-  --text-muted: #87867f;
-  --border: #d1cfc5;
-  --border-focus: #d97757;
-  --accent: #d97757;
-  --accent-hover: #c46849;
-  --accent-soft: rgba(217, 119, 87, 0.1);
-  --danger: #bf4d43;
-  --danger-soft: rgba(191, 77, 67, 0.12);
-  --danger-hover: #a8413a;
-  --success: #788c5d;
-  --success-soft: rgba(120, 140, 93, 0.12);
-  --info: #6a9bcc;
-  --info-soft: rgba(106, 155, 204, 0.12);
-  --shadow-sm: 0 1px 3px rgba(20, 20, 19, 0.04);
-  --shadow-md: 0 4px 16px rgba(20, 20, 19, 0.06);
-  --shadow-lg: 0 8px 32px rgba(20, 20, 19, 0.1);
+  --bg-code: #e3e8ee;
+  --text: #0a0e14;
+  --text-secondary: #2b3644;
+  --text-muted: #6b7684;
+  --border: #c4cdd7;
+  --border-focus: #2b8fb3;
+  --accent: #2b8fb3;
+  --accent-hover: #23748f;
+  --accent-soft: rgba(43, 143, 179, 0.1);
+  --danger: #c0392b;
+  --danger-soft: rgba(192, 57, 43, 0.12);
+  --danger-hover: #a53125;
+  --success: #2f8f6d;
+  --success-soft: rgba(47, 143, 109, 0.12);
+  --info: #4fc3f7;
+  --info-soft: rgba(79, 195, 247, 0.12);
+  --shadow-sm: 0 1px 3px rgba(10, 14, 20, 0.06);
+  --shadow-md: 0 4px 16px rgba(10, 14, 20, 0.08);
+  --shadow-lg: 0 8px 32px rgba(10, 14, 20, 0.14);
   --radius: 12px;
   --radius-sm: 8px;
   --radius-lg: 16px;
@@ -31,19 +31,30 @@
 }
 
 [data-theme="dark"] {
-  --bg: #141413;
-  --bg-card: #1f1e1d;
-  --bg-card-hover: #262624;
-  --bg-input: #30302e;
-  --bg-modal: #1f1e1d;
-  --bg-code: #262624;
-  --text: #faf9f5;
-  --text-secondary: #b0aea5;
-  --text-muted: #73726c;
-  --border: #3d3d3a;
-  --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
-  --shadow-md: 0 4px 16px rgba(0,0,0,0.25);
-  --shadow-lg: 0 8px 32px rgba(0,0,0,0.35);
+  --bg: #0a0e14;
+  --bg-card: #131b26;
+  --bg-card-hover: #1a2431;
+  --bg-input: #1a2431;
+  --bg-modal: #131b26;
+  --bg-code: #1a2431;
+  --text: #e8ecf1;
+  --text-secondary: #c8ccd2;
+  --text-muted: #6b7684;
+  --border: #2b4a5e;
+  --border-focus: #4fc3f7;
+  --accent: #4fc3f7;
+  --accent-hover: #7fd4ff;
+  --accent-soft: rgba(79, 195, 247, 0.12);
+  --danger: #e05a4f;
+  --danger-soft: rgba(224, 90, 79, 0.14);
+  --danger-hover: #ef7a70;
+  --success: #4fd6a8;
+  --success-soft: rgba(79, 214, 168, 0.12);
+  --info: #7fd4ff;
+  --info-soft: rgba(127, 212, 255, 0.12);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.35);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.45);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.6);
 }
 
 /* === Reset === */
@@ -1545,8 +1556,8 @@ main.kanban-active { max-width: none; padding-left: 16px; padding-right: 16px; }
   line-height: 1;
 }
 
-.marveen-card { border-left: 3px solid var(--accent); }
-.marveen-badge {
+.wraith-card { border-left: 3px solid var(--accent); }
+.wraith-badge {
   font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;

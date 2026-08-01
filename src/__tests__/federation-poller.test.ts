@@ -32,7 +32,7 @@ function enabledConfig(peerOverrides: Record<string, unknown> = {}): void {
 }
 
 const GOOD_MANIFEST = {
-  system: 'teodor', marveenVersion: '1.19.0', federationVersion: 1,
+  system: 'teodor', wraithVersion: '1.19.0', federationVersion: 1,
   agents: [{ id: 'teodor', displayName: 'Teodor', model: 'claude-opus-4-8' }],
   skills: [{ agent: 'sub', name: 'video-cutter', description: 'cuts video' }],
 }

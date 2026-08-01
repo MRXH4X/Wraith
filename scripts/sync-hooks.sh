@@ -1,7 +1,7 @@
 #!/bin/bash
 # Master hook-szinkronizáló script. Minden install-*-hook.sh-t lefuttat a
 # scripts/ mappából. Az update.sh-ből hívva auto-deploy-olja az aktuális
-# hook-csomagot minden Béla-szerű Marveen-rendszerre a dashboard
+# hook-csomagot minden Béla-szerű Wraith-rendszerre a dashboard
 # Frissítés gomb-jával.
 #
 # Pattern: a scripts/install-*-hook.sh egyenkénti shell-szkriptek

@@ -87,7 +87,7 @@ describe('SSH_OPTS', () => {
     const controlPathOpt = SSH_OPTS.find(o => o.startsWith('ControlPath='))
     expect(controlPathOpt).toBeDefined()
     expect(controlPathOpt).toContain(controlDir())
-    expect(controlDir()).toMatch(/marveen-ssh/)
+    expect(controlDir()).toMatch(/wraith-ssh/)
     // Not the bare `/tmp/<file>` form flagged as world-writable.
     expect(controlPathOpt).not.toMatch(/ControlPath=\/tmp\/[^/]+%/)
   })

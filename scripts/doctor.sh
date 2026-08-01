@@ -1,5 +1,5 @@
 #!/bin/bash
-# Marveen system health check. Run: bash scripts/doctor.sh
+# Wraith system health check. Run: bash scripts/doctor.sh
 # Exit 0 = all OK, 1 = something failed
 
 set -u
@@ -18,9 +18,9 @@ MAIN_AGENT_ID="$(grep -E '^MAIN_AGENT_ID=' .env 2>/dev/null | head -1 | cut -d= 
 # and it is run precisely when something is already wrong.
 WEB_PORT="${WEB_PORT:-$(grep -E '^WEB_PORT=' "$(dirname "$0")/../.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' "')}"
 WEB_PORT="${WEB_PORT:-3420}"
-MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"
+MAIN_AGENT_ID="${MAIN_AGENT_ID:-wraith}"
 
-echo -e "\n${BOLD}Marveen Doctor${RESET}: $(date '+%Y-%m-%d %H:%M:%S')\n"
+echo -e "\n${BOLD}Wraith Doctor${RESET}: $(date '+%Y-%m-%d %H:%M:%S')\n"
 
 # --- Services (systemd on Linux, launchd on macOS) ---
 echo -e "${BOLD}Services${RESET}"

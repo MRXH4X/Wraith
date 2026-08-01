@@ -6,7 +6,7 @@
 
 ## 🎯 Mit tud / miért érdekes
 
-A Skool egy népszerű közösségi platform, amihez **nincs publikus API**. Marveen mégis teljes parancssori eszközt használ hozzá: posztot ír, kurzust hoz létre a classroomban, képet/videót tölt fel, szavazást indít, tartalmat töröl — mind másodperc alatt, böngésző-kattintgatás nélkül.
+A Skool egy népszerű közösségi platform, amihez **nincs publikus API**. Wraith mégis teljes parancssori eszközt használ hozzá: posztot ír, kurzust hoz létre a classroomban, képet/videót tölt fel, szavazást indít, tartalmat töröl — mind másodperc alatt, böngésző-kattintgatás nélkül.
 
 Ez a [printing-press](printing-press-cli.md) HAR-útvonalával készült: egy belépett munkamenet forgalmát rögzítve a rendszer kiolvasta a platform belső végpontjait, és 20 perc alatt kész CLI-t generált belőlük.
 

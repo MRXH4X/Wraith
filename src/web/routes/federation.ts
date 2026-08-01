@@ -47,7 +47,7 @@ import {
 import { resetPeerBackoff } from '../federation/bridge.js'
 import { getFederationStatus, refreshFederationStatus, resetFederationPollerCache } from '../federation/poller.js'
 import { ensureFederationClaudeMdSection } from '../federation/onboarding.js'
-import { hardRestartMarveenChannels } from '../channel-monitor.js'
+import { hardRestartWraithChannels } from '../channel-monitor.js'
 import type { RouteContext } from './types.js'
 
 export const FEDERATION_VERSION = 1
@@ -67,9 +67,9 @@ export const DIRECTORY_SKILL_DESC_MAX = 120
 // package.json semver, read once at module load (there is no existing
 // version reader in the codebase; the git-sha alternative would fingerprint
 // the exact local fork state to peers, which a manifest does not need).
-let marveenVersion = 'unknown'
+let wraithVersion = 'unknown'
 try {
-  marveenVersion = String(JSON.parse(readFileSync(join(PROJECT_ROOT, 'package.json'), 'utf-8')).version || 'unknown')
+  wraithVersion = String(JSON.parse(readFileSync(join(PROJECT_ROOT, 'package.json'), 'utf-8')).version || 'unknown')
 } catch { /* keep 'unknown' */ }
 
 // ---- inbound dedup (best-effort, in-memory) ---------------------------------
@@ -221,7 +221,7 @@ function buildManifest(cfg: FederationConfig, callerPeerId: string | null): unkn
   }
   return {
     system: cfg.systemId,
-    marveenVersion,
+    wraithVersion,
     federationVersion: FEDERATION_VERSION,
     agents: [
       {
@@ -447,11 +447,11 @@ export async function tryHandleFederation(ctx: RouteContext): Promise<boolean> {
   // Apply federation config to the RUNNING main agent by restarting its
   // channels session, so it reloads CLAUDE.md (with the onboarding +
   // delegation directive). Restarts server-side via MAIN_AGENT_ID -- the
-  // client must NOT depend on knowing the main agent id (window._marveen may
+  // client must NOT depend on knowing the main agent id (window._wraith may
   // not be loaded on the Federation page, which would 404 the generic
   // /api/agents/:name/restart path). Dashboard-token only (not a wire endpoint).
   if (path === '/api/federation/apply' && method === 'POST') {
-    const r = hardRestartMarveenChannels()
+    const r = hardRestartWraithChannels()
     if (r.ok) { json(res, { ok: true }); return true }
     json(res, { error: r.error || 'Restart failed' }, 500)
     return true

@@ -5,13 +5,13 @@ import { join } from 'node:path'
 // Contract tests for the 2026-06-02 13:00 hb-fire regression chain:
 //   - #250 (CLAUDE_CONFIG_DIR) blocked the channel crash but broke auth.
 //   - First fix attempt (#252) injected the Keychain JSON via the
-//     CLAUDE_CODE_OAUTH_TOKEN env var. Marveen's live test proved that
+//     CLAUDE_CODE_OAUTH_TOKEN env var. Wraith's live test proved that
 //     was wrong: the env expects a bare bearer token, the JSON blob comes
 //     back 401 "Invalid bearer token".
 //   - This PR materialises the FULL Keychain JSON as
 //     $CLAUDE_CONFIG_DIR/.credentials.json (mode 0600), which is the
 //     path Claude Code's Linux installs use natively and the path the
-//     SDK config-dir code honours. Marveen verified this approach
+//     SDK config-dir code honours. Wraith verified this approach
 //     succeeds (exit 0, request authenticated).
 
 const SRC = readFileSync(join(__dirname, '../heartbeat.ts'), 'utf-8')
@@ -51,7 +51,7 @@ describe('heartbeat OAuth bridge from Keychain to .credentials.json (#250 follow
 
   it('writes the JSON to $HEARTBEAT_CONFIG_DIR/.credentials.json (NOT to an env var)', () => {
     expect(SRC).toMatch(/\.credentials\.json/)
-    // The env-var injection attempt was proved wrong (Marveen 13:00-13:20
+    // The env-var injection attempt was proved wrong (Wraith 13:00-13:20
     // A/B test: bare JSON in CLAUDE_CODE_OAUTH_TOKEN -> 401 "Invalid
     // bearer token"). The token name may still appear in comments
     // documenting the dead path; what must NOT exist is an assignment

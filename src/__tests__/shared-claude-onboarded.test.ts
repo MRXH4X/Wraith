@@ -25,13 +25,13 @@ describe('ensureSharedClaudeOnboarded', () => {
 
   it('re-seeds a clobbered flag while PRESERVING every other key (the bootcamp case)', () => {
     writeFileSync(dotClaude, JSON.stringify({
-      projects: { '/root/marveen': { hasTrustDialogAccepted: true } },
+      projects: { '/root/wraith': { hasTrustDialogAccepted: true } },
       mcpServers: { fs: { command: 'x' } },
     }))
     expect(ensureSharedClaudeOnboarded(dotClaude)).toBe(true)
     const parsed = JSON.parse(readFileSync(dotClaude, 'utf-8'))
     expect(parsed.hasCompletedOnboarding).toBe(true)
-    expect(parsed.projects['/root/marveen'].hasTrustDialogAccepted).toBe(true)
+    expect(parsed.projects['/root/wraith'].hasTrustDialogAccepted).toBe(true)
     expect(parsed.mcpServers.fs.command).toBe('x')
   })
 

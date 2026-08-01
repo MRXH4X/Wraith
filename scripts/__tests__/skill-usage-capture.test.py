@@ -122,7 +122,7 @@ class TestAgentIdFromCwd(unittest.TestCase):
     def test_install_root_returns_main_agent_id(self):
         install = self._install()
         result = self._call(install)
-        # Should fall back to MAIN_AGENT_ID or 'marveen'
+        # Should fall back to MAIN_AGENT_ID or 'wraith'
         self.assertIsInstance(result, str)
         self.assertTrue(len(result) > 0)
 

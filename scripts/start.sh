@@ -14,9 +14,9 @@ if [ -f "$INSTALL_DIR/.env" ]; then
   SLUG="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2-)"
   BOT_NAME="$(grep -E '^BOT_NAME=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2-)"
 fi
-SLUG="${SLUG:-marveen}"
+SLUG="${SLUG:-wraith}"
 
-MARVEEN_LANG="$(cat "${INSTALL_DIR}/.lang" 2>/dev/null || echo hu)"
+WRAITH_LANG="$(cat "${INSTALL_DIR}/.lang" 2>/dev/null || echo hu)"
 # shellcheck source=../install-lang.sh
 source "${INSTALL_DIR}/install-lang.sh"
 
@@ -30,7 +30,7 @@ source "${INSTALL_DIR}/install-lang.sh"
 # blocks every UserPromptSubmit, creating a silent fleet lockout (2026-07-14 incident).
 INSTALL_DIR="$INSTALL_DIR" python3 "${INSTALL_DIR}/scripts/boot-hook-prune.py" 2>&1 | grep -v '^$' | sed 's/^/[boot-hook-prune] /' || true
 
-echo "${BOT_NAME:-Marveen} $(_t start.starting)"
+echo "${BOT_NAME:-Wraith} $(_t start.starting)"
 OS="$(uname -s)"
 LAUNCHD_FAILED=""
 if [ "$OS" = "Darwin" ]; then

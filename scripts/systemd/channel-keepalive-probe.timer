@@ -1,5 +1,5 @@
 [Unit]
-Description=Run the Marveen token-free channel keepalive probe every 3 minutes
+Description=Run the Wraith token-free channel keepalive probe every 3 minutes
 
 [Timer]
 # Fires well inside channel-watchdog's 15-min staleness threshold so an idle

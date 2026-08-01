@@ -14,7 +14,7 @@ import type { RouteContext } from './types.js'
 // Claude Code transcript (.jsonl): every inbound channel message, every
 // outbound reply, and every action. We parse the newest session transcript
 // into a chat-style timeline so an operator can actually review what happened
-// -- and, for customer-hosted Marveens, support them. Read-only.
+// -- and, for customer-hosted Wraiths, support them. Read-only.
 
 interface Entry {
   ts: string | null

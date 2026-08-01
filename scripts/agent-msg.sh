@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agent-msg.sh -- reliable inter-agent message send for the Marveen fleet.
+# agent-msg.sh -- reliable inter-agent message send for the Wraith fleet.
 #
 # WHY: the common `curl -s ... >/dev/null && echo sent` pattern is DANGEROUS -- curl exits 0 even when
 # the server REJECTED the request (401/400/5xx), producing a SILENT send failure: the recipient never
@@ -13,12 +13,12 @@
 #   large / multi-line content may come from STDIN when the 3rd arg is "-":
 #     echo "<long text>" | bash scripts/agent-msg.sh <from> <to> -
 # Output: success -> "OK id=<n>"; failure -> "FAIL <reason>" + a line in store/agent-msg-failures.log, exit 1.
-# Env: MARVEEN_WEB_PORT (default 3420).
+# Env: WRAITH_WEB_PORT (default 3420).
 set -uo pipefail
 
 # base dir = the parent of this script's dir (scripts/..), so it works from any CWD / any install
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PORT="${MARVEEN_WEB_PORT:-3420}"
+PORT="${WRAITH_WEB_PORT:-3420}"
 TOKEN_FILE="$BASE/store/.dashboard-token"
 URL="http://localhost:${PORT}/api/messages"
 LOG="$BASE/store/agent-msg-failures.log"

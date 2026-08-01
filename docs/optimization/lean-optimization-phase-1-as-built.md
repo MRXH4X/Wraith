@@ -1,7 +1,7 @@
 # Lean Optimization Phase 1 — as built
 
-Card: c755f4b2. Branch: `feat/lean-opt-phase1-gate` (worktree `/home/iszzu/marveen-wt/lean-opt-phase1`), based on `2ad7e91` (v1.25.1).
-Built by fullstackfejleszto, 2026-07-29. Gated by marveen.
+Card: c755f4b2. Branch: `feat/lean-opt-phase1-gate` (worktree `/home/iszzu/wraith-wt/lean-opt-phase1`), based on `2ad7e91` (v1.25.1).
+Built by fullstackfejleszto, 2026-07-29. Gated by wraith.
 
 This document records what was actually built, including the parts that were
 scoped OUT mid-build. It is not a plan.
@@ -212,7 +212,7 @@ configs and the real map. Both diffs empty across all 22 agents.
 The profile-only cutover — removing the explicit `model` so resolution actually
 goes through the map — was **not** performed. It resolves to the identical model
 (proven in test), but it would be a real behaviour change on the currently
-deployed build, which has no profile support. It is marveen's flip after deploy.
+deployed build, which has no profile support. It is wraith's flip after deploy.
 
 ### Evidence
 

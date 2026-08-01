@@ -18,14 +18,14 @@ const TELEGRAM_MARKETPLACE_CMD =
 const SYNOLOGY_CHAT_CMD =
   'bun run --cwd /home/user/.claude/plugins/efi-src/synology-chat --shell=bun --silent start'
 // Slack live snapshot was not available on the EFi host (telegram is the
-// production provider). The cmdline below mirrors the marveen-marketplace
-// `slack-channel@marveen-marketplace` plugin layout documented in
+// production provider). The cmdline below mirrors the wraith-marketplace
+// `slack-channel@wraith-marketplace` plugin layout documented in
 // scripts/channels.sh (PLUGIN_ID) -- adjust if the upstream slack plugin
 // ever ships under a different directory name.
 const SLACK_CHANNEL_CMD =
-  'node /home/user/.claude/plugins/marketplaces/marveen-marketplace/slack-channel/0.1.0/server.js'
+  'node /home/user/.claude/plugins/marketplaces/wraith-marketplace/slack-channel/0.1.0/server.js'
 const SLACK_BUN_CMD =
-  'bun run --cwd /home/user/.claude/plugins/cache/marveen-marketplace/slack-channel/0.1.0 --silent start'
+  'bun run --cwd /home/user/.claude/plugins/cache/wraith-marketplace/slack-channel/0.1.0 --silent start'
 const DISCORD_CACHE_CMD =
   'bun run --cwd /home/user/.claude/plugins/cache/claude-plugins-official/discord/0.0.4 --shell=bun --silent start'
 

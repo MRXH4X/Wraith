@@ -132,13 +132,13 @@ export const OWNER_NAME = env['OWNER_NAME'] ?? OWNER_NAME_PLACEHOLDER
 // install's generated agent CLAUDE.md); set OWNER_DRIVE_FOLDER in .env to wire
 // the default shared drive for this install.
 export const OWNER_DRIVE_FOLDER = env['OWNER_DRIVE_FOLDER'] ?? ''
-export const BOT_NAME = env['BOT_NAME'] ?? 'Marveen'
+export const BOT_NAME = env['BOT_NAME'] ?? 'Wraith'
 
 // Product / system brand shown in the dashboard chrome (browser tab title,
 // mobile topbar, sidebar, updates page). Kept SEPARATE from BOT_NAME so an
 // operator can name the product one thing (BRAND_NAME) and the main agent
 // another (BOT_NAME, the agent's display name). Defaults to BOT_NAME -- which
-// itself defaults to 'Marveen' -- so an install that sets neither, or only
+// itself defaults to 'Wraith' -- so an install that sets neither, or only
 // BOT_NAME, behaves exactly as before.
 export const BRAND_NAME = env['BRAND_NAME'] ?? BOT_NAME
 
@@ -181,7 +181,7 @@ export function resolveServiceId(brandSlug: string, mainAgentId: string): string
 // ASCII slug used for agent/service ids, mirroring the install scripts'
 // Python NFKD rule: NFKD-normalize, drop non-ASCII, collapse runs of non-
 // alphanumerics to a single dash, trim dashes, lowercase, and fall back to
-// 'marveen' when the result is empty. Exported so the launchd/systemd label
+// 'wraith' when the result is empty. Exported so the launchd/systemd label
 // derivation is provable for any brand string in one place.
 export function brandSlug(raw: string): string {
   const ascii = (raw ?? '')
@@ -190,14 +190,14 @@ export function brandSlug(raw: string): string {
     .replace(/[̀-ͯ]/g, '')
     .replace(/[^\x00-\x7f]/g, '')
   const slug = ascii.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase()
-  return slug || 'marveen'
+  return slug || 'wraith'
 }
 
 // Canonical identifier for the main agent in the DB, tmux sessions, plist
 // labels, API routing, etc. The installer derives this from BOT_NAME
 // (NFKD + ASCII + lowercase dashes). Older installs without this env var
-// fall back to "marveen" so nothing breaks when upgrading in place.
-export const MAIN_AGENT_ID = env['MAIN_AGENT_ID'] ?? 'marveen'
+// fall back to "wraith" so nothing breaks when upgrading in place.
+export const MAIN_AGENT_ID = env['MAIN_AGENT_ID'] ?? 'wraith'
 
 // Identifier the OS service manager uses for the main agent's units (launchd
 // label com.<id>.channels / com.<id>.dashboard, systemd <id>-channels, etc.).
@@ -264,7 +264,7 @@ export const KANBAN_AGING_CAUTION_COLOR = env['KANBAN_AGING_CAUTION_COLOR'] ?? '
 export const KANBAN_AGING_CRITICAL_COLOR = env['KANBAN_AGING_CRITICAL_COLOR'] ?? '#c53030'
 // Kanban WIP limits per column (0 = unlimited). Override via .env.
 // NOTE: these constants are frozen at process start (this module reads .env
-// once at import time). The dashboard's Settings page and the /api/marveen
+// once at import time). The dashboard's Settings page and the /api/wraith
 // kanbanWip payload do NOT read these directly anymore -- they resolve
 // through settings-store.ts (config-overrides.json > .env > registry
 // default) so a value saved in the UI takes effect without a restart. These

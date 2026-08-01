@@ -1,6 +1,6 @@
-# Marveen
+# Wraith
 
-![Marveen Banner](banner.png)
+![Wraith Banner](banner.png)
 
 [![Node.js](https://img.shields.io/badge/Node.js-20+-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
@@ -9,11 +9,11 @@
 [![Ollama](https://img.shields.io/badge/Ollama-nomic--embed-000000?logo=ollama&logoColor=white)](https://ollama.com/)
 [![Telegram](https://img.shields.io/badge/Telegram-Bot_API-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots)
 [![Slack](https://img.shields.io/badge/Slack-Socket_Mode-4A154B?logo=slack&logoColor=white)](https://api.slack.com/)
-[![GitHub stars](https://img.shields.io/github/stars/Szotasz/marveen?style=social)](https://github.com/Szotasz/marveen)
+[![GitHub stars](https://img.shields.io/github/stars/KZ5017/wraith?style=social)](https://github.com/KZ5017/wraith)
 
 > AI csapatod, ami fut amíg te alszol.
 
-Marveen egy AI asszisztens keretrendszer, ami Claude Code-ra épül. Saját AI csapatot építhetsz, akik Telegramon vagy Slacken kommunikálnak veled, önállóan dolgoznak, és egymással is együttműködnek.
+Wraith egy AI asszisztens keretrendszer, ami Claude Code-ra épül. Saját AI csapatot építhetsz, akik Telegramon vagy Slacken kommunikálnak veled, önállóan dolgoznak, és egymással is együttműködnek.
 
 ## Funkciók
 
@@ -72,8 +72,8 @@ Minden ágens saját, réteges memóriával rendelkezik (hot / warm / cold / sha
 
 ```bash
 cd ~
-git clone --branch main https://github.com/Szotasz/marveen.git
-cd marveen
+git clone --branch main https://github.com/KZ5017/wraith.git
+cd wraith
 ./install.sh
 ```
 
@@ -86,21 +86,21 @@ Alapértelmezés szerint a dashboard a 3420-as porton indul (`http://localhost:3
 ### Windows (WSL)
 
 ```powershell
-irm https://raw.githubusercontent.com/Szotasz/marveen/main/install-windows.ps1 | iex
+irm https://raw.githubusercontent.com/KZ5017/wraith/main/install-windows.ps1 | iex
 ```
 
 Vagy manuálisan:
 ```powershell
-git clone --branch main https://github.com/Szotasz/marveen.git
-cd marveen
+git clone --branch main https://github.com/KZ5017/wraith.git
+cd wraith
 .\install-windows.ps1
 ```
 
-A Windows telepítő automatikusan beállítja a WSL-t (Windows Subsystem for Linux) és azon belül telepíti a Marveen-t.
+A Windows telepítő automatikusan beállítja a WSL-t (Windows Subsystem for Linux) és azon belül telepíti a Wraith-t.
 
 > **Ha a PowerShell ablak bezárul / a telepítő nem jut túl a WSL+Ubuntu lépésen:** nyisd meg az Ubuntu-t (Start menü → Ubuntu), majd a WSL Ubuntu shellben futtasd közvetlenül a Linux-telepítőt (a PowerShell wrapper megkerülése):
 > ```bash
-> cd ~ && curl -fsSL https://raw.githubusercontent.com/Szotasz/marveen/main/install-linux.sh -o install.sh && bash install.sh
+> cd ~ && curl -fsSL https://raw.githubusercontent.com/KZ5017/wraith/main/install-linux.sh -o install.sh && bash install.sh
 > ```
 > Ez a megbízható út, ha a `wsl.exe`/Windows-claude környezet összeakad.
 
@@ -117,14 +117,14 @@ A platform szabadon márkázható telepítéskor. Két, egymástól **független
 
 | Beállítás | Mi ez | Default |
 |-----------|-------|---------|
-| `BOT_NAME` | A fő ágens megjelenített neve (pl. `MyAssistant`) | `Marveen` |
+| `BOT_NAME` | A fő ágens megjelenített neve (pl. `MyAssistant`) | `Wraith` |
 | `BRAND_NAME` | A termék / rendszer neve a dashboard fejlécében (böngésző-cím, oldalsáv, mobil topbar) | `BOT_NAME` |
 
-A telepítő mindkettőt megkérdezi. Ha csak Entert nyomsz, minden marad `Marveen` (a viselkedés változatlan a meglévő telepítésekhez képest). Ha külön márkanevet adsz meg, a teljes felület és az OS szolgáltatás-azonosítók is azzal jönnek létre:
+A telepítő mindkettőt megkérdezi. Ha csak Entert nyomsz, minden marad `Wraith` (a viselkedés változatlan a meglévő telepítésekhez képest). Ha külön márkanevet adsz meg, a teljes felület és az OS szolgáltatás-azonosítók is azzal jönnek létre:
 
 ```bash
 # Példa: az ágens neve "MyAssistant", a terméké "AcmeAI"
-#   Mi legyen a botod neve? [Marveen]: MyAssistant
+#   Mi legyen a botod neve? [Wraith]: MyAssistant
 #   Mi a termék/márka neve? [MyAssistant]: AcmeAI
 ```
 
@@ -149,7 +149,7 @@ Nyisd meg: http://localhost:3420
 A telepítés során választhatsz csatorna providert. Az alapértelmezett a Telegram.
 
 #### Telegram (alapértelmezett)
-Írj a botodnak Telegramon -- Marveen válaszol.
+Írj a botodnak Telegramon -- Wraith válaszol.
 
 #### Slack (alternatív)
 
@@ -216,40 +216,40 @@ A `monitor_agents.sh` script összefogja az összes futó ágens tmux session-j�
 ./scripts/monitor_agents.sh
 
 # Távolról (laptopról SSH-n, iTerm2-vel):
-ssh macmini -t "~/marveen/scripts/monitor_agents.sh"
+ssh macmini -t "~/wraith/scripts/monitor_agents.sh"
 
 # Ha új ágens indult és nem látod a monitorban -- kill + újraindítás:
 ssh macmini "/opt/homebrew/bin/tmux kill-session -t monitor" && \
-  ssh macmini -t "~/marveen/scripts/monitor_agents.sh"
+  ssh macmini -t "~/wraith/scripts/monitor_agents.sh"
 ```
 
-A script automatikusan felderíti a futó `agent-*` és `marveen-channels` session-öket. A monitor session törlése nem érinti az ágens session-öket -- csak a linked-window referenciákat szünteti meg.
+A script automatikusan felderíti a futó `agent-*` és `wraith-channels` session-öket. A monitor session törlése nem érinti az ágens session-öket -- csak a linked-window referenciákat szünteti meg.
 
 ### Remote access key enrollment
 
-A helper that lets an operator enroll a single device's SSH public key with a tightly restricted `authorized_keys` entry, then hands back a copyable connection bundle. Each device carries its own revocation id (`marveen-remote:<uuid>`) so access can be replaced or removed per device.
+A helper that lets an operator enroll a single device's SSH public key with a tightly restricted `authorized_keys` entry, then hands back a copyable connection bundle. Each device carries its own revocation id (`wraith-remote:<uuid>`) so access can be replaced or removed per device.
 
 Run it with the public key line as a single quoted argument:
 
 ```bash
-npm run remote-enroll -- "ssh-ed25519 <base64 key> marveen-remote:<uuid>"
+npm run remote-enroll -- "ssh-ed25519 <base64 key> wraith-remote:<uuid>"
 # optional flags:
-npm run remote-enroll -- --host 203.0.113.10 --port 2222 "ssh-ed25519 <base64 key> marveen-remote:<uuid>"
+npm run remote-enroll -- --host 203.0.113.10 --port 2222 "ssh-ed25519 <base64 key> wraith-remote:<uuid>"
 ```
 
-The public key line must be exactly three fields (type, key, comment) with no `authorized_keys` options and no extra fields. Only `ssh-ed25519` keys are accepted, and the comment must be `marveen-remote:<uuid>` (uuid v4).
+The public key line must be exactly three fields (type, key, comment) with no `authorized_keys` options and no extra fields. Only `ssh-ed25519` keys are accepted, and the comment must be `wraith-remote:<uuid>` (uuid v4).
 
 It appends (or replaces, when the same id is re-enrolled) this restricted line to the invoking user's `~/.ssh/authorized_keys`:
 
 ```
-restrict,port-forwarding,permitopen="127.0.0.1:3420",command="/bin/false" ssh-ed25519 <base64 key> marveen-remote:<uuid>
+restrict,port-forwarding,permitopen="127.0.0.1:3420",command="/bin/false" ssh-ed25519 <base64 key> wraith-remote:<uuid>
 ```
 
 `restrict` disables pty, agent, and X11 forwarding; the forced command is `/bin/false`; and the only endpoint the key may open is `127.0.0.1:3420`. The write is atomic (temp file plus rename) and guarded by an `authorized_keys.lock` file so concurrent runs cannot corrupt the list. `~/.ssh` is created 0700 and `authorized_keys` 0600 when missing; if either already exists with looser permissions the tool warns instead of changing them silently.
 
 After enrolling, it prints a base64 connection bundle between clearly marked delimiters. The bundle carries the host, SSH port and user, the fixed remote port (3420), the device id, the machine's `ssh-ed25519` host key, and -- by default -- the dashboard bearer token (`DASHBOARD_TOKEN` env or `store/.dashboard-token`), so the connecting app can authenticate against the dashboard without a separate step. A token-bearing bundle is a SECRET: hand it over on a private channel only, never by email or shared chat. Pass `--no-dashboard-token` to emit a token-free bundle (the device user must then obtain the dashboard access URL out of band). If no token can be found the tool warns and emits a token-free bundle. The host key is looked up in the known public-key locations (`/etc/ssh`, `/private/etc/ssh`, Homebrew and `/usr/local` prefixes) and, when none of those files exist -- as on stock macOS -- read from the running SSH server itself via `ssh-keyscan` on loopback. The connecting side requires the host key, so if it cannot be obtained from any source the tool exits with an error instead of printing an unusable bundle; start the SSH server (macOS: System Settings > General > Sharing > Remote Login) and re-run. When `--host` is not given, the tool prints a hint to verify the resolved address is the one the device will reach.
 
-To revoke a device, delete the line whose comment matches its id (`marveen-remote:<uuid>`) from `~/.ssh/authorized_keys`.
+To revoke a device, delete the line whose comment matches its id (`wraith-remote:<uuid>`) from `~/.ssh/authorized_keys`.
 
 ### Frissítés
 ```bash
@@ -274,8 +274,8 @@ claude setup-token
 # 2. A VPS-en:
 export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 cd ~
-git clone --branch main https://github.com/Szotasz/marveen.git
-cd marveen
+git clone --branch main https://github.com/KZ5017/wraith.git
+cd wraith
 ./install.sh    # automatikusan install-linux.sh-t futtat
 ```
 
@@ -303,16 +303,16 @@ Kérdésed van? Csatlakozz az AI a mindennapokban közösséghez:
 
 ## Támogasd a projektet
 
-Ha hasznos számodra a Marveen, támogasd a fejlesztést:
+Ha hasznos számodra a Wraith, támogasd a fejlesztést:
 
 [![Támogatás](https://img.shields.io/badge/Támogatás-Donably-orange)](https://www.donably.com/ai-a-mindennapokban-szabolccsal)
 
 ## Köszönet
 
-A Marveen több külső projektre és koncepcióra épít. A teljes felsorolás (forrás, szerző, licensz, hogyan használjuk) az [ATTRIBUTIONS.md](./ATTRIBUTIONS.md) fájlban található. Köszönet a Perplexity AI-nek (Bumblebee), Artem Zhutovnak (handoff / retrospective / skill-management skill suite), Mike Van Hornnak (printing-press), Andrej Karpathynak (CLAUDE.md pattern), és Matt Pococknak (handoff design tippek) a munkájukért.
+A Wraith több külső projektre és koncepcióra épít. A teljes felsorolás (forrás, szerző, licensz, hogyan használjuk) az [ATTRIBUTIONS.md](./ATTRIBUTIONS.md) fájlban található. Köszönet a Perplexity AI-nek (Bumblebee), Artem Zhutovnak (handoff / retrospective / skill-management skill suite), Mike Van Hornnak (printing-press), Andrej Karpathynak (CLAUDE.md pattern), és Matt Pococknak (handoff design tippek) a munkájukért.
 
 ## Készítette
 
 **Szota Szabolcs** -- AI konzultáns, az "AI a mindennapokban" csatorna készítője
 
-[![GitHub](https://img.shields.io/github/stars/Szotasz/marveen?style=social)](https://github.com/Szotasz/marveen)
+[![GitHub](https://img.shields.io/github/stars/KZ5017/wraith?style=social)](https://github.com/KZ5017/wraith)

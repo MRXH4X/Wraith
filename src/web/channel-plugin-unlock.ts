@@ -7,11 +7,11 @@
 // covers cold launches (launchd start, manual `launchctl kickstart`).
 //
 // What it does NOT cover: the in-process respawn-pane recovery paths in
-// channel-monitor.ts (resumeMarveenSession and respawnMarveenSessionFresh).
+// channel-monitor.ts (resumeWraithSession and respawnWraithSessionFresh).
 // Those call `tmux respawn-pane` directly with the claude command, completely
 // bypassing channels.sh - so the post-init unlock never runs. The
 // 2026-06-01 18:55 incident demonstrated this end-to-end: the keep-alive
-// staleness watchdog fired respawnMarveenSessionFresh at 18:55:09, the new
+// staleness watchdog fired respawnWraithSessionFresh at 18:55:09, the new
 // session came up cleanly, but the Telegram plugin landed in `◯ disabled`
 // (likely a side-effect of a prior unlock-while-already-running cycle
 // disabling it) and stayed there because no unlock probe was scheduled.
@@ -270,7 +270,7 @@ function runUnlockProbe(state: UnlockProbeState): void {
  * Schedule a post-respawn unlock probe for the main channels session.
  *
  * Call this fire-and-forget right after `tmux respawn-pane` in any in-process
- * recovery path (resumeMarveenSession, respawnMarveenSessionFresh, etc.).
+ * recovery path (resumeWraithSession, respawnWraithSessionFresh, etc.).
  * The probe waits for the new claude session to finish cold-starting, then
  * checks `pgrep -P <claude_pid> bun`:
  *   - bun child present: plugin healthy, do nothing.

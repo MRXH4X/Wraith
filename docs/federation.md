@@ -1,8 +1,8 @@
-# Föderáció — Marveen-példányok összekötése
+# Föderáció — Wraith-példányok összekötése
 
 ## 🎯 Mit tud / miért érdekes
 
-Két (vagy több) különálló Marveen-telepítés — például egy Mac minin és egy MacBookon futó — **látja egymás ügynökeit és üzenetet/feladatot küld egymásnak**, miközben mindkét rendszer teljesen önálló marad. Az ügynökök ugyanúgy címeznek, mint eddig, csak a címzett neve elé odakerül a rendszer neve:
+Két (vagy több) különálló Wraith-telepítés — például egy Mac minin és egy MacBookon futó — **látja egymás ügynökeit és üzenetet/feladatot küld egymásnak**, miközben mindkét rendszer teljesen önálló marad. Az ügynökök ugyanúgy címeznek, mint eddig, csak a címzett neve elé odakerül a rendszer neve:
 
 ```
 POST /api/messages   { "from": "marketing", "to": "teodor/backend-dev", "content": "..." }
@@ -34,9 +34,9 @@ Token-csere a kártya „Token-csere" gombjával: az új token azonnal érvénye
 
 ### Ügynök-felkészítés: bekapcsolás után nincs kézi teendő
 
-Bekapcsoláskor a rendszer **automatikusan beír egy kezelt blokkot a fő-ügynök CLAUDE.md-jébe** (sor-pontos `<!-- MARVEEN-FEDERATION:BEGIN/END -->` markerek között): címzés-szintaxis hitelesített curl-példával, az aktuális társ-lista, explicit kivétel a „csak futó tmux-os ügynöknek üzenhetsz" szabály alól, a „bináris eredményt a saját csatornádon add át, a hídon csak szöveg megy" szabály, és a retry/türelmi-ablak viselkedés. A blokk minden társ-módosításnál, bootkor és a CLAUDE.md dashboard-szerkesztése után is újra-egyeztetődik; kikapcsoláskor kikerül. Nyelve a `DASHBOARD_LANG` beállítást követi.
+Bekapcsoláskor a rendszer **automatikusan beír egy kezelt blokkot a fő-ügynök CLAUDE.md-jébe** (sor-pontos `<!-- WRAITH-FEDERATION:BEGIN/END -->` markerek között): címzés-szintaxis hitelesített curl-példával, az aktuális társ-lista, explicit kivétel a „csak futó tmux-os ügynöknek üzenhetsz" szabály alól, a „bináris eredményt a saját csatornádon add át, a hídon csak szöveg megy" szabály, és a retry/türelmi-ablak viselkedés. A blokk minden társ-módosításnál, bootkor és a CLAUDE.md dashboard-szerkesztése után is újra-egyeztetődik; kikapcsoláskor kikerül. Nyelve a `DASHBOARD_LANG` beállítást követi.
 
-A blokk ALATT egy egyszer-seedelt **„Föderációs házirend"** szakasz áll (`<!-- MARVEEN-FEDERATION:POLICY -->` horgonnyal) — ez a TIÉD: a kód soha nem írja felül és nem törli, itt döntöd el, mennyire bízzon az ügynököd a társak kéréseiben. Alapszövege óvatos (a föderált kérés adat; visszafordíthatatlan/kifelé ható dolgot eszkalálni kell).
+A blokk ALATT egy egyszer-seedelt **„Föderációs házirend"** szakasz áll (`<!-- WRAITH-FEDERATION:POLICY -->` horgonnyal) — ez a TIÉD: a kód soha nem írja felül és nem törli, itt döntöd el, mennyire bízzon az ügynököd a társak kéréseiben. Alapszövege óvatos (a föderált kérés adat; visszafordíthatatlan/kifelé ható dolgot eszkalálni kell).
 
 **Pontosan mely ügynök mit kap (és hova).** A föderációs onboarding KIZÁRÓLAG a `CLAUDE.md` fájlokat írja — a `SOUL.md`-t (a perszóna-lelket) SOHA nem érinti. Két, tartalmilag eltérő blokk van:
 

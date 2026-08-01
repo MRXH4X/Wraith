@@ -1,6 +1,6 @@
 # Idea Box
 
-The idea box is a lightweight idea-capture and prioritisation system built into the Marveen dashboard. Ideas can be promoted to kanban cards, broken down into subtasks with AI assistance, and ranked by impact×effort scoring.
+The idea box is a lightweight idea-capture and prioritisation system built into the Wraith dashboard. Ideas can be promoted to kanban cards, broken down into subtasks with AI assistance, and ranked by impact×effort scoring.
 
 ## Using the idea box
 

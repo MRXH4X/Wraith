@@ -32,14 +32,14 @@ GATE="$HERE/fleet-memory-gate.sh"
 # distribution rule); mirrors fleet-memory-gate.sh so the same agent is "core".
 INSTALL_DIR="$(cd "$HERE/.." && pwd)"
 _env_val() { [[ -f "$INSTALL_DIR/.env" ]] && grep -E "^$1=" "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r'; }
-MAIN_AGENT_ID="$(_env_val MAIN_AGENT_ID)"; MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"
-STORE="${MARVEEN_STORE:-$HOME/marveen/store}"
+MAIN_AGENT_ID="$(_env_val MAIN_AGENT_ID)"; MAIN_AGENT_ID="${MAIN_AGENT_ID:-wraith}"
+STORE="${WRAITH_STORE:-$HOME/wraith/store}"
 TOKEN_FILE="$STORE/.dashboard-token"
-DASH="${MARVEEN_DASHBOARD_URL:-http://localhost:3420}"
+DASH="${WRAITH_DASHBOARD_URL:-http://localhost:3420}"
 # Core = started first / never throttled. Defaults to THIS install's main agent
-# so the primary bot always comes up; override with MARVEEN_CORE_AGENTS.
-CORE_AGENTS="${MARVEEN_CORE_AGENTS:-$MAIN_AGENT_ID}"
-STAGGER_SEC="${MARVEEN_STAGGER_SEC:-20}"
+# so the primary bot always comes up; override with WRAITH_CORE_AGENTS.
+CORE_AGENTS="${WRAITH_CORE_AGENTS:-$MAIN_AGENT_ID}"
+STAGGER_SEC="${WRAITH_STAGGER_SEC:-20}"
 
 log() { echo "[fleet-safe-start] $*"; }
 

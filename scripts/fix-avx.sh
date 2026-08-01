@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command remediation for EXISTING Marveen installs on AVX-less x86 hosts.
+# One-command remediation for EXISTING Wraith installs on AVX-less x86 hosts.
 #
 # Older installers pinned claude to 2.0.76 (predates --channels, so the channel
 # bot could never boot) and left the auto-updater on (first run swaps the pinned
@@ -21,7 +21,7 @@ err()  { echo -e "  ${RED}✗${NC} $*"; }
 # Keep in sync with install-linux.sh CLAUDE_PIN.
 CLAUDE_PIN="2.1.110"
 
-echo -e "${BOLD}Marveen -- AVX-less host remediation (claude @${CLAUDE_PIN} + updater off)${NC}"
+echo -e "${BOLD}Wraith -- AVX-less host remediation (claude @${CLAUDE_PIN} + updater off)${NC}"
 echo ""
 
 # --- 1. AVX pre-flight (same detection as install-linux.sh) ---
@@ -82,8 +82,8 @@ fi
 # --- 5. Next steps ---
 echo ""
 echo -e "${BOLD}Kesz. Kovetkezo lepesek:${NC}"
-echo -e "  1. Marveen ujrainditasa, hogy az uj claude-ot es a kikapcsolt updatert felvegye:"
-echo -e "     ${DIM}systemd:${NC} systemctl --user restart marveen-channels 2>/dev/null || \\"
+echo -e "  1. Wraith ujrainditasa, hogy az uj claude-ot es a kikapcsolt updatert felvegye:"
+echo -e "     ${DIM}systemd:${NC} systemctl --user restart wraith-channels 2>/dev/null || \\"
 echo -e "     ${DIM}kezzel: ${NC} bash <install-dir>/scripts/channels.sh"
 echo -e "  2. Ha a verziovaltas miatt ujra be kell jelentkezni:"
 echo -e "     bash <install-dir>/scripts/auth.sh"

@@ -88,7 +88,7 @@ describe('renderFederationBlock', () => {
   it('renders English when DASHBOARD_LANG is en, without literal brand names', () => {
     const block = renderFederationBlock(cfg(), { ...ID, lang: 'en' })
     expect(block).toContain('USUAL message API')
-    expect(block).not.toContain('Marveen') // brand discipline: ids come from identity
+    expect(block).not.toContain('Wraith') // brand discipline: ids come from identity
   })
 })
 
@@ -179,7 +179,7 @@ describe('applyFederationBlock (line-exact surgery)', () => {
   it('removes the block (markers inclusive) on disable, leaving the persona intact', () => {
     const withBlock = applyFederationBlock(PERSONA, block)!
     const removed = applyFederationBlock(withBlock, null)!
-    expect(removed).not.toContain('MARVEEN-FEDERATION:BEGIN')
+    expect(removed).not.toContain('WRAITH-FEDERATION:BEGIN')
     expect(removed).toContain('Csak futó tmux-os ügynöknek üzenhetsz.')
     expect(removed).toContain('## Öntanulás és Skill rendszer')
   })

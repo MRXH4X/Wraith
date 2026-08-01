@@ -18,12 +18,12 @@ export const REMOTE_PORT = 3420
 export const ACCEPTED_KEY_TYPE = 'ssh-ed25519'
 
 /** Prefix that every per-device comment must carry. The full comment is
- * `marveen-remote:<uuid>`, where the uuid is the per-device revocation and
+ * `wraith-remote:<uuid>`, where the uuid is the per-device revocation and
  * replace identifier. */
-export const COMMENT_PREFIX = 'marveen-remote:'
+export const COMMENT_PREFIX = 'wraith-remote:'
 
 /** Bundle format tag, versioned so the consuming side can evolve safely. */
-export const BUNDLE_FORMAT = 'marveen-remote/1'
+export const BUNDLE_FORMAT = 'wraith-remote/1'
 
 /** Raised for any validation failure so the CLI can print a clear message
  * and exit non-zero without a stack trace. */
@@ -97,7 +97,7 @@ function validateEd25519Blob(base64: string): void {
 
 /**
  * Validate a single OpenSSH public key line of the exact shape
- *   ssh-ed25519 <base64 key> marveen-remote:<uuid>
+ *   ssh-ed25519 <base64 key> wraith-remote:<uuid>
  * The line must contain nothing else: no authorized_keys options, no extra
  * fields. Returns the parsed pieces or throws RemoteEnrollError.
  */
@@ -128,7 +128,7 @@ export function validatePublicKeyLine(rawLine: string): ParsedKey {
   }
   const installId = comment.slice(COMMENT_PREFIX.length)
   if (!UUID_V4.test(installId)) {
-    throw new RemoteEnrollError('comment must be marveen-remote:<uuid v4>')
+    throw new RemoteEnrollError('comment must be wraith-remote:<uuid v4>')
   }
   return { keyType: ACCEPTED_KEY_TYPE, base64, comment, installId }
 }
@@ -176,7 +176,7 @@ export interface MergeResult {
 
 /**
  * Merge a restricted line into existing authorized_keys content by install
- * id. If a line already carries the same `marveen-remote:<uuid>` comment it
+ * id. If a line already carries the same `wraith-remote:<uuid>` comment it
  * is replaced in place (re-enrollment); every other line is preserved
  * byte-for-byte. Otherwise the restricted line is appended. The result always
  * ends with a single trailing newline.
@@ -213,7 +213,7 @@ export interface RemoveResult {
 }
 
 /**
- * Remove the line carrying `marveen-remote:<installId>` from authorized_keys
+ * Remove the line carrying `wraith-remote:<installId>` from authorized_keys
  * content (the revoke counterpart of mergeAuthorizedKeys). Every other line is
  * preserved byte-for-byte. `removed:false` means no such line existed -- the
  * caller decides whether that is an error or an idempotent no-op. An empty

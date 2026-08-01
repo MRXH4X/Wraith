@@ -40,7 +40,7 @@ export interface DeviceKeyInfo {
   createdAt: number
   lastUsedAt: number | null
   expiresAt: number | null
-  /** SSH enrollment id (marveen-remote:<uuid>) for Bridge-paired keys; null
+  /** SSH enrollment id (wraith-remote:<uuid>) for Bridge-paired keys; null
    *  for keys minted outside the pairing flow. */
   installId: string | null
 }
@@ -144,7 +144,7 @@ export function getDeviceKey(id: number): DeviceKeyInfo | null {
 }
 
 /** Bridge re-pairing: find the key minted by a previous enrollment of the same
- *  device (same marveen-remote:<uuid>), so it can be replaced, not duplicated. */
+ *  device (same wraith-remote:<uuid>), so it can be replaced, not duplicated. */
 export function findDeviceKeyByInstallId(installId: string): DeviceKeyInfo | null {
   const row = getDb().prepare(`SELECT ${INFO_COLUMNS} FROM device_keys WHERE install_id = ?`).get(installId) as Parameters<typeof rowToInfo>[0] | undefined
   return row ? rowToInfo(row) : null

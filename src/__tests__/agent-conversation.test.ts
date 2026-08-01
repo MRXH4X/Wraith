@@ -18,8 +18,8 @@ beforeAll(() => {
 describe('getAgentConversation', () => {
   it('returns ONLY this agent\'s messages, newest-first', () => {
     const a = 'tconv-alpha'
-    createAgentMessage(a, 'marveen', 'a1')
-    createAgentMessage('marveen', a, 'a2')
+    createAgentMessage(a, 'wraith', 'a1')
+    createAgentMessage('wraith', a, 'a2')
     createAgentMessage('someone-else', 'third', 'noise') // must not leak in
     const conv = getAgentConversation(a, 50)
     expect(conv.length).toBe(2)
@@ -31,13 +31,13 @@ describe('getAgentConversation', () => {
 
   it('respects the limit', () => {
     const a = 'tconv-limit'
-    for (let i = 0; i < 5; i++) createAgentMessage(a, 'marveen', `m${i}`)
+    for (let i = 0; i < 5; i++) createAgentMessage(a, 'wraith', `m${i}`)
     expect(getAgentConversation(a, 3).length).toBe(3)
   })
 
   it('caps the limit at 200 and floors it at 1', () => {
     const a = 'tconv-cap'
-    createAgentMessage(a, 'marveen', 'x')
+    createAgentMessage(a, 'wraith', 'x')
     expect(getAgentConversation(a, 99999).length).toBeLessThanOrEqual(200)
     expect(getAgentConversation(a, 0).length).toBe(1) // floored to >=1, one row exists
   })
@@ -45,7 +45,7 @@ describe('getAgentConversation', () => {
   it('paginates older with beforeId (scroll-up)', () => {
     const a = 'tconv-page'
     const ids: number[] = []
-    for (let i = 0; i < 6; i++) ids.push(createAgentMessage(a, 'marveen', `p${i}`).id)
+    for (let i = 0; i < 6; i++) ids.push(createAgentMessage(a, 'wraith', `p${i}`).id)
     // newest-first page of 3 -> the 3 highest ids
     const page1 = getAgentConversation(a, 3)
     expect(page1.map(m => m.id)).toEqual([ids[5], ids[4], ids[3]])
@@ -60,9 +60,9 @@ describe('getAgentConversation', () => {
 describe('getAgentConversationThreads', () => {
   it('lists a peer with its count + most-recent message', () => {
     const a = 'tthread-peer'
-    createAgentMessage(a, 'marveen', 't1')
-    createAgentMessage('marveen', a, 't2')
-    const last = createAgentMessage(a, 'marveen', 't3-last')
+    createAgentMessage(a, 'wraith', 't1')
+    createAgentMessage('wraith', a, 't2')
+    const last = createAgentMessage(a, 'wraith', 't3-last')
     const threads = getAgentConversationThreads()
     const row = threads.find(t => t.agent === a)
     expect(row).toBeDefined()
@@ -90,8 +90,8 @@ describe('getAgentConversationThreads', () => {
   it('is sorted newest-first by last message', () => {
     const older = 'tthread-older'
     const newer = 'tthread-newer'
-    createAgentMessage(older, 'marveen', 'old')
-    createAgentMessage(newer, 'marveen', 'new')
+    createAgentMessage(older, 'wraith', 'old')
+    createAgentMessage(newer, 'wraith', 'new')
     const threads = getAgentConversationThreads()
     const iOlder = threads.findIndex(t => t.agent === older)
     const iNewer = threads.findIndex(t => t.agent === newer)

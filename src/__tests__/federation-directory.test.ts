@@ -70,7 +70,7 @@ describe('GET /api/federation/directory', () => {
   it('merges local agents (main first, fixed summary) with peer CLAIMS, and never leaks tokens', async () => {
     writeEnabledConfig()
     await pollPeerManifests(NOW, fetchReturning(200, {
-      system: 'teodor', marveenVersion: '1.19.0', federationVersion: 1,
+      system: 'teodor', wraithVersion: '1.19.0', federationVersion: 1,
       agents: [{ id: 'kutato', displayName: 'Kutato', model: 'm', capabilitySummary: 'Research and web synthesis.' }],
       skills: [{ agent: 'kutato', name: 'deep-research', description: 'multi-source research' }],
     }))

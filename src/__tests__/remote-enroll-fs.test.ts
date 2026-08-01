@@ -30,7 +30,7 @@ function ed25519Base64(keyByte = 0x42): string {
 
 const B64 = ed25519Base64()
 const RESTRICTED = buildRestrictedLine(
-  validatePublicKeyLine(`ssh-ed25519 ${B64} marveen-remote:${UUID}`),
+  validatePublicKeyLine(`ssh-ed25519 ${B64} wraith-remote:${UUID}`),
 )
 
 describe('enrollAuthorizedKey (filesystem)', () => {
@@ -68,7 +68,7 @@ describe('enrollAuthorizedKey (filesystem)', () => {
   it('replaces by id on re-enrollment', async () => {
     mkdirSync(sshDir, { mode: 0o700 })
     const authPath = join(sshDir, 'authorized_keys')
-    const stale = `restrict ssh-ed25519 OLDKEY marveen-remote:${UUID}`
+    const stale = `restrict ssh-ed25519 OLDKEY wraith-remote:${UUID}`
     writeFileSync(authPath, `ssh-rsa AAAA a@h\n${stale}\n`, { mode: 0o600 })
     const res = await enrollAuthorizedKey({ sshDir, restrictedLine: RESTRICTED, installId: UUID })
     expect(res.action).toBe('replaced')

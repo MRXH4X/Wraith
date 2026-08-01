@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 
 // Regression guard for #519/#520: the inter-agent Messages view must render the
 // main agent's BOT_NAME display name, never its internal routing id (mainAgentId(),
-// e.g. "marveen"). The original fix (PR #520) was later silently reverted by a
+// e.g. "wraith"). The original fix (PR #520) was later silently reverted by a
 // refactor, so the raw slug leaked back into four display points -- the thread
 // sidebar item, the thread header, the compose placeholder and the message-bubble
 // sender label. This test pins both the behaviour of the display-name helpers and
@@ -52,17 +52,17 @@ function loadHelpers(win: Record<string, unknown>, mainId: string) {
 }
 
 describe('Messages view maps the main agent id to BOT_NAME (regression #519/#520)', () => {
-  it('shows the BOT_NAME from /api/marveen for the main agent, not the routing id', () => {
-    const { chatDisplayName } = loadHelpers({ _marveen: { name: 'Nova' } }, 'nova')
+  it('shows the BOT_NAME from /api/wraith for the main agent, not the routing id', () => {
+    const { chatDisplayName } = loadHelpers({ _wraith: { name: 'Nova' } }, 'nova')
     expect(chatDisplayName('nova')).toBe('Nova')
   })
 
   it('passes every other agent id through unchanged (they already carry a human name)', () => {
-    const { chatDisplayName } = loadHelpers({ _marveen: { name: 'Nova' } }, 'nova')
+    const { chatDisplayName } = loadHelpers({ _wraith: { name: 'Nova' } }, 'nova')
     expect(chatDisplayName('ysahyarik')).toBe('ysahyarik')
   })
 
-  it('falls back to _brandTokens.bot when _marveen has not resolved yet', () => {
+  it('falls back to _brandTokens.bot when _wraith has not resolved yet', () => {
     const { chatDisplayName } = loadHelpers({ _brandTokens: { bot: 'Nova' } }, 'nova')
     expect(chatDisplayName('nova')).toBe('Nova')
   })
@@ -72,9 +72,9 @@ describe('Messages view maps the main agent id to BOT_NAME (regression #519/#520
     expect(chatDisplayName('nova')).toBe('nova')
   })
 
-  it('leaves a stock (unrenamed) install reading "Marveen", never the "marveen" slug', () => {
-    const { chatDisplayName } = loadHelpers({ _marveen: { name: 'Marveen' } }, 'marveen')
-    expect(chatDisplayName('marveen')).toBe('Marveen')
+  it('leaves a stock (unrenamed) install reading "Wraith", never the "wraith" slug', () => {
+    const { chatDisplayName } = loadHelpers({ _wraith: { name: 'Wraith' } }, 'wraith')
+    expect(chatDisplayName('wraith')).toBe('Wraith')
   })
 })
 

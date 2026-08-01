@@ -1,5 +1,5 @@
 #!/bin/bash
-# Marveen - AI Team Setup
+# Wraith - AI Team Setup
 # Interactive installer for Linux (Ubuntu/Debian)
 
 set -e
@@ -33,7 +33,7 @@ offer_claude_fallback() {
   fi
   echo ""
   echo -e "${ORANGE}Claude Code elerheto a gepen.${NC}"
-  local prompt="Marveen installer failed at step \"${step}\". Error: ${err_msg}. Script: install-linux.sh${line_info}. Repo: https://github.com/Szotasz/marveen. OS: $(lsb_release -ds 2>/dev/null || cat /etc/os-release 2>/dev/null | head -1 || echo Linux). Node: $(node -v 2>/dev/null || echo missing). Dir: ${INSTALL_DIR}. Your task: diagnose this Marveen installer failure. The install scripts are install.sh (macOS) and install-linux.sh. Read the relevant section, check for missing dependencies or permission issues, and suggest concrete shell commands to fix."
+  local prompt="Wraith installer failed at step \"${step}\". Error: ${err_msg}. Script: install-linux.sh${line_info}. Repo: https://github.com/KZ5017/wraith. OS: $(lsb_release -ds 2>/dev/null || cat /etc/os-release 2>/dev/null | head -1 || echo Linux). Node: $(node -v 2>/dev/null || echo missing). Dir: ${INSTALL_DIR}. Your task: diagnose this Wraith installer failure. The install scripts are install.sh (macOS) and install-linux.sh. Read the relevant section, check for missing dependencies or permission issues, and suggest concrete shell commands to fix."
   if [ -t 0 ]; then
     read -rp "$(_t prompt_open_claude)" OPEN_CLAUDE
     OPEN_CLAUDE=${OPEN_CLAUDE:-n}
@@ -132,8 +132,8 @@ WEB_PORT="${WEB_PORT:-3420}"
 
 clear
 echo ""
-echo -e "${BOLD}  ▐▛███▜▌   Marveen${NC}"
-if [[ "${MARVEEN_LANG:-hu}" == "en" ]]; then
+echo -e "${BOLD}  ▐▛███▜▌   Wraith${NC}"
+if [[ "${WRAITH_LANG:-hu}" == "en" ]]; then
   echo -e "${BOLD} ▝▜█████▛▘  Your AI team, running while you sleep.${NC}"
 else
   echo -e "${BOLD} ▝▜█████▛▘  $(_t tagline)${NC}"
@@ -156,8 +156,8 @@ case "$INSTALL_DIR" in
     echo -e "  A /mnt/ alatti mappakon a git es az npm jogosultsag-muveletei nem mukodnek (WSL/drvfs) -- a telepites itt elhalna."
     echo -e "  ${DIM}Kiut: klonozd a Linux home-ba, es onnan futtasd (masold az alabbi sorokat):${NC}"
     echo "    cd ~"
-    echo "    git clone --branch main https://github.com/Szotasz/marveen.git"
-    echo "    cd marveen && ./install.sh"
+    echo "    git clone --branch main https://github.com/KZ5017/wraith.git"
+    echo "    cd wraith && ./install.sh"
     exit 1
     ;;
 esac
@@ -390,7 +390,7 @@ ok "unzip" $(unzip -v | awk 'NR==1 {print $2}')
 # git itt mar garantaltan telepitve van (lasd fentebb a [1/7] lepest).
 if [ ! -f "$INSTALL_DIR/package.json" ]; then
   warn "A telepito a repon kivulrol fut (nincs package.json itt: $INSTALL_DIR)."
-  TARGET_DIR="$HOME/marveen"
+  TARGET_DIR="$HOME/wraith"
   if [ -f "$TARGET_DIR/package.json" ]; then
     ok "Meglevo checkout: $TARGET_DIR -- frissites..."
     git -C "$TARGET_DIR" pull --ff-only 2>/dev/null || warn "git pull kihagyva (helyi valtozasok lehetnek)."
@@ -398,8 +398,8 @@ if [ ! -f "$INSTALL_DIR/package.json" ]; then
     echo -e "  Repo klonozasa -> ${TARGET_DIR} ..."
     # A repo default branch-e a develop, de a publikus telepito main-rol fut
     # (a Windows/WSL wrapper is main-rol fetcheli a scriptet) -> pineljuk a main-t.
-    git clone --depth 1 --branch main https://github.com/Szotasz/marveen.git "$TARGET_DIR" \
-      || fail "git clone sikertelen: https://github.com/Szotasz/marveen.git (main branch)"
+    git clone --depth 1 --branch main https://github.com/KZ5017/wraith.git "$TARGET_DIR" \
+      || fail "git clone sikertelen: https://github.com/KZ5017/wraith.git (main branch)"
     ok "Repo klonozva: $TARGET_DIR"
   fi
   echo -e "  Telepito ujrainditasa a checkoutbol..."
@@ -499,14 +499,14 @@ fi
 # XDG_RUNTIME_DIR + DBUS: headless szerveren automatikusan beallitjuk
 # (detektalas: nincs DISPLAY es nincs WAYLAND_DISPLAY)
 if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-  XDG_BLOCK='# marveen-user-bus: XDG_RUNTIME_DIR + DBUS headless szerveren
+  XDG_BLOCK='# wraith-user-bus: XDG_RUNTIME_DIR + DBUS headless szerveren
 if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
   export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 fi
 if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -S "$XDG_RUNTIME_DIR/bus" ] && [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
   export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 fi'
-  ensure_block_in_rc 'marveen-user-bus' "$XDG_BLOCK"
+  ensure_block_in_rc 'wraith-user-bus' "$XDG_BLOCK"
   # Aktivaljuk az aktualis sessionban is
   if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
     export XDG_RUNTIME_DIR="/run/user/$(id -u)"
@@ -809,20 +809,20 @@ else
 fi
 
 read -rp "$(_t prompt_bot_name)" BOT_NAME
-BOT_NAME=${BOT_NAME:-"Marveen"}
+BOT_NAME=${BOT_NAME:-"Wraith"}
 
 # Derive the ASCII slug the backend uses everywhere (tmux sessions, systemd
 # unit labels, DB agent_id, API routing). NFKD + ASCII + lowercase dashes,
-# empty fallback to "marveen" so we never end up with a blank identifier.
+# empty fallback to "wraith" so we never end up with a blank identifier.
 MAIN_AGENT_ID=$(python3 - "$BOT_NAME" <<'PYEOF'
 import sys, unicodedata, re
 s = sys.argv[1].strip()
 s = unicodedata.normalize('NFKD', s).encode('ASCII', 'ignore').decode()
 s = re.sub(r'[^a-zA-Z0-9]+', '-', s).strip('-').lower()
-print(s or 'marveen')
+print(s or 'wraith')
 PYEOF
 )
-if [ "$MAIN_AGENT_ID" != "marveen" ]; then
+if [ "$MAIN_AGENT_ID" != "wraith" ]; then
   echo -e "  ${DIM}$(_t macos.agent_id_info)${MAIN_AGENT_ID}${NC}"
 fi
 
@@ -988,7 +988,7 @@ else
   # Probe the way a SERVICE will run: an isolated config dir (so ~/.claude and
   # the operator's shell exports cannot make a broken install look healthy)
   # carrying ONLY the credential the units will actually get.
-  _probe_cfg="$(mktemp -d 2>/dev/null || echo /tmp/marveen-authprobe.$$)"
+  _probe_cfg="$(mktemp -d 2>/dev/null || echo /tmp/wraith-authprobe.$$)"
   _probe_out=""
   _probe_rc=1
   if command -v claude >/dev/null 2>&1; then
@@ -1062,7 +1062,7 @@ fi
 
 # Default scheduled tasks scaffoldolasa ~/.claude/scheduled-tasks/ ala. A
 # template-ek {{MAIN_AGENT_ID}} placeholdert hasznalnak, igy a felhasznalo
-# valasztott agent slugja kerul be a hardcoded "marveen" helyett. Letezo task
+# valasztott agent slugja kerul be a hardcoded "wraith" helyett. Letezo task
 # konyvtarakat soha nem irjuk felul.
 SCHED_TPL_DIR="$INSTALL_DIR/templates/scheduled-tasks"
 SCHED_TARGET_DIR="$HOME/.claude/scheduled-tasks"
@@ -1213,8 +1213,8 @@ elif [ "$CHANNEL_PROVIDER" = "discord" ]; then
   PLUGIN_ID="discord@claude-plugins-official"
   PLUGIN_SHORT="discord"
 else
-  PLUGIN_MARKETPLACE="Szotasz/marveen-marketplace"
-  PLUGIN_ID="slack-channel@marveen-marketplace"
+  PLUGIN_MARKETPLACE="KZ5017/wraith-marketplace"
+  PLUGIN_ID="slack-channel@wraith-marketplace"
   PLUGIN_SHORT="slack-channel"
 fi
 
@@ -1238,7 +1238,7 @@ fi
 
 # Enable plugin at project scope so --channels can boot-time activate it
 cd "$INSTALL_DIR"
-if claude plugin enable "$PLUGIN_SHORT@marveen-marketplace" --scope project 2>/dev/null || \
+if claude plugin enable "$PLUGIN_SHORT@wraith-marketplace" --scope project 2>/dev/null || \
    claude plugin enable "$PLUGIN_ID" --scope project 2>/dev/null; then
   ok "${CHANNEL_PROVIDER} plugin project-scope-ban engedelyezve"
 else
@@ -1603,7 +1603,7 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# marveen-host-watchdog.service -- host/WSL-VM restart detector (btime-based).
+# wraith-host-watchdog.service -- host/WSL-VM restart detector (btime-based).
 # Distinguishes a whole-VM restart (all units down at once, NOT an app crash)
 # from a service crash, and Telegrams it. See scripts/host-restart-watchdog.sh.
 cat >"$SYSTEMD_DIR/${SERVICE_ID}-host-watchdog.service" <<EOF
@@ -1615,7 +1615,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=$INSTALL_DIR/scripts/host-restart-watchdog.sh
-Environment=MARVEEN_STORE=$INSTALL_DIR/store
+Environment=WRAITH_STORE=$INSTALL_DIR/store
 Environment=TELEGRAM_ENV=$HOME/.claude/channels/telegram/.env
 Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
@@ -1627,7 +1627,7 @@ StandardError=journal
 WantedBy=default.target
 EOF
 
-# marveen-notify@.service -- templated app-crash notifier, fired by OnFailure=
+# wraith-notify@.service -- templated app-crash notifier, fired by OnFailure=
 # drop-ins on the dashboard/channels units. OnFailure => app crash (vs the
 # host-watchdog's btime-change => host restart).
 cat >"$SYSTEMD_DIR/${SERVICE_ID}-notify@.service" <<EOF

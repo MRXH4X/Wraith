@@ -26,7 +26,7 @@ describe('costops API (route smoke)', () => {
     // seed a current-month token_usage row -> proves volume is reported but NOT priced
     const now = Math.floor(Date.now() / 1000)
     const w = monthWindow(now)
-    getDb().prepare("INSERT INTO token_usage (agent,session_id,timestamp,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens) VALUES ('marveen','s',?,1234,5678,0,0)").run(w.start + 100)
+    getDb().prepare("INSERT INTO token_usage (agent,session_id,timestamp,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens) VALUES ('wraith','s',?,1234,5678,0,0)").run(w.start + 100)
 
     const { ctx, out } = fakeCtx('/api/costs/summary')
     const handled = await tryHandleCosts(ctx)

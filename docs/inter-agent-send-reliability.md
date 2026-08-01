@@ -25,7 +25,7 @@ with HTTP 200). Verify the HTTP status **and** the returned id, and resend if mi
 - `scripts/agent-msg.sh <from> <to> "<content>"` — builds the JSON body with `json.dumps` (no quoting
   pitfalls), checks HTTP status + `id`, retries up to 3×, logs failures to `store/agent-msg-failures.log`.
   Large/multi-line content may come from STDIN with a `-` third arg. Base dir is auto-detected, port from
-  `MARVEEN_WEB_PORT` (default 3420), so it runs from any CWD / any install.
+  `WRAITH_WEB_PORT` (default 3420), so it runs from any CWD / any install.
 - The generated agent `CLAUDE.md` (from `templates/CLAUDE.md.template`) now documents this rule and points
   at the helper, so every agent in every fleet verifies its sends by default.
 

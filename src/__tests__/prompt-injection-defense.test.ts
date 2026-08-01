@@ -106,7 +106,7 @@ describe('isEgressBlocked', () => {
     expect(isEgressBlocked('WebFetch', { url: 'http://127.0.0.1:11434/api/chat' })).toBe(false)
   })
 
-  it('allows Marveen dashboard (local)', () => {
+  it('allows Wraith dashboard (local)', () => {
     expect(isEgressBlocked('WebFetch', { url: 'http://localhost:3420/api/messages' })).toBe(false)
   })
 

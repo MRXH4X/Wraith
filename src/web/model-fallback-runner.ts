@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
-import { hardRestartMarveenChannels } from './channel-monitor.js'
+import { hardRestartWraithChannels } from './channel-monitor.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import {
   listAgentNames,
@@ -81,10 +81,10 @@ function restartFor(name: string): void {
     //
     // Was a hardcoded `/bin/launchctl kickstart` (macOS-only), so on Linux the
     // usage-limit fallback could never actually swap main's model: it threw
-    // ENOENT into the caller's catch. hardRestartMarveenChannels() keeps the
+    // ENOENT into the caller's catch. hardRestartWraithChannels() keeps the
     // launchd path for macOS installs and its Linux respawn-pane path re-reads
     // settings.json the same way.
-    const res = hardRestartMarveenChannels()
+    const res = hardRestartWraithChannels()
     if (!res.ok) throw new Error(res.error ?? 'main channels hard restart failed')
   } else {
     // 'continue' (fresh: false) re-spawns with --continue so the conversation

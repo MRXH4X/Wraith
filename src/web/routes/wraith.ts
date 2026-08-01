@@ -6,8 +6,8 @@ import {
   KANBAN_LABEL_COLORS,
 } from '../../config.js'
 import { getEffectiveSettingValue } from '../../settings-store.js'
-import { readMarveenTelegramConfig, readMarveenDiscordConfig, readMarveenSlackConfig, readMarveenGooglechatConfig, readMarveenTeamsConfig, sendMarveenAvatarChange } from '../telegram.js'
-import { hardRestartMarveenChannels } from '../channel-monitor.js'
+import { readWraithTelegramConfig, readWraithDiscordConfig, readWraithSlackConfig, readWraithGooglechatConfig, readWraithTeamsConfig, sendWraithAvatarChange } from '../telegram.js'
+import { hardRestartWraithChannels } from '../channel-monitor.js'
 import { readFileOr } from '../agent-config.js'
 import { parseMultipart } from '../multipart.js'
 import { readBody, json, serveFile } from '../http-helpers.js'
@@ -16,26 +16,26 @@ import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '
 import { readAutoRestartConfig } from '../auto-restart-store.js'
 import type { RouteContext } from './types.js'
 
-function getActiveMarveenModel(): string {
+function getActiveWraithModel(): string {
   return readActiveModelFromProjectDir(PROJECT_ROOT) ?? 'unknown'
 }
 
-// Pure identity-core of the /api/marveen payload: the brand-relevant fields the
+// Pure identity-core of the /api/wraith payload: the brand-relevant fields the
 // dashboard chrome + agent routing depend on. Extracted so the mapping (display
 // name -> name, product brand -> brandName, canonical id -> agentId) is provable
 // for any non-default identity, independent of the route's file I/O.
-export interface MarveenIdentityCore {
+export interface WraithIdentityCore {
   name: string
   brandName: string
   agentId: string
   autoRestartId: string
   role: 'main'
 }
-export function buildMarveenIdentityCore(
+export function buildWraithIdentityCore(
   botName: string,
   brandName: string,
   mainAgentId: string,
-): MarveenIdentityCore {
+): WraithIdentityCore {
   return {
     name: botName,
     brandName,
@@ -45,10 +45,10 @@ export function buildMarveenIdentityCore(
   }
 }
 
-export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promise<boolean> {
+export async function tryHandleWraith(ctx: RouteContext, webDir: string): Promise<boolean> {
   const { req, res, path, method } = ctx
 
-  if (path === '/api/marveen' && method === 'GET') {
+  if (path === '/api/wraith' && method === 'GET') {
     const claudeMd = readFileOr(join(PROJECT_ROOT, 'CLAUDE.md'), '')
     const soulMd = readFileOr(join(PROJECT_ROOT, 'SOUL.md'), '')
     const mcpJson = readFileOr(join(PROJECT_ROOT, '.mcp.json'), '')
@@ -58,17 +58,17 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
     const firstLine = claudeMd.match(/^Te .+$/m)?.[0]?.trim() || ''
     const descFromPersonality = soulSection.split('\n').filter(l => l.trim()).slice(0, 2).join(' ').slice(0, 200)
     const description = firstLine || descFromPersonality || `${currentOwnerName()} AI asszisztense`
-    const tg = readMarveenTelegramConfig()
-    const dc = readMarveenDiscordConfig()
-    const sl = readMarveenSlackConfig()
-    const gc = readMarveenGooglechatConfig()
-    const tc = readMarveenTeamsConfig()
+    const tg = readWraithTelegramConfig()
+    const dc = readWraithDiscordConfig()
+    const sl = readWraithSlackConfig()
+    const gc = readWraithGooglechatConfig()
+    const tc = readWraithTeamsConfig()
     // Brand-relevant identity core. `name` = main agent display name (BOT_NAME),
     // `brandName` = product brand for the dashboard chrome (defaults to BOT_NAME;
-    // the client falls back to its own HTML default "Marveen" if absent on a
+    // the client falls back to its own HTML default "Wraith" if absent on a
     // legacy backend), `agentId` = canonical MAIN_AGENT_ID so the dashboard can
     // hit /api/agents/<id>/skills for the main agent.
-    const idCore = buildMarveenIdentityCore(currentBotName(), currentBrandName(), MAIN_AGENT_ID)
+    const idCore = buildWraithIdentityCore(currentBotName(), currentBrandName(), MAIN_AGENT_ID)
     json(res, {
       ...idCore,
       // Configured owner display name (OWNER_NAME). The dashboard chat view uses
@@ -76,7 +76,7 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
       // literal, so a renamed install recognizes its real owner.
       ownerName: currentOwnerName(),
       description,
-      model: getActiveMarveenModel(),
+      model: getActiveWraithModel(),
       tmuxSession: MAIN_CHANNELS_SESSION,
       running: true,
       // Auto-restart applies to the main channels session too; key it by the
@@ -137,29 +137,29 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
     return true
   }
 
-  // Intentionally read-only: Marveen's CLAUDE.md / SOUL.md / .mcp.json must be
-  // edited from the filesystem or via a Telegram request to Marveen herself,
+  // Intentionally read-only: Wraith's CLAUDE.md / SOUL.md / .mcp.json must be
+  // edited from the filesystem or via a Telegram request to Wraith herself,
   // not through the dashboard. A leaked dashboard token would otherwise allow
   // remote identity rewrite of the live agent.
-  if (path === '/api/marveen' && method === 'PUT') {
+  if (path === '/api/wraith' && method === 'PUT') {
     json(res, { ok: true, readonly: true })
     return true
   }
 
-  if (path === '/api/marveen/restart' && method === 'POST') {
-    const result = hardRestartMarveenChannels()
+  if (path === '/api/wraith/restart' && method === 'POST') {
+    const result = hardRestartWraithChannels()
     if (!result.ok) { json(res, { error: result.error || 'Restart failed' }, 500); return true }
     json(res, { ok: true })
     return true
   }
 
-  if (path === '/api/marveen/avatar' && method === 'GET') {
+  if (path === '/api/wraith/avatar' && method === 'GET') {
     // Avatars are ~1MB each and rarely change: let browsers reuse them for an
     // hour without a round-trip (an avatar swapped in another session shows up
     // after at most 1h, then ETag revalidation; the swapping session itself
     // busts via the frontend avatar epoch).
     for (const ext of ['.png', '.jpg', '.jpeg', '.webp']) {
-      const p = join(PROJECT_ROOT, 'store', `marveen-avatar${ext}`)
+      const p = join(PROJECT_ROOT, 'store', `wraith-avatar${ext}`)
       if (existsSync(p)) { serveFile(req, res, p, { cacheSeconds: 3600 }); return true }
     }
     const fallback = join(webDir, 'avatars', '01_robot.png')
@@ -168,12 +168,12 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
     return true
   }
 
-  if (path === '/api/marveen/avatar' && method === 'POST') {
+  if (path === '/api/wraith/avatar' && method === 'POST') {
     const body = await readBody(req)
     const contentType = req.headers['content-type'] || ''
 
     for (const ext of ['.png', '.jpg', '.jpeg', '.webp']) {
-      const p = join(PROJECT_ROOT, 'store', `marveen-avatar${ext}`)
+      const p = join(PROJECT_ROOT, 'store', `wraith-avatar${ext}`)
       if (existsSync(p)) unlinkSync(p)
     }
 
@@ -186,15 +186,15 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
       }
       const srcPath = join(webDir, 'avatars', galleryAvatar)
       if (!existsSync(srcPath)) { json(res, { error: 'Avatar not found' }, 404); return true }
-      const destPath = join(PROJECT_ROOT, 'store', `marveen-avatar${extname(galleryAvatar) || '.png'}`)
+      const destPath = join(PROJECT_ROOT, 'store', `wraith-avatar${extname(galleryAvatar) || '.png'}`)
       copyFileSync(srcPath, destPath)
-      sendMarveenAvatarChange(destPath).catch(() => {})
+      sendWraithAvatarChange(destPath).catch(() => {})
     } else {
       const { file } = parseMultipart(body, contentType)
       if (!file) { json(res, { error: 'No file uploaded' }, 400); return true }
-      const destPath = join(PROJECT_ROOT, 'store', `marveen-avatar${extname(file.name) || '.png'}`)
+      const destPath = join(PROJECT_ROOT, 'store', `wraith-avatar${extname(file.name) || '.png'}`)
       writeFileSync(destPath, file.data)
-      sendMarveenAvatarChange(destPath).catch(() => {})
+      sendWraithAvatarChange(destPath).catch(() => {})
     }
     json(res, { ok: true })
     return true

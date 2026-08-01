@@ -75,7 +75,7 @@ export function isWorktreeRoot(
 // Temp-dir prefixes that mark a checkout as transient. A plain `git clone` under
 // a temp dir (NOT a git worktree, so isWorktreeRoot misses it) is exactly the
 // canary / second-instance case: 2026-07-13 a develop canary started from
-// /private/tmp/marveen-work registered hooks into the USER-GLOBAL settings.json
+// /private/tmp/wraith-work registered hooks into the USER-GLOBAL settings.json
 // with /tmp-rooted paths -- the same deaf-agent trap isWorktreeRoot was added to
 // prevent, one class wider. A real install never runs from a temp dir, so
 // skipping here can never suppress a legitimate owner's registration.

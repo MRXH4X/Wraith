@@ -7,7 +7,7 @@ import { parsePollerPidsFromPs, findOrphanChannelClaudes, type ProcRow } from '.
 // bun poller and only when the state dir matches.
 const PS_SAMPLE = [
   '  90798 s000  S+     0:00.01 bun run --cwd /Users/x/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6 --silent start HOME=/Users/x PATH=/opt/homebrew/bin TELEGRAM_STATE_DIR=/Users/x/ClaudeClaw/agents/samu/.claude/channels/telegram CLAUDE_CODE_SESSION_ID=abc',
-  '  90799 s000  S+     0:00.15 node /Users/x/.claude/plugins/cache/marveen-marketplace/slack-channel/0.1.0/server.ts HOME=/Users/x SLACK_STATE_DIR=/Users/x/ClaudeClaw/agents/samu/.claude/channels/slack',
+  '  90799 s000  S+     0:00.15 node /Users/x/.claude/plugins/cache/wraith-marketplace/slack-channel/0.1.0/server.ts HOME=/Users/x SLACK_STATE_DIR=/Users/x/ClaudeClaw/agents/samu/.claude/channels/slack',
   '  90800 s000  S+     0:00.05 bun run --cwd /Users/x/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6 --silent start HOME=/Users/x TELEGRAM_STATE_DIR=/Users/x/ClaudeClaw/agents/boni/.claude/channels/telegram',
   '   1234 s000  Ss     0:00.00 /bin/zsh HOME=/Users/x SHELL=/bin/zsh',
 ].join('\n')
@@ -89,14 +89,14 @@ describe('parsePollerPidsFromPs', () => {
 })
 
 // Rows modeled on the live 2026-06-03 incident snapshot. The tmux SERVER pid
-// is 35874; the live marveen-channels pane leader is the claude at 76621
+// is 35874; the live wraith-channels pane leader is the claude at 76621
 // (claudePid == panePid for the main session). 57158 + the 70xxx claudes are
 // detached --continue leftovers reparented to the tmux server (ppid 35874).
 // A live sub-agent is modeled as a pane shell (77189) with a claude child.
 const CLAUDE = '/opt/homebrew/bin/claude'
 const PROCS: ProcRow[] = [
   // tmux server: argv EMBEDS the claude --channels string -> must NOT match.
-  { pid: 35874, ppid: 1, command: '/opt/homebrew/bin/tmux new-session -d -s marveen-channels -c /Users/x/ClaudeClaw /opt/homebrew/bin/claude --dangerously-skip-permissions --channels plugin:telegram@claude-plugins-official' },
+  { pid: 35874, ppid: 1, command: '/opt/homebrew/bin/tmux new-session -d -s wraith-channels -c /Users/x/ClaudeClaw /opt/homebrew/bin/claude --dangerously-skip-permissions --channels plugin:telegram@claude-plugins-official' },
   // live main session: claude is the pane leader (pid == panePid 76621).
   { pid: 76621, ppid: 35874, command: `${CLAUDE} --dangerously-skip-permissions --model claude-opus-4-8[1m] --channels plugin:telegram@claude-plugins-official` },
   // live sub-agent: pane leader is the shell (77189), claude is its child.
@@ -135,7 +135,7 @@ describe('findOrphanChannelClaudes', () => {
   it('honors a channelNeedle filter (only telegram orphans, not slack)', () => {
     const withSlack: ProcRow[] = [
       ...PROCS,
-      { pid: 71000, ppid: 35874, command: `${CLAUDE} --continue --channels plugin:slack-channel@marveen-marketplace` },
+      { pid: 71000, ppid: 35874, command: `${CLAUDE} --continue --channels plugin:slack-channel@wraith-marketplace` },
     ]
     const tg = findOrphanChannelClaudes(withSlack, LIVE_PANES, 'plugin:telegram@claude-plugins-official')
     expect(tg).not.toContain(71000)

@@ -1,5 +1,5 @@
 [Unit]
-Description=Run the Marveen stuck-modal guard every minute
+Description=Run the Wraith stuck-modal guard every minute
 
 [Timer]
 OnBootSec=150s

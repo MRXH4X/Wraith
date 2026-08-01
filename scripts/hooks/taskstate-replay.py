@@ -63,7 +63,7 @@ def _main_agent_id():
                     return line.split("=", 1)[1].strip().strip('"')
     except Exception:
         pass
-    return "marveen"
+    return "wraith"
 
 
 def _agent_id_from_cwd(cwd):

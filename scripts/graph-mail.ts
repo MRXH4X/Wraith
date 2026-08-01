@@ -6,8 +6,8 @@
 //   tsx scripts/graph-mail.ts list [--unread] [--top N] [--folder inbox|sentitems]
 //   tsx scripts/graph-mail.ts send --to a@b.hu[,c@d.hu] --subject "..." --body "..." [--cc ...] [--html]
 //
-// Credentials come from the gitignored marveen-mail-ugyfelkod file (override
-// with MARVEEN_MAIL_CREDS). Send is intentionally CLI-explicit; the sub-agent
+// Credentials come from the gitignored wraith-mail-ugyfelkod file (override
+// with WRAITH_MAIL_CREDS). Send is intentionally CLI-explicit; the sub-agent
 // email-send-gate hook still applies to any programmatic use elsewhere.
 
 import { listMessages, sendMail, verifyAccess } from '../src/graph-mail.js'

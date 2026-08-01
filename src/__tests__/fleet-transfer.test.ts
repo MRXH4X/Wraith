@@ -88,9 +88,9 @@ vi.mock('../web/scheduled-tasks-io.js', () => ({
 vi.mock('../config.js', () => ({
   PROJECT_ROOT: '/mock/project',
   STORE_DIR: '/mock/store',
-  MAIN_AGENT_ID: 'marveen',
-  BOT_NAME: 'Marveen',
-  BRAND_NAME: 'Marveen',
+  MAIN_AGENT_ID: 'wraith',
+  BOT_NAME: 'Wraith',
+  BRAND_NAME: 'Wraith',
   OWNER_NAME: 'Szabolcs',
   CHANNEL_PROVIDER: 'telegram',
 }))
@@ -321,7 +321,7 @@ describe('importFleet: identity takeover', () => {
   })
 
   it('dry-run counts both atlas and hestia memories (no remap dedup)', async () => {
-    // If remap were active (atlas -> marveen), duplicate dedup could collapse rows.
+    // If remap were active (atlas -> wraith), duplicate dedup could collapse rows.
     // With original agent_ids preserved, all 2 memories count as new.
     const { importFleet } = await import('../web/fleet-transfer.js')
     const result = importFleet(FLEET_WITH_SOURCE_ID, { apply: false })

@@ -62,7 +62,7 @@ const SHUTDOWN_HARD_KILL_MS = 5000
 const DASHBOARD_BINARY_PATTERN = /(?:^|[\s/])(?:dist\/index\.js|src\/index\.ts)(?:\s|$)/
 
 // Own-install affinity guard for the takeover kill. The binary pattern alone
-// matches ANY Marveen dashboard argv of the same UID -- including a SECOND
+// matches ANY Wraith dashboard argv of the same UID -- including a SECOND
 // install's live process (federation makes multi-install machines a supported
 // reality, and dev/test copies always existed). Only processes that belong to
 // THIS install may be taken over: an absolute argv must contain PROJECT_ROOT,
@@ -85,7 +85,7 @@ function processCwd(pid: number): string | null {
 }
 
 function argvBelongsToThisInstall(argv: string, pid: number): boolean {
-  // Boundary-suffixed so /path/marveen never matches /path/marveen2.
+  // Boundary-suffixed so /path/wraith never matches /path/wraith2.
   if (argv.includes(PROJECT_ROOT + '/')) return true
   const cwd = processCwd(pid)
   return cwd !== null && (cwd === PROJECT_ROOT || cwd.startsWith(PROJECT_ROOT + '/'))
@@ -475,7 +475,7 @@ async function main(): Promise<void> {
   // Heartbeat -- 2026-06-02 architecture switch: the dedicated channel-less
   // `heartbeat` sub-agent now handles the hourly summary via the scheduled-
   // task runner. The legacy native scheduler (initHeartbeat) was the source
-  // of the Marveen self-poll loop that caused channel-disconnect every fire
+  // of the Wraith self-poll loop that caused channel-disconnect every fire
   // (see commit history #237/#250/#252/#253/#255 for the abandoned
   // isolation-chain attempt). We keep the native module imported so other
   // code paths that reference its exports still compile, but we do NOT
@@ -542,7 +542,7 @@ async function main(): Promise<void> {
   // Web dashboard
   webServer = startWebServer(WEB_PORT)
 
-  logger.info(`Marveen fut! Dashboard: http://localhost:${WEB_PORT}`)
+  logger.info(`Wraith fut! Dashboard: http://localhost:${WEB_PORT}`)
   logger.info('Telegram kommunikacio: Claude Code Channels kezeli')
 }
 

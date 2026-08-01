@@ -88,4 +88,4 @@ mail_rules.example.json  # copy to mail_rules.json (gitignored) with real values
 - `mail_rules.json` (your real senders) must be gitignored (see `.gitignore`).
 
 ## License
-MIT, consistent with the parent project (ClaudeClaw / marveen).
+MIT, consistent with the parent project (ClaudeClaw / wraith).

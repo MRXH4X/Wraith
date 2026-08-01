@@ -1,7 +1,7 @@
 #!/bin/bash
 # install-channel-coordinator.sh
 #
-# Installs the marveen-channel-coordinator launchd unit (macOS). The coordinator
+# Installs the wraith-channel-coordinator launchd unit (macOS). The coordinator
 # is a SILENT BACKFILL safety-net: the native plugin stays the primary inbound
 # path and the coordinator only polls while the native is down, so installing +
 # loading it is safe alongside the running native channel (no outbound-only
@@ -11,7 +11,7 @@
 #   1. Verify the build artifact (dist/channel-coordinator.js) exists.
 #   2. Provision the coordinator STATE_DIR (~/.claude/channels/telegram-coordinator)
 #      and copy the bot token into its 0600 .env (NOT exported to any shell env).
-#   3. Write ~/Library/LaunchAgents/com.marveen.channel-coordinator.plist.
+#   3. Write ~/Library/LaunchAgents/com.wraith.channel-coordinator.plist.
 #   4. With --load: launchctl load the unit (starts the backfill watcher in idle).
 #      Without --load: install only.
 #
@@ -23,7 +23,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-LABEL="com.marveen.channel-coordinator"
+LABEL="com.wraith.channel-coordinator"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 COORD_STATE_DIR="$HOME/.claude/channels/telegram-coordinator"
 DIST_ENTRY="$PROJECT_DIR/dist/channel-coordinator.js"
@@ -61,7 +61,7 @@ else
   echo "Coordinator .env already present, leaving as-is: $COORD_STATE_DIR/.env"
 fi
 
-# 3. launchd plist (env block mirrors com.marveen.channels.plist)
+# 3. launchd plist (env block mirrors com.wraith.channels.plist)
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>

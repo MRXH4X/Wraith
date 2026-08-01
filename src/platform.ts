@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 export type PlatformType = 'macos' | 'linux-server' | 'linux-gui'
 
 function detect(): PlatformType {
-  const override = process.env['MARVEEN_ENV']
+  const override = process.env['WRAITH_ENV']
   if (override === 'macos' || override === 'linux-server' || override === 'linux-gui') return override
   if (process.platform === 'darwin') return 'macos'
   if (process.platform === 'linux') {

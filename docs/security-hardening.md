@@ -1,6 +1,6 @@
 # Git force-push guard
 
-Marveen agents run autonomously, often with shell access and the ability to push
+Wraith agents run autonomously, often with shell access and the ability to push
 to git, so a prompt-injected or simply mistaken agent can rewrite shared history.
 This guard reduces that blast radius without changing how the fleet works.
 

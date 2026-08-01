@@ -9,7 +9,7 @@ describe('parseCredentials', () => {
     'TENANT_ID=3a682944-ae23-4489-b5ad-d2c7840c9458',
     'CLIENT_ID=db39e644-2a24-4fc6-9690-5f75f7e6ed02',
     'CLIENT_SECRET=xy~8Q~secretvalue',
-    'MAILBOX=marveen@pecibt.hu',
+    'MAILBOX=wraith@pecibt.hu',
   ].join('\n')
 
   it('parses a well-formed credentials file', () => {
@@ -17,12 +17,12 @@ describe('parseCredentials', () => {
     expect(c.tenantId).toBe('3a682944-ae23-4489-b5ad-d2c7840c9458')
     expect(c.clientId).toBe('db39e644-2a24-4fc6-9690-5f75f7e6ed02')
     expect(c.clientSecret).toBe('xy~8Q~secretvalue')
-    expect(c.mailbox).toBe('marveen@pecibt.hu')
+    expect(c.mailbox).toBe('wraith@pecibt.hu')
   })
 
   it('ignores comments and blank lines', () => {
     const c = parseCredentials(`# header comment\n\n${full}\n# trailing`)
-    expect(c.mailbox).toBe('marveen@pecibt.hu')
+    expect(c.mailbox).toBe('wraith@pecibt.hu')
   })
 
   it('strips surrounding quotes from values', () => {
@@ -36,7 +36,7 @@ describe('parseCredentials', () => {
   })
 
   it('throws listing every missing key', () => {
-    expect(() => parseCredentials('MAILBOX=marveen@pecibt.hu')).toThrowError(/TENANT_ID.*CLIENT_ID.*CLIENT_SECRET/)
+    expect(() => parseCredentials('MAILBOX=wraith@pecibt.hu')).toThrowError(/TENANT_ID.*CLIENT_ID.*CLIENT_SECRET/)
   })
 
   it('treats an empty value as missing', () => {

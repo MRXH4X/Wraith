@@ -302,7 +302,7 @@ export function ensureIsolatedChannelConfigDir(
 // never retry, and Claude Code prefers an on-disk .credentials.json over an
 // otherwise-valid CLAUDE_CODE_OAUTH_TOKEN env var (claude-credentials-guard.ts),
 // so a stale file wins even with a live token sitting right next to it
-// (confirmed root cause of the 2026-07-23 marveen-channels silent outage,
+// (confirmed root cause of the 2026-07-23 wraith-channels silent outage,
 // PLAN.md GAP 1). The isolated sub-agents, which authenticate from the
 // long-lived fleet setup-token via an isolated CLAUDE_CONFIG_DIR carrying no
 // .credentials.json at all, never hit this. This gives the main agent the SAME
@@ -665,8 +665,8 @@ export function stampFableOverageConsentSharedRoots(): void {
   const candidates = [
     mainDir ? join(mainDir, '.claude.json') : null,
     join(homedir(), '.claude.json'),
-    join(process.env.MARVEEN_WORKER_DIR || join(homedir(), '.marveen-worker'), '.claude-config', '.claude.json'),
-    join(process.env.MARVEEN_WORKER_DIR_FAST || join(homedir(), '.marveen-worker-fast'), '.claude-config', '.claude.json'),
+    join(process.env.WRAITH_WORKER_DIR || join(homedir(), '.wraith-worker'), '.claude-config', '.claude.json'),
+    join(process.env.WRAITH_WORKER_DIR_FAST || join(homedir(), '.wraith-worker-fast'), '.claude-config', '.claude.json'),
   ]
   for (const p of candidates) {
     if (p && existsSync(p)) stampFableOverageConsent(p)
@@ -691,7 +691,7 @@ export function agentSessionName(name: string): string {
 function runTmux(host: string | null, tmuxArgs: string[], opts: { timeout?: number } = {}): void {
   // Ensure the private ControlMaster socket dir exists before ANY remote ssh
   // call (idempotent, ~free). Without this a watcher-first remote call after a
-  // marveen restart would lose connection multiplexing and re-handshake each tick.
+  // wraith restart would lose connection multiplexing and re-handshake each tick.
   if (host) ensureControlDir()
   const inv = buildTmuxInvocation(host, tmuxBin(), tmuxArgs)
   // stdio: capture the child's stderr into the thrown error instead of letting
@@ -990,7 +990,7 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // per-agent override (which a respawn silently wiped). The main agent runs
     // via channels.sh, not this path, so it remains the sole telegram poller.
     //
-    // CATASTROPHE GUARD: never scope the MAIN agent's plugins here. marveen is
+    // CATASTROPHE GUARD: never scope the MAIN agent's plugins here. wraith is
     // not in agents/ (so listAgentNames never spawns it through this path) and
     // its channel comes up via channels.sh -- but if a future caller ever passed
     // MAIN_AGENT_ID in, scopeChannelPlugins(null) would DISABLE the owner's
@@ -1199,7 +1199,7 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // (e.g. google-workspace/workspace-mcp, which spends seconds on OAuth + Google
     // API init) plus many claude.ai connectors, the channel plugin gets starved
     // out of the startup batch / hits MCP_TIMEOUT and never registers -- no /mcp
-    // entry, no bun poller, dead bot (observed: balazsmarveenja with workspace-mcp
+    // entry, no bun poller, dead bot (observed: balazswraithja with workspace-mcp
     // had NO telegram; removing workspace-mcp restored it). Raise the stdio batch
     // size and per-server timeout, and force non-blocking startup, so a slow local
     // MCP can never crowd the channel plugin out of registration. Only set for
@@ -1455,7 +1455,7 @@ const IDENTITY_SEND_DELAY_MS = 5000
 // Schedule the identity setup for a freshly (re)spawned session: once it has
 // had time to render, dismiss any first-run/resume modals, then send `/name`.
 // Shared by startAgentProcess and the channel-monitor recovery respawns
-// (resumeMarveenSession / respawnMarveenSessionFresh), which previously left the
+// (resumeWraithSession / respawnWraithSessionFresh), which previously left the
 // main session without its identity after auto-recovery. Fire-and-forget; all
 // errors are swallowed/logged so a missed setup never tears down the caller.
 export async function scheduleIdentitySetup(session: string, displayName: string, host: string | null = null): Promise<void> {

@@ -16,7 +16,7 @@ const TRUST_PANE = [
   '╭──────────────────────────────────────────────────╮',
   '│ Do you trust the files in this folder?           │',
   '│                                                  │',
-  '│ /home/gabor/marveen/agents/nova                  │',
+  '│ /home/gabor/wraith/agents/nova                  │',
   '│                                                  │',
   '│ Claude Code may read, analyze and edit files in  │',
   '│ this folder.                                     │',
@@ -73,7 +73,7 @@ const WELCOME_TOUR_PANE = [
 const FRESH_SESSION_PROMPT_PANE = [
   ' Welcome to Claude Code',
   '',
-  ' model: claude-opus-4-8   cwd: /home/gabor/marveen/agents/nova',
+  ' model: claude-opus-4-8   cwd: /home/gabor/wraith/agents/nova',
   '',
   '──────────────────────────────────────────────────',
   ' ❯ ',

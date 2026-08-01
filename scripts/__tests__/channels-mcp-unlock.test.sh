@@ -90,11 +90,11 @@ expect_classify "banner + unrelated error, plugin connected: does not fire" tele
 # --- other providers resolve their own pane id -------------------------------
 # Keep in sync with pluginPaneId in src/channel-provider.ts.
 expect_classify "slack failed row fires unlock" slack failed \
-  '     plugin:slack-channel:marveen-marketplace · ✘ failed'
+  '     plugin:slack-channel:wraith-marketplace · ✘ failed'
 expect_classify "discord failed row fires unlock" discord failed \
   '     plugin:discord:discord · ✘ failed'
 expect_classify "telegram detector ignores a failed slack row" telegram ok \
-  '     plugin:slack-channel:marveen-marketplace · ✘ failed'
+  '     plugin:slack-channel:wraith-marketplace · ✘ failed'
 
 # --- other failure vocabulary (mirrors PLUGIN_FAILED_RX) ---------------------
 expect_classify "disconnected row fires unlock" telegram failed \

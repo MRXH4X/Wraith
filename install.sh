@@ -1,20 +1,20 @@
 #!/bin/bash
-# Marveen - OS-detect wrapper
+# Wraith - OS-detect wrapper
 # Detects the operating system and launches the appropriate installer.
 
 # ── Language selection ────────────────────────────────────────────────────────
-if [[ -z "${MARVEEN_LANG:-}" ]]; then
+if [[ -z "${WRAITH_LANG:-}" ]]; then
   echo ""
   echo "  🌍  1. Magyar (HU)    2. English (EN)"
   read -rp "  Language / Nyelv [1/2, default: 1]: " _LANG_CHOICE
   case "${_LANG_CHOICE:-1}" in
-    2|en|EN) MARVEEN_LANG=en ;;
-    *) MARVEEN_LANG=hu ;;
+    2|en|EN) WRAITH_LANG=en ;;
+    *) WRAITH_LANG=hu ;;
   esac
 fi
-export MARVEEN_LANG
+export WRAITH_LANG
 # Save language choice for update.sh and other scripts
-echo "$MARVEEN_LANG" > "$(dirname "$0")/.lang"
+echo "$WRAITH_LANG" > "$(dirname "$0")/.lang"
 # ─────────────────────────────────────────────────────────────────────────────
 
 case "$(uname -s)" in
@@ -25,7 +25,7 @@ case "$(uname -s)" in
     exec "$(dirname "$0")/install-linux.sh" "$@"
     ;;
   *)
-    if [[ "${MARVEEN_LANG:-hu}" == "en" ]]; then
+    if [[ "${WRAITH_LANG:-hu}" == "en" ]]; then
       echo "Unsupported operating system: $(uname -s)"
       echo "Supported: macOS (Darwin), Linux (Ubuntu/Debian + Fedora/Nobara/RHEL)"
     else

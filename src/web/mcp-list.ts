@@ -59,7 +59,7 @@ export function purgeFromMcpListCache(name: string): boolean {
 let mcpListWorkingDir: string | null = null
 function getMcpListWorkingDir(): string {
   if (mcpListWorkingDir && existsSync(mcpListWorkingDir)) return mcpListWorkingDir
-  mcpListWorkingDir = mkdtempSync(join(tmpdir(), 'marveen-mcp-list-'))
+  mcpListWorkingDir = mkdtempSync(join(tmpdir(), 'wraith-mcp-list-'))
   return mcpListWorkingDir
 }
 

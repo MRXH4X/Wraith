@@ -1,6 +1,6 @@
 # Ötletláda
 
-Az ötletláda egy könnyű ötletgyűjtő és -priorizáló rendszer, amely a Marveen dashboardon él. Az ötletek kanban-kártyává válhatnak, AI-segítséggel alfeladatokra bonthatók, és impact×effort pontozással rangsorolhatók.
+Az ötletláda egy könnyű ötletgyűjtő és -priorizáló rendszer, amely a Wraith dashboardon él. Az ötletek kanban-kártyává válhatnak, AI-segítséggel alfeladatokra bonthatók, és impact×effort pontozással rangsorolhatók.
 
 ## Használat
 

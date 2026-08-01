@@ -1,5 +1,5 @@
 #!/bin/bash
-# Marveen - AI Team Setup
+# Wraith - AI Team Setup
 # Interactive installer for macOS
 
 set -e
@@ -40,7 +40,7 @@ source "$(dirname "$0")/install-lang.sh"
 # Error-translation layer (NPMPERM1 kor): minden stderr egy log-fajlba is
 # megy, hogy hibanal a trap ne csak sorszamot mondjon, hanem le tudja
 # forditani az upstream hibat (explain_install_error, install-lang.sh).
-INSTALL_ERRLOG=$(mktemp "${TMPDIR:-/tmp}/marveen-install-stderr.XXXXXX")
+INSTALL_ERRLOG=$(mktemp "${TMPDIR:-/tmp}/wraith-install-stderr.XXXXXX")
 exec 2> >(tee -a "$INSTALL_ERRLOG" >&2)
 
 ok() { echo -e "  ${GREEN}✓${NC} $*"; }
@@ -65,7 +65,7 @@ offer_claude_fallback() {
   fi
   echo ""
   echo -e "${ORANGE}$(_t macos.claude_available)${NC}"
-  local prompt="Marveen installer failed at step \"${step}\". Error: ${err_msg}. Script: install.sh${line_info}. Repo: https://github.com/Szotasz/marveen. OS: macOS $(sw_vers -productVersion 2>/dev/null || echo unknown). Node: $(node -v 2>/dev/null || echo missing). Dir: ${INSTALL_DIR}. Your task: diagnose this Marveen installer failure. The install scripts are install.sh (macOS) and install-linux.sh. Read the relevant section, check for missing dependencies or permission issues, and suggest concrete shell commands to fix."
+  local prompt="Wraith installer failed at step \"${step}\". Error: ${err_msg}. Script: install.sh${line_info}. Repo: https://github.com/KZ5017/wraith. OS: macOS $(sw_vers -productVersion 2>/dev/null || echo unknown). Node: $(node -v 2>/dev/null || echo missing). Dir: ${INSTALL_DIR}. Your task: diagnose this Wraith installer failure. The install scripts are install.sh (macOS) and install-linux.sh. Read the relevant section, check for missing dependencies or permission issues, and suggest concrete shell commands to fix."
   if [ -t 0 ]; then
     read -rp "$(_t prompt_open_claude)" OPEN_CLAUDE
     OPEN_CLAUDE=${OPEN_CLAUDE:-n}
@@ -99,15 +99,15 @@ trap 'on_error $LINENO' ERR
 
 clear
 echo ""
-echo -e "${BOLD}  ▐▛███▜▌   Marveen${NC}"
-if [[ "${MARVEEN_LANG:-hu}" == "en" ]]; then
+echo -e "${BOLD}  ▐▛███▜▌   Wraith${NC}"
+if [[ "${WRAITH_LANG:-hu}" == "en" ]]; then
   echo -e "${BOLD} ▝▜█████▛▘  Your AI team, running while you sleep.${NC}"
 else
   echo -e "${BOLD} ▝▜█████▛▘  $(_t tagline)${NC}"
 fi
 echo -e "${DIM}   ▘▘ ▝▝${NC}"
 echo ""
-if [[ "${MARVEEN_LANG:-hu}" == "en" ]]; then
+if [[ "${WRAITH_LANG:-hu}" == "en" ]]; then
   echo -e "${DIM}  Setup wizard - macOS${NC}"
 else
   echo -e "${DIM}$(_t macos.wizard_title)${NC}"
@@ -439,9 +439,9 @@ else
   # Managed settings: Claude Code requires allowedChannelPlugins at system level
   MANAGED_DIR="/Library/Application Support/ClaudeCode"
   MANAGED_FILE="$MANAGED_DIR/managed-settings.json"
-  SLACK_ENTRY='{"plugin":"slack-channel","marketplace":"marveen-marketplace"}'
+  SLACK_ENTRY='{"plugin":"slack-channel","marketplace":"wraith-marketplace"}'
   TELEGRAM_ENTRY='{"plugin":"telegram","marketplace":"claude-plugins-official"}'
-  TEAMS_ENTRY='{"plugin":"teams","marketplace":"marveen-marketplace"}'
+  TEAMS_ENTRY='{"plugin":"teams","marketplace":"wraith-marketplace"}'
   REQUIRED_JSON="{\"allowedChannelPlugins\":[$SLACK_ENTRY,$TELEGRAM_ENTRY,$TEAMS_ENTRY]}"
 
   if [ -f "$MANAGED_FILE" ]; then
@@ -452,7 +452,7 @@ else
     # at install time, so no manual managed-settings edit is needed later.
     HAS_ALL=$(sudo python3 -c "
 import json, sys
-required = [('slack-channel','marveen-marketplace'),('telegram','claude-plugins-official'),('teams','marveen-marketplace')]
+required = [('slack-channel','wraith-marketplace'),('telegram','claude-plugins-official'),('teams','wraith-marketplace')]
 try:
   d = json.load(open('$MANAGED_FILE'))
   plugins = d.get('allowedChannelPlugins', [])
@@ -498,20 +498,20 @@ if [ -f "$INSTALL_DIR/scripts/ensure-managed-channels-enabled.sh" ]; then
 fi
 
 read -rp "$(_t prompt_bot_name)" BOT_NAME
-BOT_NAME=${BOT_NAME:-"Marveen"}
+BOT_NAME=${BOT_NAME:-"Wraith"}
 
 # Derive the ASCII slug the backend uses everywhere (tmux sessions, plist
 # labels, DB agent_id, API routing). NFKD + ASCII + lowercase dashes, empty
-# fallback to "marveen" so we never end up with a blank identifier.
+# fallback to "wraith" so we never end up with a blank identifier.
 MAIN_AGENT_ID=$(python3 - "$BOT_NAME" <<'PYEOF'
 import sys, unicodedata, re
 s = sys.argv[1].strip()
 s = unicodedata.normalize('NFKD', s).encode('ASCII', 'ignore').decode()
 s = re.sub(r'[^a-zA-Z0-9]+', '-', s).strip('-').lower()
-print(s or 'marveen')
+print(s or 'wraith')
 PYEOF
 )
-if [ "$MAIN_AGENT_ID" != "marveen" ]; then
+if [ "$MAIN_AGENT_ID" != "wraith" ]; then
   echo -e "  ${DIM}$(_t macos.agent_id_info)${MAIN_AGENT_ID}${NC}"
 fi
 
@@ -644,7 +644,7 @@ else
   # Probe the way a SERVICE runs: isolated config dir (so the Keychain and the
   # operator's shell cannot make a broken install look healthy) carrying ONLY
   # the credential the launchd units will get.
-  _probe_cfg="$(mktemp -d 2>/dev/null || echo /tmp/marveen-authprobe.$$)"
+  _probe_cfg="$(mktemp -d 2>/dev/null || echo /tmp/wraith-authprobe.$$)"
   # A 401 here is the VERDICT this gate exists to report, not an installer
   # error. Unguarded, the capture reached the ERR trap and on_error() exited 1 --
   # blaming the enclosing `fi` -- so the BROKEN branch below (and its
@@ -715,7 +715,7 @@ fi
 
 # Scaffold default scheduled tasks into ~/.claude/scheduled-tasks/. Templates
 # carry {{MAIN_AGENT_ID}} placeholders so tasks target the user's chosen agent
-# slug rather than hardcoded "marveen". Skip task dirs that already exist --
+# slug rather than hardcoded "wraith". Skip task dirs that already exist --
 # never overwrite user customizations.
 SCHED_TPL_DIR="$INSTALL_DIR/templates/scheduled-tasks"
 SCHED_TARGET_DIR="$HOME/.claude/scheduled-tasks"
@@ -782,8 +782,8 @@ if [ "$CHANNEL_PROVIDER" = "telegram" ]; then
   PLUGIN_ID="telegram@claude-plugins-official"
   PLUGIN_SHORT="telegram"
 else
-  PLUGIN_MARKETPLACE="Szotasz/marveen-marketplace"
-  PLUGIN_ID="slack-channel@marveen-marketplace"
+  PLUGIN_MARKETPLACE="KZ5017/wraith-marketplace"
+  PLUGIN_ID="slack-channel@wraith-marketplace"
   PLUGIN_SHORT="slack-channel"
 fi
 
@@ -806,7 +806,7 @@ fi
 
 # Enable plugin at project scope so --channels can boot-time activate it
 cd "$INSTALL_DIR"
-if claude plugin enable "$PLUGIN_SHORT@marveen-marketplace" --scope project 2>/dev/null || \
+if claude plugin enable "$PLUGIN_SHORT@wraith-marketplace" --scope project 2>/dev/null || \
    claude plugin enable "$PLUGIN_ID" --scope project 2>/dev/null; then
   ok "${CHANNEL_PROVIDER} plugin project-scope-ban engedelyezve"
 else

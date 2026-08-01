@@ -16,7 +16,7 @@ describe('parseQualifiedId', () => {
   })
 
   it('returns null for local (slash-free) ids', () => {
-    expect(parseQualifiedId('marveen')).toBeNull()
+    expect(parseQualifiedId('wraith')).toBeNull()
     expect(parseQualifiedId('')).toBeNull()
   })
 
@@ -81,7 +81,7 @@ describe('isQualifiedId', () => {
 
 describe('isValidIdSegment / helpers', () => {
   it('validates single segments', () => {
-    expect(isValidIdSegment('marveen')).toBe(true)
+    expect(isValidIdSegment('wraith')).toBe(true)
     expect(isValidIdSegment('')).toBe(false)
     expect(isValidIdSegment('a/b')).toBe(false)
     expect(isValidIdSegment('..')).toBe(false)

@@ -4,7 +4,7 @@
 // Governance control (Szabi 2026-06-25, after the Boni incident: a sub-agent
 // autonomously emailed a fabricated address asking for money in Szabi's name).
 // Sub-agents may NOT send outbound email; any email must be routed through the
-// main agent (Marveen) for approval -- only Marveen retains email-send.
+// main agent (Wraith) for approval -- only Wraith retains email-send.
 //
 // Why a hook and not a permissions deny-list: permissive security profiles
 // launch Claude Code with --dangerously-skip-permissions, which BYPASSES the
@@ -57,7 +57,7 @@ export function gateDecision(toolName, toolInput) {
 
 // Pure builder for the deny message, so the brand/owner substitution is
 // provable without spawning the hook. With the stock defaults (botName
-// 'Marveen', ownerName 'Szabolcs') the wording is byte-identical to before.
+// 'Wraith', ownerName 'Szabolcs') the wording is byte-identical to before.
 export function buildGateMsg(botName, ownerName) {
   return (
     'Email-kuldes sub-agentkent tiltott (governance hard-gate). ' +
@@ -73,7 +73,7 @@ export function buildGateMsg(botName, ownerName) {
 // Any failure falls back to the stock defaults, so the gate never breaks and a
 // bare install keeps the original wording.
 export function readBrandEnv(readFile = (p) => readFileSync(p, 'utf-8')) {
-  const fallback = { botName: 'Marveen', ownerName: 'Szabolcs' }
+  const fallback = { botName: 'Wraith', ownerName: 'Szabolcs' }
   try {
     const envPath = join(dirname(fileURLToPath(import.meta.url)), '..', '.env')
     const raw = readFile(envPath)

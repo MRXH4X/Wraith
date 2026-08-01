@@ -2,7 +2,7 @@
 
 ## Problem
 
-A Marveen agent that talks to a user over a channel (Telegram / Slack / Discord)
+A Wraith agent that talks to a user over a channel (Telegram / Slack / Discord)
 sometimes *generates* its reply as plain text but forgets to call the channel
 send-tool. When that happens the answer only lands in the CLI transcript and
 **never reaches the user** — the user is left waiting, with no idea whether the

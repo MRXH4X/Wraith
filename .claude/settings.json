@@ -1,7 +1,7 @@
 {
   "model": "claude-opus-4-8[1m]",
   "enabledPlugins": {
-    "slack-channel@marveen-marketplace": false,
+    "slack-channel@wraith-marketplace": false,
     "telegram@claude-plugins-official": true
   },
   "hooks": {

@@ -21,7 +21,7 @@
 //   - The operator can approve the URL/domain: add it to store/egress-allowlist.json,
 //     then re-run the WebFetch. No restart required.
 //
-// The log is separate from the main Marveen log so operators can grep it
+// The log is separate from the main Wraith log so operators can grep it
 // independently: `tail -f store/egress-blocked.log`
 //
 // Scope: this guard covers the Claude Code WebFetch tool only. It does NOT
@@ -74,7 +74,7 @@ const ALLOWED_PREFIXES = [
   // Ollama (local LLM server) -- localhost and loopback
   'http://localhost:11434/',
   'http://127.0.0.1:11434/',
-  // Marveen dashboard API (local). The port follows WEB_PORT: a fixed 3420 here
+  // Wraith dashboard API (local). The port follows WEB_PORT: a fixed 3420 here
   // blocked the agent's own dashboard once the install moved to another port.
   `http://localhost:${DASHBOARD_PORT}/`,
   `http://127.0.0.1:${DASHBOARD_PORT}/`,

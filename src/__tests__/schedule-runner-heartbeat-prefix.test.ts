@@ -28,7 +28,7 @@ describe('schedule-runner heartbeat prefix is injection-free', () => {
     expect(SRC).not.toMatch(/KOTELEZO ELSO TEENDO MIELOTT BARMIT IRSZ/)
     expect(SRC).not.toMatch(/Telegram-bun MCP-stdio-pipe keep-alive/)
     expect(SRC).not.toMatch(/NE Telegram-tool-t/)
-    expect(SRC).not.toMatch(/marveen-keepalive\.log/)
+    expect(SRC).not.toMatch(/wraith-keepalive\.log/)
     expect(SRC).not.toMatch(/kotelezo no-op tool-call/)
   })
 

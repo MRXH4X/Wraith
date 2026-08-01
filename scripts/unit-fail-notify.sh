@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # unit-fail-notify.sh <unit-name>
 #
-# Called by marveen-notify@.service via `OnFailure=marveen-notify@%n.service`
-# drop-ins on marveen-dashboard.service / marveen-channels.service. Sends ONE
+# Called by wraith-notify@.service via `OnFailure=wraith-notify@%n.service`
+# drop-ins on wraith-dashboard.service / wraith-channels.service. Sends ONE
 # Telegram notice that a specific APP/service unit failed -- as opposed to a
 # host/WSL-VM restart, which is reported by host-restart-watchdog.sh. Keeping
 # the two paths separate is what lets a fleet-wide silence be classified.
@@ -16,10 +16,10 @@ ENV_FILE="${TELEGRAM_ENV:-$HOME/.claude/channels/telegram/.env}"
 # Alert target chat-id -- MUST be provided by the install's own config; there is
 # deliberately NO hardcoded fallback (a hardcoded id would make every downstream
 # install send its alerts to that one private chat via its own bot token).
-CHAT_ID="${MARVEEN_ALERT_CHAT_ID:-}"
+CHAT_ID="${WRAITH_ALERT_CHAT_ID:-}"
 
 now_local="$(date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo now)"
-msg="Marveen app-crash: a(z) ${UNIT} unit FAILED állapotba került (${now_local}).
+msg="Wraith app-crash: a(z) ${UNIT} unit FAILED állapotba került (${now_local}).
 (Ez alkalmazás/service szintű hiba, NEM host/VM restart. A host-restartot a host-restart-watchdog jelzi külön.)"
 
 token=""
@@ -33,7 +33,7 @@ if [[ -n "$token" && -n "$CHAT_ID" ]]; then
     --data-urlencode "text=${msg}" >/dev/null 2>&1 || true
 else
   # Not silent: name the missing piece so a misconfigured install is diagnosable.
-  miss=""; [[ -z "$token" ]] && miss+=" TELEGRAM_BOT_TOKEN(via TELEGRAM_ENV=$ENV_FILE)"; [[ -z "$CHAT_ID" ]] && miss+=" MARVEEN_ALERT_CHAT_ID"
+  miss=""; [[ -z "$token" ]] && miss+=" TELEGRAM_BOT_TOKEN(via TELEGRAM_ENV=$ENV_FILE)"; [[ -z "$CHAT_ID" ]] && miss+=" WRAITH_ALERT_CHAT_ID"
   echo "[unit-fail-notify] ${UNIT} FAILED but no Telegram sent -- missing:${miss}" >&2
 fi
 exit 0

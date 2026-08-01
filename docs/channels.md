@@ -6,7 +6,7 @@
 
 ## 🎯 Mit tud / miért érdekes
 
-Marveennel ott beszélgetsz, ahol kényelmes: **Telegramon** vagy **Slacken**. Nem webfelület, nem külön app — a meglévő üzenetküldődben él. De nem csak válaszol: magától ír, ha valami fontos. Reggeli összefoglaló (email, naptár, AI-hírek), beakadt feladatnál értesítés, hosszú munka végén "kész" — érzed, hogy van valaki a másik oldalon, nem csak egy chatbox.
+Wraithnel ott beszélgetsz, ahol kényelmes: **Telegramon** vagy **Slacken**. Nem webfelület, nem külön app — a meglévő üzenetküldődben él. De nem csak válaszol: magától ír, ha valami fontos. Reggeli összefoglaló (email, naptár, AI-hírek), beakadt feladatnál értesítés, hosszú munka végén "kész" — érzed, hogy van valaki a másik oldalon, nem csak egy chatbox.
 
 Hangüzenetet is megért (átírja szöveggé), képet és fájlt küld-fogad — pl. egy kész videót attachmentként, vagy egy táblázatot, ami épp elkészült.
 
@@ -42,7 +42,7 @@ Socket Mode kapcsolat; flottában ügyelni kell hogy ne nyisson több ügynök p
 
 ### WhatsApp-specifikum
 
-A WhatsApp csatorna a [whatsapp-channel](https://github.com/Szotasz/whatsapp-channel) plugin (Baileys, WhatsApp Web protokoll). `CHANNEL_PROVIDER=whatsapp` -> a `channels.sh` a `whatsapp@marveen-marketplace` plugint indítja, az állapot a `~/.claude/channels/whatsapp/` mappában.
+A WhatsApp csatorna a [whatsapp-channel](https://github.com/Szotasz/whatsapp-channel) plugin (Baileys, WhatsApp Web protokoll). `CHANNEL_PROVIDER=whatsapp` -> a `channels.sh` a `whatsapp@wraith-marketplace` plugint indítja, az állapot a `~/.claude/channels/whatsapp/` mappában.
 
 Beüzemelés:
 
@@ -57,7 +57,7 @@ Beüzemelés:
    ```
 
    ```json
-   { "plugin": "whatsapp", "marketplace": "marveen-marketplace" }
+   { "plugin": "whatsapp", "marketplace": "wraith-marketplace" }
    ```
 3. **Linkelés.** `/whatsapp:configure <szám>` (pairing-kód, default) vagy `/whatsapp:configure qr`, majd a dedikált telefonon WhatsApp -> Beállítások -> Összekapcsolt eszközök -> Eszköz összekapcsolása. A session credential a `auth_state/`-ban perzisztálódik, így respawn után nem kell újra-linkelni.
 4. **Párosítás + zárolás.** A fő WhatsApp-ról üzenet a dedikált számnak -> 6 jegyű kód -> `/whatsapp:access pair <kód>`, majd `/whatsapp:access policy allowlist`.
@@ -66,7 +66,7 @@ Egy-kapcsolat szabály: egyszerre csak egy socket használhatja az `auth_state/`
 
 ### Teams-specifikum
 
-A Microsoft Teams csatorna a [claude-channel-teams](https://github.com/Szotasz/claude-channel-teams) plugin (Azure Bot Service transport). `CHANNEL_PROVIDER=teams` -> a `channels.sh` a `teams@marveen-marketplace` plugint indítja, az állapot a `~/.claude/channels/teams/` mappában (a `TEAMS_STATE_DIR` env-en keresztül). A provider-elágazások (PLUGIN_ID, STATE_ENV_VAR, orphan-reaper, plugin-watchdog) ugyanúgy viselkednek mint a többi providernél, külön kezelés nélkül.
+A Microsoft Teams csatorna a [claude-channel-teams](https://github.com/Szotasz/claude-channel-teams) plugin (Azure Bot Service transport). `CHANNEL_PROVIDER=teams` -> a `channels.sh` a `teams@wraith-marketplace` plugint indítja, az állapot a `~/.claude/channels/teams/` mappában (a `TEAMS_STATE_DIR` env-en keresztül). A provider-elágazások (PLUGIN_ID, STATE_ENV_VAR, orphan-reaper, plugin-watchdog) ugyanúgy viselkednek mint a többi providernél, külön kezelés nélkül.
 
 Beüzemelés:
 
@@ -81,7 +81,7 @@ Beüzemelés:
    ```
 
    ```json
-   { "plugin": "teams", "marketplace": "marveen-marketplace" }
+   { "plugin": "teams", "marketplace": "wraith-marketplace" }
    ```
 3. **Párosítás + zárolás.** A párosítás és az allowlist-policy a `/teams:access` paranccsal állítható, a tulajdonos termináljából (csatornán érkező engedély-kérést a rendszer sosem hajt végre magától).
 

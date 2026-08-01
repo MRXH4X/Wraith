@@ -7,7 +7,7 @@ the live conversation) the SessionStart hook injects the last ~20 turns of
 context PLUS the open question, so the fresh session continues where the
 connection dropped -- with ZERO agent discretion.
 
-Generic across all three channel agents (marveen / dia / erno-ba): agent_id is
+Generic across all three channel agents (wraith / dia / erno-ba): agent_id is
 derived from the running session's cwd so each session only ever sees its OWN
 chat. Pure stdlib (sqlite3) -- no node startup, no jq.
 """
@@ -64,7 +64,7 @@ def main_agent_id():
                     return line.split("=", 1)[1].strip()
     except Exception:
         pass
-    return "marveen"
+    return "wraith"
 
 
 def owner_name():

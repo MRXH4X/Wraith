@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>Marveen</title>
+  <title>Wraith</title>
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.js"></script>
@@ -14,13 +14,13 @@
   <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@2.0.4/dist/qrcode.js"></script>
   <script src="/lang/hu.js"></script>
   <script src="/lang/en.js"></script>
-  <link rel="icon" href="/api/marveen/avatar">
-  <link rel="apple-touch-icon" href="/api/marveen/avatar">
+  <link rel="icon" href="/api/wraith/avatar">
+  <link rel="apple-touch-icon" href="/api/wraith/avatar">
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#1a1917">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Marveen">
+  <meta name="apple-mobile-web-app-title" content="Wraith">
   <script>
     // Service worker intentionally DISABLED. A caching SW caused iOS load
     // failures (respondWith null on cache miss) and a reload-loop when combined
@@ -40,7 +40,7 @@
   <div class="modal-overlay onboarding-overlay" id="onboardingOverlay" hidden>
     <div class="modal onboarding-modal">
       <button class="modal-close" id="onboardingClose" title="Bezárás" aria-label="Bezárás">&times;</button>
-      <h2 data-i18n="onboarding.title">Marveen beállítása</h2>
+      <h2 data-i18n="onboarding.title">Wraith beállítása</h2>
       <p class="onb-sub" data-i18n="onboarding.subtitle">Fejezd be a beállítást innen, a dashboardból -- SSH nélkül.</p>
       <div class="onboarding-steps" id="onboardingSteps">
         <div class="onboarding-step" data-ostep="1"><span class="onb-num">1</span> <span data-i18n="onboarding.identity.tab">Név</span></div>
@@ -57,14 +57,14 @@
     <button class="mobile-menu-btn" id="mobileMenuBtn" aria-label="Menü" aria-expanded="false">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
-    <span class="mobile-topbar-title" id="mobileTopbarTitle">Marveen</span>
+    <span class="mobile-topbar-title" id="mobileTopbarTitle">Wraith</span>
   </div>
   <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
   <aside class="sidebar">
     <div class="sidebar-brand">
       <div class="sidebar-brand-mark" id="sidebarBrandMark">M</div>
       <div class="sidebar-brand-text">
-        <div class="sidebar-brand-name" id="sidebarBrandName">Marveen</div>
+        <div class="sidebar-brand-name" id="sidebarBrandName">Wraith</div>
         <div class="sidebar-brand-sub">online</div>
       </div>
     </div>
@@ -1852,7 +1852,7 @@
         <div class="page-header-row">
           <div>
             <h1 data-i18n="updates.page_title">Frissítések</h1>
-            <p class="subtitle" id="updatesSubtitle" data-i18n="updates.brand_subtitle">Marveen verzió ellenőrzés</p>
+            <p class="subtitle" id="updatesSubtitle" data-i18n="updates.brand_subtitle">Wraith verzió ellenőrzés</p>
           </div>
           <div style="display:flex;gap:8px">
             <button class="btn-secondary btn-compact" id="updatesCheckBtn" data-i18n="updates.btn.check">
@@ -2358,14 +2358,14 @@
                 <span class="btn-loading" hidden><span class="spinner"></span></span>
               </button>
               <button class="btn-danger btn-compact" id="agentStopBtn" hidden data-i18n="agents.process.stop_btn">Leállítás</button>
-              <button class="btn-danger btn-compact" id="marveenRestartBtn" hidden>Channels restart</button>
+              <button class="btn-danger btn-compact" id="wraithRestartBtn" hidden>Channels restart</button>
             </div>
           </div>
         </div>
 
         <!-- Tab: Settings -->
         <div class="tab-panel" id="tabSettings" hidden>
-          <div class="form-group" id="marveenReadonlyNote" hidden>
+          <div class="form-group" id="wraithReadonlyNote" hidden>
             <div style="padding:12px 14px;background:var(--bg-input);border-radius:var(--radius);border-left:3px solid var(--accent);font-size:13px;line-height:1.5;color:var(--text-muted)">
               <strong style="color:var(--text)" data-i18n="agents.detail.main_readonly">Főagent konfiguráció -- csak olvasható</strong><br>
               A főagent identitás-fájljai biztonsági okból dashboardról nem szerkeszthetők

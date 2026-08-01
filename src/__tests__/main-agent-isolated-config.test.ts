@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 
 // ensureMainAgentIsolatedConfigDir: extends the already-proven sub-agent
 // isolated-config machinery to the MAIN channels agent, now on ANY platform
-// (PLAN.md GAP 1, 2026-07-23 marveen-channels silent outage) -- the previous
+// (PLAN.md GAP 1, 2026-07-23 wraith-channels silent outage) -- the previous
 // `if (platform !== 'darwin') return null` early return left the main bot on
 // Linux depending on the shared, periodically-refreshing
 // ~/.claude/.credentials.json. Mirrors main-agent-config-dir.test.ts's mocking

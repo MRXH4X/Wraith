@@ -30,14 +30,14 @@ export function shQuote(s: string): string {
 // /tmp subdir that we create mode 0700 ourselves.
 export function controlDir(): string {
   const xdg = process.env.XDG_RUNTIME_DIR
-  if (xdg && xdg.trim()) return join(xdg.trim(), 'marveen-ssh')
+  if (xdg && xdg.trim()) return join(xdg.trim(), 'wraith-ssh')
   // No XDG_RUNTIME_DIR (rare on the Linux target): a per-user private /tmp dir.
   // getuid is always present on Linux; the no-getuid fallback (non-POSIX) uses
   // the username so distinct users never collide on the same /tmp path.
   let id: string
   if (typeof process.getuid === 'function') id = String(process.getuid())
   else { try { id = userInfo().username } catch { id = 'default' } }
-  return `/tmp/marveen-ssh-${id}`
+  return `/tmp/wraith-ssh-${id}`
 }
 
 /** ControlMaster socket path template (ssh expands %r/%h/%p itself). */
@@ -180,7 +180,7 @@ export function ensureControlDir(): void {
 
 /**
  * Drop a dead/stale ControlMaster master for `host` before a fresh connection.
- * After a marveen restart the previous run's socket can linger; with
+ * After a wraith restart the previous run's socket can linger; with
  * BatchMode=yes a dead socket may fail fast instead of falling back, so we
  * proactively tell ssh to exit any existing master. No master => harmless error.
  */

@@ -18,7 +18,7 @@ import { logger } from './logger.js'
 import { wrapUntrusted, UNTRUSTED_PREAMBLE } from './prompt-safety.js'
 
 // Dedicated cwd for the daily-digest sub-agent. We can't reuse PROJECT_ROOT
-// here -- the Marveen Telegram channels session runs claude --continue in
+// here -- the Wraith Telegram channels session runs claude --continue in
 // PROJECT_ROOT, and the SDK's per-cwd session/lock state collides with it
 // when two Claude Code processes share the same project dir, dropping the
 // channels plugin every night at 23:00. A throwaway dir under the user's
@@ -28,7 +28,7 @@ import { wrapUntrusted, UNTRUSTED_PREAMBLE } from './prompt-safety.js'
 // We honor TMPDIR via os.tmpdir() as a last-resort fallback so a hardened
 // host with a read-only home still has somewhere to land.
 function ensureDigestCwd(): string {
-  const candidates = [join(homedir(), '.claude', 'tmp', 'marveen-digest'), join(tmpdir(), 'marveen-digest')]
+  const candidates = [join(homedir(), '.claude', 'tmp', 'wraith-digest'), join(tmpdir(), 'wraith-digest')]
   for (const dir of candidates) {
     try {
       mkdirSync(dir, { recursive: true })
@@ -36,7 +36,7 @@ function ensureDigestCwd(): string {
     } catch { /* try next */ }
   }
   // Last resort: tmpdir itself. Worst case we share with whatever else is
-  // in /tmp, but that still doesn't collide with the Marveen project dir.
+  // in /tmp, but that still doesn't collide with the Wraith project dir.
   return tmpdir()
 }
 
@@ -45,7 +45,7 @@ function ensureDigestCwd(): string {
 // enabled plugins -- including telegram@claude-plugins-official. The
 // Telegram Bot API only allows ONE active getUpdates connection per
 // token, so the sub-agent's plugin steals the connection from the
-// long-running marveen-channels session, which then logs as
+// long-running wraith-channels session, which then logs as
 // "plugin lecsatlakozott" at 23:00 every night when runDailyDigest
 // fires. Workaround: hand the sub-agent a private CLAUDE_CONFIG_DIR
 // with `enabledPlugins: {}` so it never spawns the Telegram MCP. The
@@ -53,8 +53,8 @@ function ensureDigestCwd(): string {
 // written only if missing so the user can edit it later if needed.
 function ensureDigestConfigDir(): string {
   const candidates = [
-    join(homedir(), '.claude', 'tmp', 'marveen-digest-config'),
-    join(tmpdir(), 'marveen-digest-config'),
+    join(homedir(), '.claude', 'tmp', 'wraith-digest-config'),
+    join(tmpdir(), 'wraith-digest-config'),
   ]
   for (const dir of candidates) {
     try {

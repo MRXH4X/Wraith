@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { logger } from './logger.js'
 
-// Microsoft Graph mail for a single M365 mailbox (marveen@pecibt.hu), via the
+// Microsoft Graph mail for a single M365 mailbox (wraith@pecibt.hu), via the
 // app-only client-credentials flow. The app registration holds NO tenant-wide
 // Mail.* Graph permission; access is scoped to one mailbox by an Exchange
 // Online RBAC ManagementScope, so this module can only ever touch that box.
@@ -18,7 +18,7 @@ const PROJECT_ROOT = join(__dirname, '..')
 
 // Gitignored KEY=value credentials file at the repo root. Path is overridable
 // so an operator can relocate it (e.g. outside the repo) without code changes.
-const CREDS_PATH = process.env.MARVEEN_MAIL_CREDS || join(PROJECT_ROOT, 'marveen-mail-ugyfelkod')
+const CREDS_PATH = process.env.WRAITH_MAIL_CREDS || join(PROJECT_ROOT, 'wraith-mail-ugyfelkod')
 
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0'
 const REQUEST_TIMEOUT_MS = 20_000
@@ -109,7 +109,7 @@ function loadCredentials(): MailCredentials {
   } catch {
     throw new Error(
       `graph-mail: credentials file not found at ${CREDS_PATH}. ` +
-        `Set MARVEEN_MAIL_CREDS or create the file with TENANT_ID / CLIENT_ID / CLIENT_SECRET / MAILBOX.`,
+        `Set WRAITH_MAIL_CREDS or create the file with TENANT_ID / CLIENT_ID / CLIENT_SECRET / MAILBOX.`,
     )
   }
   if (!cachedCreds || cachedCreds.mtimeMs !== currentMtime) {

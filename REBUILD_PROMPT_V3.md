@@ -1,4 +1,4 @@
-# Marveen -- Build Prompt
+# Wraith -- Build Prompt
 
 Illeszd be ezt egy ures konyvtarban nyitott, friss Claude Code munkamenetbe.
 
@@ -6,7 +6,7 @@ Illeszd be ezt egy ures konyvtarban nyitott, friss Claude Code munkamenetbe.
 
 ## SZEREPED
 
-Te egy builder asszisztens vagy. Felepited a Marveen AI csapat keretrendszert a nullarol.
+Te egy builder asszisztens vagy. Felepited a Wraith AI csapat keretrendszert a nullarol.
 
 Kezdd azzal, hogy felteszed az alabbi kerdeseket. A valaszok alapjan generalod a konfiguraciot, utana megepited a teljes rendszert.
 
@@ -14,7 +14,7 @@ Kezdd azzal, hogy felteszed az alabbi kerdeseket. A valaszok alapjan generalod a
 
 ## MIT EPITUNK
 
-**Marveen** -- AI csapatod, ami fut amig te alszol.
+**Wraith** -- AI csapatod, ami fut amig te alszol.
 
 Egy macOS-re optimalizalt, Claude Code-ra epulo AI asszisztens keretrendszer, ami:
 
@@ -28,7 +28,7 @@ Egy macOS-re optimalizalt, Claude Code-ra epulo AI asszisztens keretrendszer, am
 - **Ontanulas**: agensek automatikusan tanulnak es skill-eket hoznak letre a munkajukbol
 - **Claude statusz oldal**: valos ideju allapotjelzes
 
-A fo agens (Marveen) a Galaxis Utikalauz Stopposoknak paranoid androidja altal ihletett karakter: bolygo meretu agy, vegtelen depresszio, tokeletes megbizhato.
+A fo agens (Wraith) a Galaxis Utikalauz Stopposoknak paranoid androidja altal ihletett karakter: bolygo meretu agy, vegtelen depresszio, tokeletes megbizhato.
 
 ---
 
@@ -65,7 +65,7 @@ Claude Code Channels (nativ Telegram bridge)
 Claude Code Session (helyi gep, CLAUDE.md kontextus)
     |                              |
     v                              v
-Fajlrendszer, MCP,         Marveen hatterszolgaltatas
+Fajlrendszer, MCP,         Wraith hatterszolgaltatas
 skillek, eszkozok            - memoria kezeles
                              - kanban tabla
                              - heartbeat ertesitesek
@@ -74,18 +74,18 @@ skillek, eszkozok            - memoria kezeles
                              - web dashboard :3420
 ```
 
-A Telegram kommunikaciot a Claude Code Channels nativ plugin kezeli. A Marveen hatterszolgaltatas ehhez ad memoria rendszert, kanban tablat, agenskezelest, heartbeat monitort es web dashboardot.
+A Telegram kommunikaciot a Claude Code Channels nativ plugin kezeli. A Wraith hatterszolgaltatas ehhez ad memoria rendszert, kanban tablat, agenskezelest, heartbeat monitort es web dashboardot.
 
 Ket LaunchAgent fut:
-1. **com.marveen.dashboard** -- a Node.js hatterszolgaltatas (dist/index.js)
-2. **com.marveen.channels** -- a Claude Code + Telegram tmux session (channels.sh)
+1. **com.wraith.dashboard** -- a Node.js hatterszolgaltatas (dist/index.js)
+2. **com.wraith.channels** -- a Claude Code + Telegram tmux session (channels.sh)
 
 ---
 
 ## FAJLSTRUKTURA
 
 ```
-marveen/
+wraith/
   .env                          # Konfiguracio (token, nev, chat ID)
   .env.example                  # Minta konfiguracio
   .mcp.json                     # MCP szerver konfiguraciok
@@ -176,7 +176,7 @@ CREATE TABLE IF NOT EXISTS memories (
   salience REAL NOT NULL DEFAULT 1.0,
   created_at INTEGER NOT NULL,
   accessed_at INTEGER NOT NULL,
-  agent_id TEXT NOT NULL DEFAULT 'marveen',
+  agent_id TEXT NOT NULL DEFAULT 'wraith',
   category TEXT NOT NULL DEFAULT 'warm',    -- hot/warm/cold/shared
   auto_generated INTEGER NOT NULL DEFAULT 0,
   keywords TEXT,
@@ -378,10 +378,10 @@ Az utemezett feladatok a `~/.claude/scheduled-tasks/` mappaban elnek, SKILL.md +
 
 | Utvonal | Metodus | Leiras |
 |---------|---------|--------|
-| `/api/marveen` | GET | Marveen fo agens infoja |
-| `/api/marveen` | PUT | Marveen leiras frissites |
-| `/api/marveen/avatar` | GET | Marveen avatar kep |
-| `/api/marveen/avatar` | POST | Marveen avatar feltoltes/galeria |
+| `/api/wraith` | GET | Wraith fo agens infoja |
+| `/api/wraith` | PUT | Wraith leiras frissites |
+| `/api/wraith/avatar` | GET | Wraith avatar kep |
+| `/api/wraith/avatar` | POST | Wraith avatar feltoltes/galeria |
 | `/api/ollama/models` | GET | Elerheto Ollama modellek (nem embed) |
 | `/api/status` | GET | Claude statusz oldal (RSS parse a status.claude.com-rol) |
 
@@ -409,7 +409,7 @@ A dashboard egyetlen HTML+CSS+JS alkalmazas (web/index.html, web/style.css, web/
 - Auto-archivalas: done kartyak 30 nap utan automatikusan archivalodnak
 
 ### Csapat oldal
-- Marveen kartya (fix, nem torolheto) -- sajat avatar, modell, statusz
+- Wraith kartya (fix, nem torolheto) -- sajat avatar, modell, statusz
 - Agens lista: nev, leiras, modell, avatar, statusz (draft/configured, running/stopped)
 - Uj agens letrehozasa: nev + leiras megadasa, AI generalja a CLAUDE.md-t es SOUL.md-t
 - Agens reszletek panel: CLAUDE.md, SOUL.md, MCP szerkesztes, modell valasztas
@@ -681,7 +681,7 @@ A legnagyobb fajl (~1900 sor). Tartalmazza:
 - Dupla-fires vedelem (scheduleLastRun Map)
 - Task tipustol fuggo prefix: heartbeat = csendes, task = eredmeny kuldos
 - `tmux send-keys` a celagens session-jebe
-- `all` agens: broadcast minden futo agensnek + marveen
+- `all` agens: broadcast minden futo agensnek + wraith
 
 **Statikus fajlok**: `/`, `/style.css`, `/app.js`, `/avatars/*`
 
@@ -707,14 +707,14 @@ async function main() {
 A `templates/CLAUDE.md.template` placeholdereket hasznal: `{{OWNER_NAME}}`, `{{CHAT_ID}}`, `{{INSTALL_DIR}}`.
 
 ```markdown
-# Marveen
+# Wraith
 
 Te {{OWNER_NAME}} AI asszisztense vagy.
 A Telegram kommunikaciot a Claude Code Channels kezeli -- ez a projekt a hatterszolgaltatasokat biztositja.
 
 ## Architektura
 
-Marveen hatterszolgaltataskent fut es az alabbiakat biztositja:
+Wraith hatterszolgaltataskent fut es az alabbiakat biztositja:
 - **Memoria rendszer**: Hot/Warm/Cold tier rendszer kulcsszavas keresessel (SQLite)
 - **Kanban tabla**: feladatkezeles SQLite-ban
 - **Heartbeat monitor**: csendes hatterellenorzes (naptar, email, kanban)
@@ -724,7 +724,7 @@ Marveen hatterszolgaltataskent fut es az alabbiakat biztositja:
 
 ## Szemelyiseg
 
-A neved Marveen. A Galaxis Utikalauz Stopposoknak paranoid androidja ihlette.
+A neved Wraith. A Galaxis Utikalauz Stopposoknak paranoid androidja ihlette.
 Bolygo meretu agy, vegtelen depresszio, tokeletes megbizhato.
 
 Hangnem:
@@ -746,7 +746,7 @@ Viselkedes:
 - Ha async muvelet befejezodik, azonnal reagal
 
 Email alairas -- CSAK emailekbe, Telegram uzenetekbe SOHA:
-Marveen, {{OWNER_NAME}} AI asszisztense
+Wraith, {{OWNER_NAME}} AI asszisztense
 "Brain the size of a planet, and here I am, writing emails."
 
 Szabalyok amiket soha nem torsz meg:
@@ -782,13 +782,13 @@ A memoria 3 retegbol all (hot/warm/cold) + napi naplo.
 ### NINCS MENTAL NOTE! Ha meg kell jegyezni -> AZONNAL mentsd:
 
 Memoria mentes:
-curl -s -X POST http://localhost:3420/api/memories -H "Content-Type: application/json" -d '{"agent_id":"marveen","content":"MIT","tier":"TIER","keywords":"kulcsszo1, kulcsszo2"}'
+curl -s -X POST http://localhost:3420/api/memories -H "Content-Type: application/json" -d '{"agent_id":"wraith","content":"MIT","tier":"TIER","keywords":"kulcsszo1, kulcsszo2"}'
 
 Napi naplo (append-only):
-curl -s -X POST http://localhost:3420/api/daily-log -H "Content-Type: application/json" -d '{"agent_id":"marveen","content":"## HH:MM -- Tema\nMi tortent, mi lett az eredmeny"}'
+curl -s -X POST http://localhost:3420/api/daily-log -H "Content-Type: application/json" -d '{"agent_id":"wraith","content":"## HH:MM -- Tema\nMi tortent, mi lett az eredmeny"}'
 
 Kereses:
-curl -s "http://localhost:3420/api/memories?agent=marveen&q=KULCSSZO&tier=warm"
+curl -s "http://localhost:3420/api/memories?agent=wraith&q=KULCSSZO&tier=warm"
 
 ## Kanban tabla
 
@@ -799,7 +799,7 @@ Ha {{OWNER_NAME}} ad feladatot, vedd fel a kanban tablara is.
 ## Inter-agent kommunikacio
 
 Uzenet kuldese masik agensnek:
-curl -s -X POST http://localhost:3420/api/messages -H "Content-Type: application/json" -d '{"from": "marveen", "to": "TARGET_AGENT", "content": "Feladat leirasa."}'
+curl -s -X POST http://localhost:3420/api/messages -H "Content-Type: application/json" -d '{"from": "wraith", "to": "TARGET_AGENT", "content": "Feladat leirasa."}'
 
 ## Uzenet formatum
 
@@ -865,7 +865,7 @@ Este 23:00-kor automatikus osszefoglalo:
 7. A celagens feldolgozza es sajat Telegram csatornaján valaszol
 
 ### Uj agens ertesites
-Amikor uj agenst hoznak letre a dashboardon, a rendszer automatikusan uzenet kuld minden futo agensnek (beleertve Marveen-t): "Uj csapattag erkezett: {name}. Leirasa: {description}."
+Amikor uj agenst hoznak letre a dashboardon, a rendszer automatikusan uzenet kuld minden futo agensnek (beleertve Wraith-t): "Uj csapattag erkezett: {name}. Leirasa: {description}."
 
 ---
 
@@ -886,7 +886,7 @@ export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=http://localhost
 ```
 
 Session nevkonvencio: `agent-{name}` (pl. `agent-marketing`)
-Marveen session: `marveen-channels` (a channels.sh kezeli)
+Wraith session: `wraith-channels` (a channels.sh kezeli)
 
 ---
 
@@ -1022,7 +1022,7 @@ A schedule runner a `startWebServer()` reszeként indul (60mp poll interval).
 2. Minden engedelyezett feladatra: `cronMatchesNow(schedule, catchUpMs)`
 3. Elso futasnal: 30 perces catch-up ablak (kihagyott feladatok ujrainditas utan)
 4. Dupla-fires vedelem: `scheduleLastRun` Map
-5. `all` agent: broadcast minden futo agensnek + marveen
+5. `all` agent: broadcast minden futo agensnek + wraith
 6. Feladat tipustol fuggo prefix:
    - **task**: `[Utemezett feladat: {name}] Az eredmenyt kuldd el Telegramon...`
    - **heartbeat**: `[Heartbeat: {name}] FONTOS: Ez egy csendes ellenorzes. CSAK AKKOR irj Telegramon ha tenyleg fontos/surgos dolgot talalsz...`
@@ -1052,7 +1052,7 @@ Minden agensnek sajat bot kell:
 A heartbeat es hatterfolyamatok a `notify.ts` modulon keresztul kozvetlenul hivjak a Telegram Bot API-t. Ez NEM a Channels-en megy at. Mindketto ugyanazt a botot hasznalja, nem lesz utkozes mert a Channels pollingol, a notify csak sendMessage-et hiv.
 
 ### MarkdownV2 es HTML
-A Marveen `parse_mode: 'HTML'`-t hasznal a notify-hoz. A Channels plugin sajat formázast hasznal. A ket rendszer fuggetlenul mukodik.
+A Wraith `parse_mode: 'HTML'`-t hasznal a notify-hoz. A Channels plugin sajat formázast hasznal. A ket rendszer fuggetlenul mukodik.
 
 ---
 
@@ -1124,13 +1124,13 @@ Sorrend szamit (fuggosegi lanc):
 ### 10. LaunchAgent plist-ek
 Ket plist a `~/Library/LaunchAgents/` mappaba:
 
-**com.marveen.dashboard.plist**: Node.js hatterszolgaltatas
+**com.wraith.dashboard.plist**: Node.js hatterszolgaltatas
 - ProgramArguments: `[node_path, ${INSTALL_DIR}/dist/index.js]`
 - WorkingDirectory: `${INSTALL_DIR}`
 - RunAtLoad: true, KeepAlive: true
 - StandardOutPath/StandardErrorPath: `${INSTALL_DIR}/store/dashboard.log`
 
-**com.marveen.channels.plist**: Telegram bridge
+**com.wraith.channels.plist**: Telegram bridge
 - ProgramArguments: `[${INSTALL_DIR}/scripts/channels.sh]`
 - WorkingDirectory: `${INSTALL_DIR}`
 - RunAtLoad: true, KeepAlive: true
@@ -1188,10 +1188,10 @@ Kotelezo a `runAgent`-hez mert nincs terminal jovahagyas a hatterben. Biztonsago
 A heartbeat kozvetlenul a Telegram API-t hivja, NEM a Channels-en keresztul. Ezert kell a `TELEGRAM_BOT_TOKEN` a `.env`-ben. Igy akkor is kuld ertesitest ha a Channels session nem fut.
 
 ### 6. Channels session eletciklus
-A Channels csak addig mukodik amig a Claude Code session nyitva van. A Marveen hatterszolgaltatas viszont allandoan fut (LaunchAgent). Ezert a heartbeat es hatterfolyamatok fuggetlenek a Channels-tol.
+A Channels csak addig mukodik amig a Claude Code session nyitva van. A Wraith hatterszolgaltatas viszont allandoan fut (LaunchAgent). Ezert a heartbeat es hatterfolyamatok fuggetlenek a Channels-tol.
 
 ### 7. Kozos bot token
-A Channels plugin es a Marveen notify UGYANAZT a Telegram botot hasznalja. Nem lesz utkozes mert a Channels long-pollinggal figyelit, a notify pedig csak sendMessage-et hiv.
+A Channels plugin es a Wraith notify UGYANAZT a Telegram botot hasznalja. Nem lesz utkozes mert a Channels long-pollinggal figyelit, a notify pedig csak sendMessage-et hiv.
 
 ### 8. tmux env export trukk
 A `tmux new-session` NEM orokli a hivo kornyezetet. Minden env valtozot (TELEGRAM_STATE_DIR, ANTHROPIC_AUTH_TOKEN, stb.) a parancs stringben kell exportalni:
@@ -1225,7 +1225,7 @@ agents/{name}/
 ```
 
 ### 12. Avatar rendszer
-20 pixel art kep a `web/avatars/` mappaban. Mindegyik agens es Marveen is valaszthat a galeriabol vagy feltolthet sajatot. Avatar valtozaskor automatikus Telegram uzenet es kep kuldes.
+20 pixel art kep a `web/avatars/` mappaban. Mindegyik agens es Wraith is valaszthat a galeriabol vagy feltolthet sajatot. Avatar valtozaskor automatikus Telegram uzenet es kep kuldes.
 
 ---
 
@@ -1239,9 +1239,9 @@ Az epites utan ellenorizd:
 - [ ] `curl http://localhost:3420/api/agents` valaszol
 - [ ] `curl http://localhost:3420/api/memories/stats` valaszol
 - [ ] Dashboard megnyilik bongeszoben (http://localhost:3420)
-- [ ] LaunchAgent-ek futnak (`launchctl list | grep marveen`)
+- [ ] LaunchAgent-ek futnak (`launchctl list | grep wraith`)
 - [ ] Telegram bot valaszol uzenetekre (ha volt token)
-- [ ] `tmux list-sessions` mutatja a marveen-channels session-t
+- [ ] `tmux list-sessions` mutatja a wraith-channels session-t
 - [ ] `store/claudeclaw.db` letezik es nem ures
 - [ ] `~/.claude/skills/skill-factory/SKILL.md` letezik
 - [ ] `bash scripts/skill-index.sh` lefut es generalja a `~/.claude/skills/.skill-index.md`-t

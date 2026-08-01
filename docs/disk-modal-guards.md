@@ -41,7 +41,7 @@ classified busy/idle and is never disturbed (locked by the contract test).
 
 ## Activation
 
-The unit files carry `/path/to/marveen` and `/home/USER` placeholders -- replace
+The unit files carry `/path/to/wraith` and `/home/USER` placeholders -- replace
 them with your install dir and home before installing.
 
 ```bash

@@ -158,7 +158,7 @@ A prompt injektálás előtt egy "untrusted" preamble kerül eléje, hogy az ese
 A dashboard Bearer tokennel védett (token: `store/.dashboard-token`).
 
 ```bash
-TOKEN=$(cat /Users/jonasgergo/Documents/marveen/store/.dashboard-token)
+TOKEN=$(cat /Users/jonasgergo/Documents/wraith/store/.dashboard-token)
 ```
 
 ### Lista

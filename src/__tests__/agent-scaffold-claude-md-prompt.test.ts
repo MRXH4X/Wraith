@@ -1,11 +1,11 @@
 // Regression test for the 2026-06-01 Pap Csaba / Tanfield install incident.
 //
 // The "Új ismeretlen sender első üzenete (ARANYSZABÁLY)" block inside
-// generateClaudeMd() prompt previously hardcoded "Marveennek" / "to":"marveen",
+// generateClaudeMd() prompt previously hardcoded "Wraithnek" / "to":"wraith",
 // even though the prompt itself is parameterised by MAIN_AGENT_ID and BOT_NAME
-// elsewhere. A non-marveen-named installation (e.g. Csaba's bot named "Tanfield")
+// elsewhere. A non-wraith-named installation (e.g. Csaba's bot named "Tanfield")
 // generated CLAUDE.md files for sub-agents that told them to ping a non-existent
-// 'marveen' on first-stranger-message - so the sub-agent froze waiting for an
+// 'wraith' on first-stranger-message - so the sub-agent froze waiting for an
 // approval from no-one.
 //
 // This test reads agent-scaffold.ts as source and asserts that the prompt body
@@ -32,7 +32,7 @@ describe('generateClaudeMd: stranger-sender ARANYSZABÁLY block is bot-name agno
   const promptBody = src.slice(promptStart, promptEnd)
 
   // Find the stranger-sender block specifically; rest of the prompt may
-  // legitimately mention Marveen as a proper noun in other contexts.
+  // legitimately mention Wraith as a proper noun in other contexts.
   const blockStart = promptBody.indexOf('## Új ismeretlen sender első üzenete')
   expect(blockStart, 'ARANYSZABÁLY block not found').toBeGreaterThan(0)
   // The block runs to the next ## header (or end of prompt).
@@ -40,20 +40,20 @@ describe('generateClaudeMd: stranger-sender ARANYSZABÁLY block is bot-name agno
   const nextHeader = restAfterBlock.indexOf('\n## ')
   const block = promptBody.slice(blockStart, blockStart + 5 + (nextHeader > 0 ? nextHeader : restAfterBlock.length))
 
-  it('substitutes BOT_NAME for the display name (no literal "Marveennek")', () => {
-    // The proper-noun cases ("Marveennek", "Marveen visszajelzi") were the
+  it('substitutes BOT_NAME for the display name (no literal "Wraithnek")', () => {
+    // The proper-noun cases ("Wraithnek", "Wraith visszajelzi") were the
     // first bug surface. Block must not contain the literal display name.
-    expect(block).not.toMatch(/\bMarveennek\b/)
-    expect(block).not.toMatch(/\bMarveen visszajelzi\b/)
+    expect(block).not.toMatch(/\bWraithnek\b/)
+    expect(block).not.toMatch(/\bWraith visszajelzi\b/)
     // Must use the template variable instead.
     expect(block).toContain('${BOT_NAME}')
   })
 
-  it('substitutes MAIN_AGENT_ID for the inter-agent routing target (no literal "to":"marveen")', () => {
+  it('substitutes MAIN_AGENT_ID for the inter-agent routing target (no literal "to":"wraith")', () => {
     // The routing case was the second surface and the load-bearing one:
-    // a literal "marveen" routing target made the sub-agent ping a
+    // a literal "wraith" routing target made the sub-agent ping a
     // non-existent recipient on Csaba's box.
-    expect(block).not.toMatch(/"to"\s*:\s*"marveen"/i)
+    expect(block).not.toMatch(/"to"\s*:\s*"wraith"/i)
     // Must use the template variable.
     expect(block).toContain('${MAIN_AGENT_ID}')
   })

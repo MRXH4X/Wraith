@@ -28,7 +28,7 @@ describe('buildWorkerPrompt', () => {
 
   it('does not inject any persona / project voice', () => {
     const p = buildWorkerPrompt('TASK', out, done)
-    expect(p).not.toMatch(/Marveen|Szabolcs|asszisztens/i)
+    expect(p).not.toMatch(/Wraith|Szabolcs|asszisztens/i)
   })
 })
 
@@ -64,14 +64,14 @@ describe('configDirKeychainService', () => {
   // service named "Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[0:8]>"
   // and it SHADOWS <CONFIG_DIR>/.credentials.json. The worker auth-recovery
   // deletes this exact entry so the freshly-seeded file becomes authoritative.
-  // Verified live 2026-06-10 against the marveen-worker config dir.
+  // Verified live 2026-06-10 against the wraith-worker config dir.
   it('derives the sha256[0:8] service suffix (verified live vector)', () => {
-    expect(configDirKeychainService('/Users/marvin/.marveen-worker/.claude-config'))
+    expect(configDirKeychainService('/Users/marvin/.wraith-worker/.claude-config'))
       .toBe('Claude Code-credentials-1d2e1367')
   })
 
   it('is path-specific: a different config dir hashes to a different service', () => {
-    const a = configDirKeychainService('/Users/marvin/.marveen-worker/.claude-config')
+    const a = configDirKeychainService('/Users/marvin/.wraith-worker/.claude-config')
     const b = configDirKeychainService('/tmp/some-other-config')
     expect(a).not.toBe(b)
     expect(b.startsWith('Claude Code-credentials-')).toBe(true)
@@ -80,8 +80,8 @@ describe('configDirKeychainService', () => {
 
 describe('workerHomeFor (WORKERHOME1: worker home derives from MAIN_AGENT_ID)', () => {
   it('default install keeps the historical paths -- zero migration, unchanged Keychain hash', () => {
-    expect(workerHomeFor('marveen', 'slow').endsWith('/.marveen-worker')).toBe(true)
-    expect(workerHomeFor('marveen', 'fast').endsWith('/.marveen-worker-fast')).toBe(true)
+    expect(workerHomeFor('wraith', 'slow').endsWith('/.wraith-worker')).toBe(true)
+    expect(workerHomeFor('wraith', 'fast').endsWith('/.wraith-worker-fast')).toBe(true)
   })
 
   it('a non-default id derives its own isolated dirs (sandbox/renamed install)', () => {
@@ -90,12 +90,12 @@ describe('workerHomeFor (WORKERHOME1: worker home derives from MAIN_AGENT_ID)', 
   })
 
   it('never collides with the default install dir for a different id', () => {
-    expect(workerHomeFor('jarvis', 'slow')).not.toBe(workerHomeFor('marveen', 'slow'))
-    expect(workerHomeFor('jarvis', 'fast')).not.toBe(workerHomeFor('marveen', 'fast'))
+    expect(workerHomeFor('jarvis', 'slow')).not.toBe(workerHomeFor('wraith', 'slow'))
+    expect(workerHomeFor('jarvis', 'fast')).not.toBe(workerHomeFor('wraith', 'fast'))
   })
 
   it('slow and fast variants of the same id never share a home', () => {
-    expect(workerHomeFor('marveen', 'slow')).not.toBe(workerHomeFor('marveen', 'fast'))
+    expect(workerHomeFor('wraith', 'slow')).not.toBe(workerHomeFor('wraith', 'fast'))
   })
 })
 

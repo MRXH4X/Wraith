@@ -56,7 +56,7 @@ describe('shouldRegisterHooks', () => {
   // user-global settings.json -- the same deaf-agent trap, one class wider.
   it('skips a plain clone under /private/tmp (canary/second-instance)', () => {
     const d = shouldRegisterHooks({
-      projectRoot: '/private/tmp/marveen-work',
+      projectRoot: '/private/tmp/wraith-work',
       webOnly: false,
       isGitFile: notAGitFile,
     })
@@ -64,12 +64,12 @@ describe('shouldRegisterHooks', () => {
     expect(d.reason).toMatch(/temp dir/)
   })
   it('skips a clone under /tmp', () => {
-    const d = shouldRegisterHooks({ projectRoot: '/tmp/marveen-work', webOnly: false, isGitFile: notAGitFile })
+    const d = shouldRegisterHooks({ projectRoot: '/tmp/wraith-work', webOnly: false, isGitFile: notAGitFile })
     expect(d.register).toBe(false)
   })
   it('skips a clone under the injected OS tmpDir (e.g. macOS /var/folders/..)', () => {
     const d = shouldRegisterHooks({
-      projectRoot: '/var/folders/xy/abc/T/marveen-clone',
+      projectRoot: '/var/folders/xy/abc/T/wraith-clone',
       webOnly: false,
       isGitFile: notAGitFile,
       tmpDir: '/var/folders/xy/abc/T',

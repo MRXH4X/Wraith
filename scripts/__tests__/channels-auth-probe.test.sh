@@ -1,6 +1,6 @@
 #!/bin/bash
 # Contract tests for scripts/channels-auth-probe.mjs (PLAN.md GAP 2b,
-# 2026-07-23 marveen-channels silent outage). Feeds captured-pane fixture text
+# 2026-07-23 wraith-channels silent outage). Feeds captured-pane fixture text
 # via stdin (no real tmux session, no real Claude process) and asserts exit
 # code + stdout marker per the probe's contract. Fixtures reused from
 # src/__tests__/reauth-detect.test.ts for consistency (same markers the probe

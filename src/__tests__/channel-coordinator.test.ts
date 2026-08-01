@@ -132,7 +132,7 @@ describe('ingest', () => {
     expect(getOffset('telegram')).toBe(512)
   })
 
-  // No-message-loss replay (Marveen decision #2): events whose handoff was
+  // No-message-loss replay (Wraith decision #2): events whose handoff was
   // abandoned by the router, or that were never handed off, must be re-queued.
   it('reconcile_returns_event_never_handed_off (crash between insert and handoff)', () => {
     const ins = insertIncomingEvent('telegram', sampleEvent(300))

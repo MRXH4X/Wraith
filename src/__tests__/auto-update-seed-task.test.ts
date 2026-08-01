@@ -43,7 +43,7 @@ describe('auto-update seed task', () => {
   })
 
   it('calls PR-B update.sh with the notify flag, not its own update logic', () => {
-    expect(config.command).toContain('MARVEEN_UPDATE_NOTIFY=1')
+    expect(config.command).toContain('WRAITH_UPDATE_NOTIFY=1')
     expect(config.command).toContain('AUTO_STASH=1')
     expect(config.command).toContain('{{INSTALL_DIR}}/update.sh')
   })

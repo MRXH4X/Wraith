@@ -14,7 +14,7 @@ import { detectLanIp } from './web/network-info.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import { ensureAgentHooks, ensureAgentStalenessHook, ensureEgressGate, ensureGovernanceGateCommands, ensureQuarantineReader, ensureDefaultScheduledTasks, agentSettingsPath, ensureAutonomySection } from './web/agent-scaffold.js'
 import { shouldRegisterHooks, pruneStaleHooksFromSettingsFile } from './web/hook-registration-guard.js'
-import { refreshMarveenBotUsername } from './web/telegram.js'
+import { refreshWraithBotUsername } from './web/telegram.js'
 import { startMessageRouter } from './web/message-router.js'
 import { startUpdateChecker } from './web/update-checker.js'
 import { startScheduleRunner } from './web/schedule-runner.js'
@@ -54,7 +54,7 @@ import { tryHandleConnectorsHu } from './web/routes/connectors-hu.js'
 import { tryHandleAgentsSkills } from './web/routes/agents-skills.js'
 import { tryHandleSkills } from './web/routes/skills.js'
 import { tryHandleAgents } from './web/routes/agents.js'
-import { tryHandleMarveen } from './web/routes/marveen.js'
+import { tryHandleWraith } from './web/routes/wraith.js'
 import { tryHandleRecall } from './web/routes/recall.js'
 import { tryHandleBackgroundTasks, sweepOrphanedBackgroundTasks } from './web/routes/background-tasks.js'
 import { tryHandleOverview } from './web/routes/overview.js'
@@ -190,7 +190,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleAgentConversation(routeCtx)) return
       if (await tryHandleAgentTaskState(routeCtx)) return
       if (await tryHandleAgents(routeCtx, WEB_DIR)) return
-      if (await tryHandleMarveen(routeCtx, WEB_DIR)) return
+      if (await tryHandleWraith(routeCtx, WEB_DIR)) return
       if (await tryHandleBackgroundTasks(routeCtx)) return
       if (await tryHandleRecall(routeCtx)) return
       if (await tryHandleOverview(routeCtx)) return
@@ -336,7 +336,7 @@ export function startWebServer(port = 3420): http.Server {
   // heartbeat / scheduled generation after boot does not pay the cold-boot
   // latency. runViaWorker still lazy-starts + restarts it on demand, so this is
   // a warm-up, not a hard dependency. Skipped on the SDK rollback backend.
-  if (!webOnly && (process.env.MARVEEN_AGENT_BACKEND || 'worker').toLowerCase() !== 'sdk') {
+  if (!webOnly && (process.env.WRAITH_AGENT_BACKEND || 'worker').toLowerCase() !== 'sdk') {
     import('./web/agent-worker.js')
       .then(m => { m.startWorkerSession(); logger.info('Interactive agent worker pre-started') })
       .catch(err => logger.warn({ err }, 'Failed to pre-start agent worker (will lazy-start on first use)'))
@@ -353,7 +353,7 @@ export function startWebServer(port = 3420): http.Server {
   // event loop alive, so that is not just a leak: the process would never exit.
   // The other monitors are synchronous calls and cannot hit this.
   let workerLivenessCancelled = false
-  if (!webOnly && (process.env.MARVEEN_AGENT_BACKEND || 'worker').toLowerCase() !== 'sdk') {
+  if (!webOnly && (process.env.WRAITH_AGENT_BACKEND || 'worker').toLowerCase() !== 'sdk') {
     import('./web/worker-liveness.js')
       .then(m => {
         if (workerLivenessCancelled) return
@@ -459,9 +459,9 @@ export function startWebServer(port = 3420): http.Server {
   // channel-coordinator 409 cooldown hysteresis). That fix and this one are
   // complementary -- both 409 vectors must be addressed.
 
-  // Warm the Marveen bot username cache so /api/marveen returns @username on
+  // Warm the Wraith bot username cache so /api/wraith returns @username on
   // the first dashboard load. Re-fetched lazily otherwise.
-  refreshMarveenBotUsername().catch(() => {})
+  refreshWraithBotUsername().catch(() => {})
 
   // Reconcile the federation onboarding block in the main agent's CLAUDE.md
   // EARLY (before the channels session may read the file) and only on live

@@ -231,7 +231,7 @@ Válasz siker esetén: `{ "ok": true, "key": "KANBAN_WIP_WARN_PCT", "value": 75,
 
 Hiba esetén: `{ "error": "..." }` (400 validációs hiba, 403 titkos kulcs, 404 ismeretlen kulcs)
 
-**Hot-reload:** a POST sikeres mentés után a `/api/marveen` `kanbanWip` blokkja azonnal az új értékkel tér vissza (nincs szükség újraindításra, ha `requiresRestart: false`).
+**Hot-reload:** a POST sikeres mentés után a `/api/wraith` `kanbanWip` blokkja azonnal az új értékkel tér vissza (nincs szükség újraindításra, ha `requiresRestart: false`).
 
 **Change-log:** minden sikeres POST audit-sort ír a `config_change_log` SQLite táblába (kulcs, régi érték, új érték, actor, timestamp). Titkos kulcsoknál az érték `null`-ként kerül rögzítésre. UI nincs hozzá; a tábla közvetlenül lekérdezhető.
 
@@ -285,7 +285,7 @@ Minden sub-ágens mappája gitignore-olt (`agents/` mappa), így a titkos kulcso
   "memoryIsolation": false,
   "team": {
     "role": "member",
-    "reportsTo": "marveen",
+    "reportsTo": "wraith",
     "delegatesTo": [],
     "autoDelegation": false,
     "trustFrom": []
@@ -362,7 +362,7 @@ Minden feladat egy önálló mappa, benne két fájl. Részletes leírás: [sche
 
 ## .mcp.json -- MCP szerverek
 
-Az MCP konfigurációk scope-olva vannak: az ágensek `agents/<name>/.mcp.json` fájljaikban csak a számukra releváns szervereket tartalmazzák. A projekt gyökerében lévő `.mcp.json` a főágensre (marveen/Jarvis) vonatkozik.
+Az MCP konfigurációk scope-olva vannak: az ágensek `agents/<name>/.mcp.json` fájljaikban csak a számukra releváns szervereket tartalmazzák. A projekt gyökerében lévő `.mcp.json` a főágensre (wraith/Jarvis) vonatkozik.
 
 ```json
 {
@@ -389,7 +389,7 @@ Az MCP konfigurációk scope-olva vannak: az ágensek `agents/<name>/.mcp.json` 
 
 ## Környezeti változók (.env / launchd plist)
 
-A főbb konfigurációs változók a launchd plist-ben (`~/Library/LaunchAgents/com.marveen.dashboard.plist`) vagy a `.env` fájlban élnek.
+A főbb konfigurációs változók a launchd plist-ben (`~/Library/LaunchAgents/com.wraith.dashboard.plist`) vagy a `.env` fájlban élnek.
 
 | Változó | Leírás |
 |---------|--------|

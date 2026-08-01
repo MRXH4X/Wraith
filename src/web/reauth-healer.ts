@@ -24,7 +24,7 @@ import { loginSequence, literalKeyArgs, specialKeyArgs } from './tmux-keys.js'
 // + LOUD escalation to the owner via notify.sh (plugin-independent Bot API, so
 // it reaches the owner even when the channel plugin is also wedged).
 //
-// Scope (Marveen-approved): sub-agents get best-effort /login send-keys +
+// Scope (Wraith-approved): sub-agents get best-effort /login send-keys +
 // escalate; the MAIN agent (always-on channels session) is escalate-ONLY -- we
 // do not inject /login into a live conversation autonomously. Production-host
 // only (RESPAWN_ENABLED), like the other recovery loops.
@@ -320,14 +320,14 @@ function checkSession(label: string, session: string, isMain: boolean, quiet: bo
           // import (matches inbound-probe.ts:318) to avoid a circular module
           // dependency with channel-monitor.ts.
           if (decision.restartMain) {
-            import('./channel-monitor.js').then(({ hardRestartMarveenChannels, lastMainRespawnAt }) => {
+            import('./channel-monitor.js').then(({ hardRestartWraithChannels, lastMainRespawnAt }) => {
               const RESPAWN_GRACE_MS = 15 * 60 * 1000 // mirror channel-monitor.ts's KEEPALIVE_RESPAWN_GRACE_MS
               const now = Date.now()
               if (lastMainRespawnAt() > 0 && now - lastMainRespawnAt() < RESPAWN_GRACE_MS) {
                 logger.info('reauth-healer: main dead-token restart skipped -- within cross-path respawn grace')
                 return
               }
-              const r2 = hardRestartMarveenChannels()
+              const r2 = hardRestartWraithChannels()
               logger.warn({ ok: r2.ok }, 'reauth-healer: main dead-token restart triggered')
             }).catch((err) => logger.debug({ err }, 'reauth-healer: main dead-token restart import failed'))
           }

@@ -8,7 +8,7 @@
 # generic error. A legitimately long task (no hung reply) must NOT be touched
 # before the backstop.
 #
-# Fully hermetic: HOME and MARVEEN_ROOT are pinned to a temp tree so the
+# Fully hermetic: HOME and WRAITH_ROOT are pinned to a temp tree so the
 # watchdog only ever scans test dirs (never the real ~/.claude), and all Bot API
 # traffic is routed to a local stub via TELEGRAM_API_BASE.
 
@@ -95,7 +95,7 @@ count() { grep -c "^$1 " "$REQLOG" 2>/dev/null; }
 body_has() { grep -q "$1" "$REQLOG" && echo yes || echo no; }
 run_wd() { # force_up wedged_up_sec
     : > "$REQLOG"
-    HOME="$TMP" MARVEEN_ROOT="$TMP/root" TELEGRAM_API_BASE="$API_BASE" \
+    HOME="$TMP" WRAITH_ROOT="$TMP/root" TELEGRAM_API_BASE="$API_BASE" \
       TELEGRAM_WATCHDOG_FORCE_AGENT_UP="$1" TELEGRAM_WATCHDOG_WEDGED_UP_SEC="$2" \
       python3 "$WATCHDOG"
 }

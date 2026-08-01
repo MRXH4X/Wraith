@@ -98,7 +98,7 @@ describe('channel-plugin-unlock helper contract', () => {
 describe('channel-monitor wires the unlock probe into both in-process respawn paths', () => {
   // The 2026-06-01 18:55 root cause was that channels.sh's post-init unlock
   // probe (#231/#232) only runs on the launchd start path - the JS respawn
-  // paths (resumeMarveenSession and respawnMarveenSessionFresh) call tmux
+  // paths (resumeWraithSession and respawnWraithSessionFresh) call tmux
   // respawn-pane directly and skipped channels.sh entirely. Both JS paths
   // must now call schedulePluginUnlockAfterRespawn after scheduleIdentitySetup
   // or a Failed/disabled plugin will stay offline indefinitely.
@@ -115,13 +115,13 @@ describe('channel-monitor wires the unlock probe into both in-process respawn pa
     return monitor.slice(start, end > start ? end : undefined)
   }
 
-  it('resumeMarveenSession schedules the unlock probe after the respawn', () => {
-    const body = bodyOf('resumeMarveenSession')
+  it('resumeWraithSession schedules the unlock probe after the respawn', () => {
+    const body = bodyOf('resumeWraithSession')
     expect(body).toMatch(/schedulePluginUnlockAfterRespawn\(MAIN_CHANNELS_SESSION/)
   })
 
-  it('respawnMarveenSessionFresh schedules the unlock probe after the respawn', () => {
-    const body = bodyOf('respawnMarveenSessionFresh')
+  it('respawnWraithSessionFresh schedules the unlock probe after the respawn', () => {
+    const body = bodyOf('respawnWraithSessionFresh')
     expect(body).toMatch(/schedulePluginUnlockAfterRespawn\(MAIN_CHANNELS_SESSION/)
   })
 })

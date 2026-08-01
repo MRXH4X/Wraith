@@ -2,7 +2,7 @@
 # DEPRECATED: use channel-image-resize.sh instead. This file is kept for
 # backward compatibility with existing hook installations.
 # PreToolUse hook: auto-resize Telegram-fogadott nagy képeket a Read tool előtt
-# Védelem: ha egy >500KB Telegram-fogadott kép kerülne a Marveen session-be, a
+# Védelem: ha egy >500KB Telegram-fogadott kép kerülne a Wraith session-be, a
 # base64-encoded representation megtelítheti a context window-t és /compact-ot
 # kényszerítene. Helyette ez a hook:
 #   1. Az eredetit átmenti `inbox/original/<filename>` alá (ha még nem ott van)
@@ -11,7 +11,7 @@
 #      részletes elemzés kell (OCR, részletek olvasása, edit-pre-process),
 #      tudatosan tudjon az eredetihez nyúlni.
 #
-# Hatás: minden Marveen-szerű ágens automatikusan védve van az óriás-image-
+# Hatás: minden Wraith-szerű ágens automatikusan védve van az óriás-image-
 # context-megtelítéstől, DE ha kell a full-res original, megtalálja az
 # `inbox/original/`-ban.
 #
@@ -67,7 +67,7 @@ sips -Z 1024 "$FILE_PATH" >/dev/null 2>&1 || true
 
 NEW_SIZE=$(stat -f%z "$FILE_PATH" 2>/dev/null || stat -c%s "$FILE_PATH" 2>/dev/null || echo 0)
 
-# Stderr log a Marveen-pane-be (debug)
+# Stderr log a Wraith-pane-be (debug)
 echo "[telegram-image-resize] $FILE_PATH: ${SIZE}B → ${NEW_SIZE}B; original kept at $ORIG_PATH" >&2
 
 # additionalContext: tájékoztatja a Claude-ot hogy van full-res original is

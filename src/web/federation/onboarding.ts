@@ -34,9 +34,9 @@ import { agentDir } from '../agent-config.js'
 import { catalogAgentNames } from './local-catalog.js'
 import { getFederationConfig, DEFAULT_ROUTING_MODE, type FederationConfig, type FederationRoutingMode } from './config.js'
 
-export const FEDERATION_BLOCK_BEGIN = '<!-- MARVEEN-FEDERATION:BEGIN -- kezelt blokk / managed block, do not edit inside -->'
-export const FEDERATION_BLOCK_END = '<!-- MARVEEN-FEDERATION:END -->'
-export const FEDERATION_POLICY_ANCHOR = '<!-- MARVEEN-FEDERATION:POLICY -->'
+export const FEDERATION_BLOCK_BEGIN = '<!-- WRAITH-FEDERATION:BEGIN -- kezelt blokk / managed block, do not edit inside -->'
+export const FEDERATION_BLOCK_END = '<!-- WRAITH-FEDERATION:END -->'
+export const FEDERATION_POLICY_ANCHOR = '<!-- WRAITH-FEDERATION:POLICY -->'
 // Insert after this template section when present (EOF-fallback otherwise --
 // hand-edited or migrated installs may lack the heading).
 const INTERAGENT_HEADING = '## Inter-agent kommunikáció'

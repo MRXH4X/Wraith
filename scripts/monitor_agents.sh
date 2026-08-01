@@ -10,11 +10,11 @@
 #     ./scripts/monitor_agents.sh
 #
 #   Remote (from a laptop with iTerm2):
-#     ssh -t <host> "~/marveen/scripts/monitor_agents.sh"
+#     ssh -t <host> "~/wraith/scripts/monitor_agents.sh"
 #
 # ENV:
 #   MAIN_AGENT_ID        override the main agent id (default: read from
-#                        install .env, fall back to "marveen")
+#                        install .env, fall back to "wraith")
 #   MONITOR_READONLY=1   attach read-only (look, don't touch)
 #
 # HOW IT FINDS AGENTS:
@@ -45,13 +45,13 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:/us
 SESSION="monitor"
 
 # Resolve MAIN_AGENT_ID: explicit env wins; otherwise read the install .env
-# one directory up from this script; otherwise fall back to "marveen".
+# one directory up from this script; otherwise fall back to "wraith".
 if [ -z "${MAIN_AGENT_ID:-}" ]; then
   INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
   if [ -f "$INSTALL_DIR/.env" ]; then
     MAIN_AGENT_ID="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | tail -1 | cut -d'=' -f2- | tr -d '"' || true)"
   fi
-  MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"
+  MAIN_AGENT_ID="${MAIN_AGENT_ID:-wraith}"
 fi
 
 MAIN_SESSION="${MAIN_AGENT_ID}-channels"

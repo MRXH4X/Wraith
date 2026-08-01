@@ -1,10 +1,10 @@
 #!/bin/bash
 # Install script i18n helper — sourced by install-macos.sh and install-linux.sh
-# MARVEEN_LANG=hu (default) or MARVEEN_LANG=en
+# WRAITH_LANG=hu (default) or WRAITH_LANG=en
 
 _t() {
   local key="$1"
-  local lang="${MARVEEN_LANG:-hu}"
+  local lang="${WRAITH_LANG:-hu}"
   case "${lang}:${key}" in
     # ── Sections ──────────────────────────────────────────────────────
     en:section_1) echo "[1/7] Checking prerequisites..." ;;
@@ -56,8 +56,8 @@ _t() {
     hu:prompt_discord_channel_id) echo "  Discord channel ID: " ;;
     en:prompt_discord_user_id) echo "  Your Discord user ID (operator): " ;;
     hu:prompt_discord_user_id) echo "  A Te Discord user ID-d (operator): " ;;
-    en:prompt_bot_name) echo "  What should your bot be named? [Marveen]: " ;;
-    hu:prompt_bot_name) echo "  Mi legyen a botod neve? [Marveen]: " ;;
+    en:prompt_bot_name) echo "  What should your bot be named? [Wraith]: " ;;
+    hu:prompt_bot_name) echo "  Mi legyen a botod neve? [Wraith]: " ;;
     en:prompt_pair_code) echo "  Pairing code (or leave empty, do it later): " ;;
     hu:prompt_pair_code) echo "  Párosító kód (vagy hagyd üresen, ha később csinálod): " ;;
     en:prompt_migrate) echo "  Would you like to run the migration now? (y/n) [n]: " ;;
@@ -73,8 +73,8 @@ _t() {
     # ── Key messages ─────────────────────────────────────────────────
     en:warn_pair_missing) echo "  WARNING: Telegram pairing was not completed!" ;;
     hu:warn_pair_missing) echo "  FIGYELEM: Telegram párosítás nem történt meg!" ;;
-    en:success_installed) echo "  ✓ Marveen successfully installed!" ;;
-    hu:success_installed) echo "  ✓ Marveen sikeresen telepítve!" ;;
+    en:success_installed) echo "  ✓ Wraith successfully installed!" ;;
+    hu:success_installed) echo "  ✓ Wraith sikeresen telepítve!" ;;
     # ── Tagline / wizard ─────────────────────────────────────────────
     en:tagline) echo "Your AI team, running while you sleep." ;;
     hu:tagline) echo "AI csapatod, ami fut amíg te alszol." ;;
@@ -304,8 +304,8 @@ _t() {
     en:stop.stopped) echo "stopped" ;;
     hu:stop.stopped) echo "leallitva" ;;
     # ── scripts/migrate.sh ────────────────────────────────────────────
-    en:migrate.title) echo "Marveen - System Migration" ;;
-    hu:migrate.title) echo "Marveen - Rendszer költöztetés" ;;
+    en:migrate.title) echo "Wraith - System Migration" ;;
+    hu:migrate.title) echo "Wraith - Rendszer költöztetés" ;;
     en:migrate.subtitle) echo "Migrating previous AI assistant" ;;
     hu:migrate.subtitle) echo "Korábbi AI asszisztens átmigrálása" ;;
     en:migrate.section_1) echo "[1/4] Source selection" ;;
@@ -320,8 +320,8 @@ _t() {
     hu:migrate.prompt_choose) echo "  Válassz (1/2/3): " ;;
     en:migrate.prompt_path) echo "  Workspace / directory path: " ;;
     hu:migrate.prompt_path) echo "  Workspace / mappa útvonala: " ;;
-    en:migrate.prompt_agent) echo "  Import to which agent? [marveen]: " ;;
-    hu:migrate.prompt_agent) echo "  Melyik ágenshez importáljak? [marveen]: " ;;
+    en:migrate.prompt_agent) echo "  Import to which agent? [wraith]: " ;;
+    hu:migrate.prompt_agent) echo "  Melyik ágenshez importáljak? [wraith]: " ;;
     en:migrate.section_2) echo "[2/4] Scanning source..." ;;
     hu:migrate.section_2) echo "[2/4] Rendszer feltérképezése..." ;;
     en:migrate.found_memory) echo "(cold memory)" ;;

@@ -51,7 +51,7 @@ print('BRAND_NAME set')
 PYEOF
 ```
 
-5. **Restart a megjelenítéshez.** A `SERVICE_ID`-t az `.env`-ből olvasd (ha nincs: `MAIN_AGENT_ID`; ha az sincs: `marveen`):
+5. **Restart a megjelenítéshez.** A `SERVICE_ID`-t az `.env`-ből olvasd (ha nincs: `MAIN_AGENT_ID`; ha az sincs: `wraith`):
    - **macOS**: `launchctl kickstart -k gui/$(id -u)/com.<SERVICE_ID>.app`
    - **Linux (systemd user)**: `systemctl --user restart <SERVICE_ID>-dashboard` (root-VPS-en, ahol nincs user-session: `systemctl restart <SERVICE_ID>-dashboard`)
    - A persona (ahogy magadról beszélsz) a KÖVETKEZŐ agent-session-indulásnál frissül. **Solo installon** (csak fő-agent fut) mehet a channels-restart is: `systemctl --user restart <SERVICE_ID>-channels` -- FIGYELEM: ez a te saját sessionödet is újraindítja, ezért ELŐBB válaszolj a gazdának ("átneveztem magam, újraindulok az új névvel"), és CSAK UTÁNA add ki. **Multi-agent flottán** NE indítsd újra a channels-t (a tmux-szervert osztjátok) -- a persona a következő természetes restartnál él.

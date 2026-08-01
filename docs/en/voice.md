@@ -49,7 +49,7 @@ Inter-agent messages (no `chat_id`) bypass the voice pipeline entirely — no TT
 
 ### Voice models
 
-TTS uses Piper ONNX models. Models are stored in `~/.local/share/marveen-voice/voices/`.
+TTS uses Piper ONNX models. Models are stored in `~/.local/share/wraith-voice/voices/`.
 
 Included by default (Hungarian):
 - `hu_HU-imre-medium` — male voice (default)

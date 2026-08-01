@@ -6,7 +6,7 @@
 
 ## 🎯 Mit tud / miért érdekes
 
-A legtöbb AI-asszisztens reaktív: kérdezel, válaszol. Marveen ezzel szemben **proaktív** — óránként/ütemezetten magától ellenőrzi a környezetét (kanban-tábla, naptár, memória, rendszer-állapot), és csak akkor szól, ha tényleg van mit jelenteni.
+A legtöbb AI-asszisztens reaktív: kérdezel, válaszol. Wraith ezzel szemben **proaktív** — óránként/ütemezetten magától ellenőrzi a környezetét (kanban-tábla, naptár, memória, rendszer-állapot), és csak akkor szól, ha tényleg van mit jelenteni.
 
 Ennek a viselkedésnek a kulcsa a **fokozatos autonómia**: egy bizalmi-létra, amin kategóriánként beállítod, mennyit cselekedhet az asszisztens egyedül:
 
@@ -18,7 +18,7 @@ Egy dashboard-felületen, kategóriánként húzod feljebb-lejjebb a szintet —
 
 **A biztonsági korlát beépített:** a visszafordíthatatlan, kifelé menő műveletek (email-küldés, publikálás, vásárlás, törlés, jogosultság-változtatás) **zárolva** vannak — akármit állítasz, ezek sosem válhatnak teljesen autonómmá. Ez nem opció, hanem kódba égetett határ.
 
-**Kuriózum:** ez a minta lényegében az, amit az Anthropic 2025-ben hivatalosan "Routines" névvel mutatott be — proaktív, ütemezett ügynökök, kategóriánként állítható autonómiával. Marveen ezt a mintát már korábban élesben futtatta, saját ütemezett-feladat + heartbeat infrastruktúrán. Nem konceptként, hanem valódi termelési rendszerként, amely naponta fut.
+**Kuriózum:** ez a minta lényegében az, amit az Anthropic 2025-ben hivatalosan "Routines" névvel mutatott be — proaktív, ütemezett ügynökök, kategóriánként állítható autonómiával. Wraith ezt a mintát már korábban élesben futtatta, saját ütemezett-feladat + heartbeat infrastruktúrán. Nem konceptként, hanem valódi termelési rendszerként, amely naponta fut.
 
 ---
 

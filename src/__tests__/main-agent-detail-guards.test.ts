@@ -71,9 +71,9 @@ describe('main-agent detail and lifecycle guards', () => {
     expect(stopBlock.indexOf('isMainChannelsAgent(name)')).toBeLessThan(stopBlock.indexOf('removeDesiredAgent(name)'))
   })
 
-  it('routes the main id to openMarveenDetail before the generic detail fetch', () => {
+  it('routes the main id to openWraithDetail before the generic detail fetch', () => {
     const detailBlock = sourceBetween(appSource, 'async function openAgentDetail(agentName)', 'function populateDetailAvatarGrid')
-    const redirectIndex = detailBlock.indexOf('return openMarveenDetail()')
+    const redirectIndex = detailBlock.indexOf('return openWraithDetail()')
     const fetchIndex = detailBlock.indexOf('fetch(`/api/agents/')
 
     expect(redirectIndex).toBeGreaterThan(-1)

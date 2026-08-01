@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { chatIdFromAccessConfig } from '../web/schedule-runner.js'
 
-// Regression guard for 2026-07-27 (Zara report, Marveen diagnosis): the
+// Regression guard for 2026-07-27 (Zara report, Wraith diagnosis): the
 // scheduled-task prompt prefix carried a "chat_id: 0" sentinel from a
 // pre-plugin channel implementation. The official Telegram plugin rejects it
 // (assertAllowedChat: "0" is never allowlisted), so every non-heartbeat

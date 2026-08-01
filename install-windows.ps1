@@ -1,4 +1,4 @@
-﻿# Marveen - Windows telepítő (WSL alapú)
+﻿# Wraith - Windows telepítő (WSL alapú)
 # Futtatás: PowerShell-ben: .\install-windows.ps1
 
 # NOTE: wsl.exe emits its output as UTF-16LE, so PowerShell captures each char
@@ -11,7 +11,7 @@
 # on Windows PowerShell 5.1; the targeted null-strip is side-effect-free.
 
 Write-Host ""
-Write-Host "  ▐▛███▜▌   Marveen" -ForegroundColor Cyan
+Write-Host "  ▐▛███▜▌   Wraith" -ForegroundColor Cyan
 Write-Host " ▝▜█████▛▘  AI csapatod, ami fut amíg te alszol." -ForegroundColor Cyan
 Write-Host "   ▘▘ ▝▝" -ForegroundColor DarkCyan
 Write-Host ""
@@ -33,7 +33,7 @@ try {
 if (-not $wslInstalled) {
     Write-Host "  ✗ WSL nem található" -ForegroundColor Red
     Write-Host ""
-    Write-Host "  A Marveen WSL-ben fut (Windows Subsystem for Linux)." -ForegroundColor Yellow
+    Write-Host "  A Wraith WSL-ben fut (Windows Subsystem for Linux)." -ForegroundColor Yellow
     Write-Host "  Telepítéshez futtasd rendszergazdaként:" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "    wsl --install" -ForegroundColor Cyan
@@ -76,10 +76,10 @@ if ($distros -match "Ubuntu") {
         Write-Host "  Telepítés folytatása az Ubuntu-ban (install-linux.sh)..." -ForegroundColor Cyan
         # Triggers first-run init if still pending; if the distro needs a reboot
         # the call fails and we fall through to the manual instructions below.
-        wsl -d Ubuntu -- bash -c "curl -fsSL https://raw.githubusercontent.com/Szotasz/marveen/main/install-linux.sh -o /tmp/marveen-install.sh && bash /tmp/marveen-install.sh"
+        wsl -d Ubuntu -- bash -c "curl -fsSL https://raw.githubusercontent.com/KZ5017/wraith/main/install-linux.sh -o /tmp/wraith-install.sh && bash /tmp/wraith-install.sh"
         if ($LASTEXITCODE -eq 0) {
             Write-Host ""
-            Write-Host "  ✓ Marveen telepítve az Ubuntu-ban (install-linux.sh)." -ForegroundColor Green
+            Write-Host "  ✓ Wraith telepítve az Ubuntu-ban (install-linux.sh)." -ForegroundColor Green
             exit 0
         }
         Write-Host "  Az automatikus folytatás nem sikerült (lehet hogy újraindítás kell az Ubuntu-hoz)." -ForegroundColor Yellow
@@ -87,7 +87,7 @@ if ($distros -match "Ubuntu") {
     Write-Host ""
     Write-Host "  Fejezd be így: indítsd el az Ubuntu-t (Start menü -> Ubuntu), állítsd" -ForegroundColor Yellow
     Write-Host "  be a felhasználót, majd az Ubuntu shellben futtasd:" -ForegroundColor Yellow
-    Write-Host "    curl -fsSL https://raw.githubusercontent.com/Szotasz/marveen/main/install-linux.sh -o install.sh && bash install.sh" -ForegroundColor Cyan
+    Write-Host "    curl -fsSL https://raw.githubusercontent.com/KZ5017/wraith/main/install-linux.sh -o install.sh && bash install.sh" -ForegroundColor Cyan
     Write-Host "  (vagy indítsd újra ezt a PowerShell scriptet, ha kell a gép-újraindítás)" -ForegroundColor DarkGray
     exit 0
 }
@@ -151,12 +151,12 @@ echo '  ✓ Bun'
 
 Write-Host "  ✓ Függőségek telepítve" -ForegroundColor Green
 
-# Step 4: Clone and setup Marveen
+# Step 4: Clone and setup Wraith
 Write-Host ""
-Write-Host "[4/5] Marveen telepítése WSL-ben..." -ForegroundColor White
+Write-Host "[4/5] Wraith telepítése WSL-ben..." -ForegroundColor White
 
-$installPath = Read-Host "  Telepítési útvonal WSL-ben [~/marveen]"
-if ([string]::IsNullOrEmpty($installPath)) { $installPath = "~/marveen" }
+$installPath = Read-Host "  Telepítési útvonal WSL-ben [~/wraith]"
+if ([string]::IsNullOrEmpty($installPath)) { $installPath = "~/wraith" }
 
 wsl bash -c @"
 set -e
@@ -165,10 +165,10 @@ INSTALL_DIR="$installPath"
 
 # Clone repo
 if [ ! -d "\$INSTALL_DIR" ]; then
-    git clone --branch main https://github.com/Szotasz/marveen.git "\$INSTALL_DIR"
+    git clone --branch main https://github.com/KZ5017/wraith.git "\$INSTALL_DIR"
     echo '  ✓ Repó klónozva'
 else
-    echo '  ✓ Marveen mappa már létezik'
+    echo '  ✓ Wraith mappa már létezik'
 fi
 
 cd "\$INSTALL_DIR"
@@ -198,7 +198,7 @@ if command -v ollama &>/dev/null; then
 fi
 "@
 
-Write-Host "  ✓ Marveen telepítve" -ForegroundColor Green
+Write-Host "  ✓ Wraith telepítve" -ForegroundColor Green
 
 # Step 5: Configuration
 Write-Host ""
@@ -313,7 +313,7 @@ try {
 Write-Host ""
 Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
 Write-Host ""
-Write-Host "  ✓ Marveen sikeresen telepítve!" -ForegroundColor Green -BackgroundColor Black
+Write-Host "  ✓ Wraith sikeresen telepítve!" -ForegroundColor Green -BackgroundColor Black
 Write-Host ""
 Write-Host "  Indítás:" -ForegroundColor White
 Write-Host "    wsl bash -c 'cd $installPath && node dist/index.js &'" -ForegroundColor Cyan

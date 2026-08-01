@@ -49,7 +49,7 @@ agent behaviour (which can fail or restart).
    prompt answers via the telegram reply tool only when a block is printed.
 
 **Multi-agent scope.** The hooks are **generic across all channel agents**
-(marveen / dia / erno-ba): `agent_id` is derived from the session's cwd
+(wraith / dia / erno-ba): `agent_id` is derived from the session's cwd
 (`<install>/agents/<id>` → `<id>`; `<install>` → `MAIN_AGENT_ID`). Every read and
 write is scoped by `agent_id`, so a session only ever replays its **own** chat and
 agents never cross-contaminate.
@@ -64,12 +64,12 @@ agents never cross-contaminate.
   shorthand to the owner chat in `ledger-outbound.py`.
 - `LEDGER_DB_PATH` — test-only DB path override.
 
-## settings.json block to add (`/home/marveen/marveen/.claude/settings.json`)
+## settings.json block to add (`/home/wraith/wraith/.claude/settings.json`)
 
 Wire the hooks in the **project** settings (NOT user scope). The main channels
-session runs with cwd `/home/marveen/marveen`, so it picks these up. The hooks
+session runs with cwd `/home/wraith/wraith`, so it picks these up. The hooks
 self-scope by cwd, so they are safe even if inherited. Merge this `hooks` object
-(`$CLAUDE_PROJECT_DIR` → `/home/marveen/marveen` for the main session).
+(`$CLAUDE_PROJECT_DIR` → `/home/wraith/wraith` for the main session).
 
 ```json
 {

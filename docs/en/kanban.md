@@ -101,7 +101,7 @@ KANBAN_AGING_CAUTION_COLOR=#d46b00
 KANBAN_AGING_CRITICAL_COLOR=#c53030
 ```
 
-Config flow: `src/config.ts` → `/api/marveen` (`kanbanAging` key) → `window._marveen.kanbanAging` (frontend). The frontend is static (`web/app.js`, no build step) — a server HUP is sufficient to pick up threshold changes.
+Config flow: `src/config.ts` → `/api/wraith` (`kanbanAging` key) → `window._wraith.kanbanAging` (frontend). The frontend is static (`web/app.js`, no build step) — a server HUP is sufficient to pick up threshold changes.
 ### Column WIP limits
 
 A WIP (Work In Progress) limit tells you when a column is overloaded -- meaning it has more active tasks than it's sensible to handle at once.
@@ -152,7 +152,7 @@ KANBAN_WIP_FULL_COLOR=#d46b00
 KANBAN_WIP_OVER_COLOR=#c53030
 ```
 
-Data flow: `src/config.ts` → `/api/marveen` (`kanbanWip` key) → `window._marveen.kanbanWip` (frontend). The frontend is static -- a server HUP is sufficient to apply limit changes.
+Data flow: `src/config.ts` → `/api/wraith` (`kanbanWip` key) → `window._wraith.kanbanWip` (frontend). The frontend is static -- a server HUP is sufficient to apply limit changes.
 ### Swimlane view
 
 The swimlane view splits the board into horizontal lanes, so instead of one big column you immediately see where cards are piling up -- by owner or by priority.
@@ -204,7 +204,7 @@ Empty (cardless) swimlanes are not rendered.
 
 **Persistence:**
 
-The grouping choice is stored in `localStorage` (key `marveen.kanbanGroupBy`), so the user's last choice survives a page reload in that browser and overrides the `.env`-configured default. Lane-collapse state, by contrast, only lives in the page's in-memory state (cleared on reload), though it survives board refreshes (e.g. card moves, the 30-second auto-refresh).
+The grouping choice is stored in `localStorage` (key `wraith.kanbanGroupBy`), so the user's last choice survives a page reload in that browser and overrides the `.env`-configured default. Lane-collapse state, by contrast, only lives in the page's in-memory state (cleared on reload), though it survives board refreshes (e.g. card moves, the 30-second auto-refresh).
 
 **Drag and drop:**
 
@@ -217,7 +217,7 @@ KANBAN_SWIMLANE_DEFAULT_GROUP=none         # none (default) | assignee | priorit
 KANBAN_SWIMLANE_SEPARATOR_COLOR=           # empty = CSS default (var(--border))
 ```
 
-Data flow: `src/config.ts` → `/api/marveen` (`kanbanSwimlanes` key) → `window._marveen.kanbanSwimlanes` (frontend). The frontend is static, no build step -- a server restart is enough to pick up config changes.
+Data flow: `src/config.ts` → `/api/wraith` (`kanbanSwimlanes` key) → `window._wraith.kanbanSwimlanes` (frontend). The frontend is static, no build step -- a server restart is enough to pick up config changes.
 
 ### Quick filters and labels
 
@@ -291,7 +291,7 @@ An empty label filter (no active label selected) doesn't narrow anything -- ever
 
 **Persistence:**
 
-The label filter is stored in `localStorage` (key `marveen.kanbanLabelFilter`, as a JSON array), the same way the swimlane grouping choice is -- it survives a page reload in that browser.
+The label filter is stored in `localStorage` (key `wraith.kanbanLabelFilter`, as a JSON array), the same way the swimlane grouping choice is -- it survives a page reload in that browser.
 
 **Configuration keys (`.env`):**
 
@@ -299,7 +299,7 @@ The label filter is stored in `localStorage` (key `marveen.kanbanLabelFilter`, a
 KANBAN_LABEL_COLORS=#3b82f6,#0ea5e9,#10b981,#14b8a6,#8b5cf6,#64748b  # selectable palette (cold tones)
 ```
 
-Data flow: `src/config.ts` → `/api/marveen` (`kanbanLabels.colors` key) → `window._marveen.kanbanLabels` (frontend).
+Data flow: `src/config.ts` → `/api/wraith` (`kanbanLabels.colors` key) → `window._wraith.kanbanLabels` (frontend).
 
 ---
 

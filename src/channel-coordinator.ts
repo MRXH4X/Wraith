@@ -1,7 +1,7 @@
-// marveen-channel-coordinator: standalone Telegram inbound BACKFILL poller.
+// wraith-channel-coordinator: standalone Telegram inbound BACKFILL poller.
 //
 // WHY THIS EXISTS (hybrid model -- Szabi 2026-06-02)
-// The native Telegram channel plugin runs getUpdates INSIDE the Marveen TUI and
+// The native Telegram channel plugin runs getUpdates INSIDE the Wraith TUI and
 // stays the PRIMARY inbound path (it gives the "typing..." indicator, low
 // latency, and native reply-semantics for free). But the plugin's ~hourly
 // disconnects / TUI freezes leave inbound messages stranded server-side.
@@ -10,7 +10,7 @@
 // UP it does NOTHING (no getUpdates, so no 409, native owns inbound). Only when
 // the native is observed DOWN (process gone, or alive-but-wedged per a stale
 // keepalive) does it poll getUpdates, write to store/claudeclaw.db
-// (incoming_events), and hand off to Marveen via the existing agent_messages
+// (incoming_events), and hand off to Wraith via the existing agent_messages
 // queue + message-router (which delivers it as channel-inbound -- reply-
 // expected, body untrusted).
 //
@@ -23,7 +23,7 @@
 // discarding it if the native just recovered. Bias: under-deliver, since the
 // native + typing is the better UX and Telegram holds unconfirmed updates 24h.
 //
-// Lifecycle: launchd (com.marveen.channel-coordinator) with KeepAlive. SIGTERM
+// Lifecycle: launchd (com.wraith.channel-coordinator) with KeepAlive. SIGTERM
 // drains, persists offset, exits cleanly.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs'
@@ -184,7 +184,7 @@ export function neutralizeChannelTags(text: string): string {
 }
 
 // Mirror the native plugin's <channel ...> block so the message-router can
-// deliver it as channel-inbound and Marveen replies exactly as she would to a
+// deliver it as channel-inbound and Wraith replies exactly as she would to a
 // native message (reply with chat_id), while the body stays untrusted.
 export function buildHandoffContent(ev: {
   kind: string
@@ -228,7 +228,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 // ---- batch processing ----------------------------------------------------
 
 // Process one getUpdates batch. For each update: normalize, dedup-insert, and
-// (if newly inserted) hand off to Marveen. Returns the highest update_id seen
+// (if newly inserted) hand off to Wraith. Returns the highest update_id seen
 // so the caller can advance the offset AFTER the whole batch is durable.
 function processBatch(updates: { update_id: number }[]): number | null {
   let maxUpdateId: number | null = null

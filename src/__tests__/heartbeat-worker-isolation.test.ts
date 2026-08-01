@@ -8,7 +8,7 @@ import { CHANNEL_PLUGIN_IDS } from '../web/plugin-ids.js'
 // - #237: project-scope .mcp.json={} -- necessary but not sufficient
 // - #247: project-scope .claude/settings.json enabledPlugins:false --
 //         DID NOT WORK in production (9/10/11/12 hb all spawned the
-//         Telegram plugin and crashed Marveen via 409 Conflict). The
+//         Telegram plugin and crashed Wraith via 409 Conflict). The
 //         claude-agent-sdk reads ~/.claude/settings.json directly and
 //         ignores the project-scope override.
 // - THIS PR: CLAUDE_CONFIG_DIR repointing -- the SDK-documented way to
@@ -55,19 +55,19 @@ describe('heartbeat worker cwd + CLAUDE_CONFIG_DIR isolation (2026-06-02 inciden
     expect(SRC).toMatch(/CHANNEL_PLUGIN_IDS/)
     const IDS_SRC = readFileSync(join(__dirname, '../web/plugin-ids.ts'), 'utf-8')
     expect(IDS_SRC).toMatch(/telegram@claude-plugins-official/)
-    expect(IDS_SRC).toMatch(/slack-channel@marveen-marketplace/)
+    expect(IDS_SRC).toMatch(/slack-channel@wraith-marketplace/)
     expect(IDS_SRC).toMatch(/discord@claude-plugins-official/)
     expect(IDS_SRC).toMatch(/googlechat@claude-channel-googlechat/)
-    expect(IDS_SRC).toMatch(/teams@marveen-marketplace/)
+    expect(IDS_SRC).toMatch(/teams@wraith-marketplace/)
   })
 
   it('CHANNEL_PLUGIN_IDS covers all five providers (regression: googlechat/teams were missing from heartbeat)', () => {
     const ids = Object.values(CHANNEL_PLUGIN_IDS)
     expect(ids).toContain('telegram@claude-plugins-official')
-    expect(ids).toContain('slack-channel@marveen-marketplace')
+    expect(ids).toContain('slack-channel@wraith-marketplace')
     expect(ids).toContain('discord@claude-plugins-official')
     expect(ids).toContain('googlechat@claude-channel-googlechat')
-    expect(ids).toContain('teams@marveen-marketplace')
+    expect(ids).toContain('teams@wraith-marketplace')
   })
 
   it('refuses to read through a settings.json symlink (would import user-scope enabledPlugins)', () => {

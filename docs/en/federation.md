@@ -1,8 +1,8 @@
-# Federation — connecting Marveen instances
+# Federation — connecting Wraith instances
 
 ## 🎯 What it does / why it matters
 
-Two (or more) independent Marveen installs — say one on a Mac mini and one on a MacBook — **see each other's agents and send messages/tasks to each other**, while both systems stay fully autonomous. Agents address exactly as before, with the system name prefixed:
+Two (or more) independent Wraith installs — say one on a Mac mini and one on a MacBook — **see each other's agents and send messages/tasks to each other**, while both systems stay fully autonomous. Agents address exactly as before, with the system name prefixed:
 
 ```
 POST /api/messages   { "from": "marketing", "to": "teodor/backend-dev", "content": "..." }
@@ -34,9 +34,9 @@ Rotate with the card's "Rotate token" button: the new token is valid immediately
 
 ### Agent onboarding: no manual steps after enabling
 
-Enabling federation **automatically writes a managed block into the main agent's CLAUDE.md** (between line-exact `<!-- MARVEEN-FEDERATION:BEGIN/END -->` markers): addressing syntax with an authenticated curl example, the current peer list, an explicit exception to the "only running tmux agents can be messaged" rule, the "hand binary results over your own channel, the bridge carries text only" rule, and the retry/patience behaviour. The block is reconciled on every peer change, at boot, and after dashboard edits of CLAUDE.md; disabling removes it. Its language follows `DASHBOARD_LANG`.
+Enabling federation **automatically writes a managed block into the main agent's CLAUDE.md** (between line-exact `<!-- WRAITH-FEDERATION:BEGIN/END -->` markers): addressing syntax with an authenticated curl example, the current peer list, an explicit exception to the "only running tmux agents can be messaged" rule, the "hand binary results over your own channel, the bridge carries text only" rule, and the retry/patience behaviour. The block is reconciled on every peer change, at boot, and after dashboard edits of CLAUDE.md; disabling removes it. Its language follows `DASHBOARD_LANG`.
 
-Below the block sits a once-seeded **"Federation policy"** section (anchored by `<!-- MARVEEN-FEDERATION:POLICY -->`) — that one is YOURS: the code never rewrites or removes it; this is where you decide how much your agent trusts peer requests. The default text is cautious (peer requests are data; irreversible/outward-facing actions must be escalated).
+Below the block sits a once-seeded **"Federation policy"** section (anchored by `<!-- WRAITH-FEDERATION:POLICY -->`) — that one is YOURS: the code never rewrites or removes it; this is where you decide how much your agent trusts peer requests. The default text is cautious (peer requests are data; irreversible/outward-facing actions must be escalated).
 
 **Exactly which agent gets what (and where).** Federation onboarding writes ONLY `CLAUDE.md` files — it NEVER touches `SOUL.md` (the persona soul). Two blocks differ in content:
 

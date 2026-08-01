@@ -9,7 +9,7 @@ import { shouldDeferForRecentRespawn, confirmsWedgeProfile } from '../web/stuck-
 
 // Thresholds matching the production defaults in stuck-tool-call-watcher.ts.
 // Repeated here so the tests pin the contract independently of the wrapper
-// module (Marveen 2026-06-02 review: every threshold change should require
+// module (Wraith 2026-06-02 review: every threshold change should require
 // an intentional test edit, not silently relax).
 const THRESHOLDS: StuckToolCallThresholds = {
   freezeSeconds: 180,
@@ -345,15 +345,15 @@ describe('stuck-tool-call-watcher wiring contract', () => {
     expect(v).toBeLessThan(31)
   })
 
-  it('recovers via the respawn-pane path (resumeMarveenSession), NOT the launchctl hard-restart (#248)', () => {
+  it('recovers via the respawn-pane path (resumeWraithSession), NOT the launchctl hard-restart (#248)', () => {
     // #248: the launchctl hard-restart -> channels.sh -> `tmux kill-session`
     // kicked the attached client ([exited]). Recovery now delegates to
-    // resumeMarveenSession (respawn-pane -k + pane-attribution reap), which
+    // resumeWraithSession (respawn-pane -k + pane-attribution reap), which
     // replaces only the pane's claude and never kills the session.
-    expect(watcherSrc).toMatch(/resumeMarveenSession\(\)/)
+    expect(watcherSrc).toMatch(/resumeWraithSession\(\)/)
     // Import-level (comment-proof): the launchctl hard-restart is no longer
     // wired into the watcher, so it cannot kick an attached client.
-    expect(watcherSrc).not.toMatch(/import[^\n]*hardRestartMarveenChannels/)
+    expect(watcherSrc).not.toMatch(/import[^\n]*hardRestartWraithChannels/)
   })
 
   it('confirms the idle wedge profile before recovering (CPU-load false-positive guard, #248)', () => {
@@ -398,7 +398,7 @@ describe('shouldDeferForRecentRespawn', () => {
     expect(shouldDeferForRecentRespawn(now - 10 * 60_000, now)).toBe(false)
   })
 
-  it('default grace matches the shared MARVEEN_POST_RESPAWN_GRACE_MS (360s)', () => {
+  it('default grace matches the shared WRAITH_POST_RESPAWN_GRACE_MS (360s)', () => {
     // 359s defers, 361s does not, with the default arg.
     expect(shouldDeferForRecentRespawn(now - 359_000, now)).toBe(true)
     expect(shouldDeferForRecentRespawn(now - 361_000, now)).toBe(false)

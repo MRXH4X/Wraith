@@ -6,12 +6,12 @@ import { logger } from './logger.js'
 
 // --- System file denylist ---
 // Only files NOT on this list (and not matching SYSTEM_RE) are logged.
-// Everything else = Marveen-managed state that would produce noise.
+// Everything else = Wraith-managed state that would produce noise.
 // "Agent-created" files are those that remain after filtering.
 const SYSTEM_FILES = new Set([
   // SQLite database
   'claudeclaw.db', 'claudeclaw.db-wal', 'claudeclaw.db-shm',
-  // Marveen runtime / scheduler state
+  // Wraith runtime / scheduler state
   'schedule-last-run.json', 'external-ops-last-run',
   'kanban-audit-state.json',
   // Settings and config overrides written by dashboard routes
@@ -27,7 +27,7 @@ const SYSTEM_FILES = new Set([
   'capability-summaries.json',
   // Usage and keepalive
   'claude-usage.json', '.channel-keepalive', '.channel-last-respawn',
-  // Known Marveen-written log files
+  // Known Wraith-written log files
   'channels.log', 'channels.error.log',
   'dashboard.log', 'dashboard.error.log',
   'update.log',
@@ -109,7 +109,7 @@ export function startStoreWatcher(): void {
       // Only rename events can indicate a new file. change = modification.
       if (eventType !== 'rename') return
 
-      // Skip system and temp files -- Marveen's own runtime writes.
+      // Skip system and temp files -- Wraith's own runtime writes.
       if (isSystemFile(rel)) return
 
       // If the file no longer exists it was deleted or renamed away -- not a creation.

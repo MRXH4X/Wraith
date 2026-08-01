@@ -23,7 +23,7 @@ _section() { echo ""; echo "--- $* ---"; }
 # DOCKER MODE (default): spin up persistent ubuntu:24.04, run self
 # Container is kept alive after the test for manual inspection.
 # ============================================================
-CONTAINER_NAME="${VOICE_TEST_CONTAINER:-marveen-voice-test}"
+CONTAINER_NAME="${VOICE_TEST_CONTAINER:-wraith-voice-test}"
 
 if [[ "${SKIP_DOCKER:-}" != "1" ]]; then
   # Remove any leftover container from a previous run
@@ -31,7 +31,7 @@ if [[ "${SKIP_DOCKER:-}" != "1" ]]; then
 
   echo "==> Starting persistent test container: $CONTAINER_NAME"
   docker run -d --name "$CONTAINER_NAME" \
-    -v "$REPO_ROOT:/marveen:ro" \
+    -v "$REPO_ROOT:/wraith:ro" \
     ubuntu:24.04 \
     tail -f /dev/null
 
@@ -41,7 +41,7 @@ if [[ "${SKIP_DOCKER:-}" != "1" ]]; then
     -e SKIP_DOCKER=1 \
     -e INSTALL_DIR=/tmp/voice-test \
     "$CONTAINER_NAME" \
-    bash /marveen/scripts/__tests__/test-voice-install.sh 2>&1 || EXIT_CODE=$?
+    bash /wraith/scripts/__tests__/test-voice-install.sh 2>&1 || EXIT_CODE=$?
 
   echo ""
   if [[ "$EXIT_CODE" -eq 0 ]]; then
@@ -82,7 +82,7 @@ command -v ffmpeg &>/dev/null                      && _fail "ffmpeg pre-installe
 
 # Run installer
 _section "Running installer"
-INSTALL_DIR="$DEST" bash /marveen/scripts/install-voice.sh
+INSTALL_DIR="$DEST" bash /wraith/scripts/install-voice.sh
 echo "    installer exited $?"
 
 # C1: venv + package import
@@ -237,7 +237,7 @@ fi
 
 # C7: Idempotence -- re-run installer, nothing breaks
 _section "C7: Idempotence (re-run)"
-INSTALL_DIR="$DEST" bash /marveen/scripts/install-voice.sh 2>&1 | grep -E "SKIP|PASS|complete" | head -10
+INSTALL_DIR="$DEST" bash /wraith/scripts/install-voice.sh 2>&1 | grep -E "SKIP|PASS|complete" | head -10
 "$DEST/venv/bin/python" -c "import faster_whisper, piper" \
   && _pass "packages still importable after re-run" \
   || _fail "packages broken after re-run"

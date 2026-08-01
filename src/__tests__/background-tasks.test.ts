@@ -24,10 +24,10 @@ describe('background_tasks schema and CRUD', () => {
   it('inserts a running task', () => {
     const now = Math.floor(Date.now() / 1000)
     db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, tmux_session, started_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run('ABCD1234', 'marveen', 'test prompt', 'running', 'bg-ABCD1234', now)
+      .run('ABCD1234', 'wraith', 'test prompt', 'running', 'bg-ABCD1234', now)
 
     const row = db.prepare('SELECT * FROM background_tasks WHERE id = ?').get('ABCD1234') as any
-    expect(row.agent_id).toBe('marveen')
+    expect(row.agent_id).toBe('wraith')
     expect(row.status).toBe('running')
     expect(row.prompt).toBe('test prompt')
     expect(row.tmux_session).toBe('bg-ABCD1234')
@@ -58,12 +58,12 @@ describe('background_tasks schema and CRUD', () => {
 
   it('counts running tasks per agent', () => {
     const now = Math.floor(Date.now() / 1000)
-    db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, started_at) VALUES (?, ?, ?, ?, ?)').run('A1000001', 'marveen', 'p1', 'running', now)
-    db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, started_at) VALUES (?, ?, ?, ?, ?)').run('A2000002', 'marveen', 'p2', 'running', now)
-    db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, started_at) VALUES (?, ?, ?, ?, ?)').run('A3000003', 'marveen', 'p3', 'done', now)
+    db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, started_at) VALUES (?, ?, ?, ?, ?)').run('A1000001', 'wraith', 'p1', 'running', now)
+    db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, started_at) VALUES (?, ?, ?, ?, ?)').run('A2000002', 'wraith', 'p2', 'running', now)
+    db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, started_at) VALUES (?, ?, ?, ?, ?)').run('A3000003', 'wraith', 'p3', 'done', now)
     db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, started_at) VALUES (?, ?, ?, ?, ?)').run('A4000004', 'samu', 'p4', 'running', now)
 
-    const count = (db.prepare("SELECT COUNT(*) as c FROM background_tasks WHERE agent_id = ? AND status = 'running'").get('marveen') as any).c
+    const count = (db.prepare("SELECT COUNT(*) as c FROM background_tasks WHERE agent_id = ? AND status = 'running'").get('wraith') as any).c
     expect(count).toBe(2)
 
     const samuCount = (db.prepare("SELECT COUNT(*) as c FROM background_tasks WHERE agent_id = ? AND status = 'running'").get('samu') as any).c
@@ -72,7 +72,7 @@ describe('background_tasks schema and CRUD', () => {
 
   it('lists tasks with optional agent filter', () => {
     const now = Math.floor(Date.now() / 1000)
-    db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, started_at) VALUES (?, ?, ?, ?, ?)').run('B1000001', 'marveen', 'p1', 'running', now)
+    db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, started_at) VALUES (?, ?, ?, ?, ?)').run('B1000001', 'wraith', 'p1', 'running', now)
     db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, started_at) VALUES (?, ?, ?, ?, ?)').run('B2000002', 'samu', 'p2', 'done', now)
 
     const all = db.prepare('SELECT * FROM background_tasks ORDER BY started_at DESC').all()
@@ -81,8 +81,8 @@ describe('background_tasks schema and CRUD', () => {
     const running = db.prepare("SELECT * FROM background_tasks WHERE status = 'running'").all()
     expect(running).toHaveLength(1)
 
-    const marveenOnly = db.prepare("SELECT * FROM background_tasks WHERE agent_id = ? AND status = 'running'").all('marveen')
-    expect(marveenOnly).toHaveLength(1)
+    const wraithOnly = db.prepare("SELECT * FROM background_tasks WHERE agent_id = ? AND status = 'running'").all('wraith')
+    expect(wraithOnly).toHaveLength(1)
   })
 
   it('supports timeout status', () => {
@@ -118,11 +118,11 @@ describe('background_tasks schema and CRUD', () => {
   it('marks orphaned tasks as failed', () => {
     const now = Math.floor(Date.now() / 1000)
     db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, tmux_session, started_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run('OR000001', 'marveen', 'orphan', 'running', 'bg-OR000001', now - 3600)
+      .run('OR000001', 'wraith', 'orphan', 'running', 'bg-OR000001', now - 3600)
     db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, tmux_session, started_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run('OR000002', 'samu', 'also orphan', 'running', 'bg-OR000002', now - 1800)
     db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run('OR000003', 'marveen', 'already done', 'done', now - 7200, now - 3600)
+      .run('OR000003', 'wraith', 'already done', 'done', now - 7200, now - 3600)
 
     const finishNow = Math.floor(Date.now() / 1000)
     const info = db.prepare("UPDATE background_tasks SET status = 'failed', finished_at = ?, output = '(orphaned on restart)' WHERE status = 'running'")
@@ -138,7 +138,7 @@ describe('background_tasks schema and CRUD', () => {
   it('DELETE captures output before kill (order test)', () => {
     const now = Math.floor(Date.now() / 1000)
     db.prepare('INSERT INTO background_tasks (id, agent_id, prompt, status, tmux_session, started_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run('DE000001', 'marveen', 'cancel me', 'running', 'bg-DE000001', now)
+      .run('DE000001', 'wraith', 'cancel me', 'running', 'bg-DE000001', now)
 
     const task = db.prepare('SELECT * FROM background_tasks WHERE id = ?').get('DE000001') as any
     expect(task.status).toBe('running')

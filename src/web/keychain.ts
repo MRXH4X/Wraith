@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { platform } from 'node:os'
 
 const SECURITY = '/usr/bin/security'
-const SERVICE = 'com.marveen.vault'
+const SERVICE = 'com.wraith.vault'
 const ACCOUNT = 'master-key'
 
 export function isKeychainAvailable(): boolean {

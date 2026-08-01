@@ -2,7 +2,7 @@ import { statSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
-import { hardRestartMarveenChannels, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS } from './channel-monitor.js'
+import { hardRestartWraithChannels, lastMainRespawnAt, WRAITH_POST_RESPAWN_GRACE_MS } from './channel-monitor.js'
 import { shouldDeferForRecentRespawn } from './stuck-tool-call-watcher.js'
 import { listAgentNames, agentDir, readAgentModel, readAgentClaudeConfigDir, readAgentRemoteHost } from './agent-config.js'
 import {
@@ -153,12 +153,12 @@ function performRestart(name: string): void {
     // four times and failed every time, and main was unreachable for ~2h until
     // a hand restart.
     //
-    // hardRestartMarveenChannels() is the existing helper the channel-monitor
+    // hardRestartWraithChannels() is the existing helper the channel-monitor
     // down-cascade already uses: it keeps the launchd path for macOS installs
     // (and warns + falls back to a pane respawn if the plist is absent), uses
     // respawn-pane-FRESH on Linux -- fresh is exactly what the guard wants --
     // and writes the shared respawn stamp so the other respawners defer to us.
-    const res = hardRestartMarveenChannels()
+    const res = hardRestartWraithChannels()
     if (!res.ok) throw new Error(res.error ?? 'main channels hard restart failed')
   } else {
     restartAgentProcess(name, { fresh: true })
@@ -227,7 +227,7 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
   // may have just restarted main for its own reasons.
   //
   // Same mechanism every other respawner already shares -- lastMainRespawnAt()
-  // plus MARVEEN_POST_RESPAWN_GRACE_MS -- so there is no new tunable and no new
+  // plus WRAITH_POST_RESPAWN_GRACE_MS -- so there is no new tunable and no new
   // number; see the identical gate in stuck-tool-call-watcher.ts. Main only: the
   // stamp describes the main channels session, and a sub-agent restart is
   // cheap and independently coordinated.
@@ -243,7 +243,7 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     const lastRespawn = lastMainRespawnAt()
     if (shouldDeferForRecentRespawn(lastRespawn, nowMs)) {
       logger.info(
-        { name, sinceRespawnMs: lastRespawn ? nowMs - lastRespawn : null, graceMs: MARVEEN_POST_RESPAWN_GRACE_MS },
+        { name, sinceRespawnMs: lastRespawn ? nowMs - lastRespawn : null, graceMs: WRAITH_POST_RESPAWN_GRACE_MS },
         'context-guard: recent main respawn within grace, deferring restart (avoid restart loop / boot churn)',
       )
       guardStates.set(name, state)

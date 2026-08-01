@@ -1,6 +1,6 @@
-# NOTE: replace /path/to/marveen (install dir), /home/USER (home), and USER=youruser with your values.
+# NOTE: replace /path/to/wraith (install dir), /home/USER (home), and USER=youruser with your values.
 [Unit]
-Description=Marveen Channels (Telegram bridge)
+Description=Wraith Channels (Telegram bridge)
 After=network.target
 # P1 FIX: StartLimit* belong in [Unit], not [Service] (systemd logged
 # "Unknown key StartLimitIntervalSec" and ignored them in [Service]).
@@ -17,20 +17,20 @@ Type=simple
 # channels.sh kill-sessions its own session before new-session, so the surviving
 # session does not collide on relaunch.
 KillMode=process
-WorkingDirectory=/path/to/marveen
+WorkingDirectory=/path/to/wraith
 # Rebuild the better-sqlite3 native binding if it can't load for the current Node
 # ABI before starting. Prevents the "Could not locate the bindings file"
 # crash-loop after an npm install / Node upgrade (root-caused 2026-07-03).
-ExecStartPre=/path/to/marveen/scripts/ensure-native-modules.sh
-ExecStart=/path/to/marveen/scripts/channels.sh
+ExecStartPre=/path/to/wraith/scripts/ensure-native-modules.sh
+ExecStart=/path/to/wraith/scripts/channels.sh
 # P1 FIX: always (not on-failure). channels.sh exits 0 when the tmux session
 # dies normally, which on-failure did NOT restart -> the bridge was dead for
 # ~28 min (08:29-08:57). The StartLimit above + channels.sh's own rapid-fail
 # backoff protect against a tight restart loop.
 Restart=always
 RestartSec=10
-StandardOutput=append:/path/to/marveen/store/channels.log
-StandardError=append:/path/to/marveen/store/channels.error.log
+StandardOutput=append:/path/to/wraith/store/channels.log
+StandardError=append:/path/to/wraith/store/channels.error.log
 Environment=PATH=/home/USER/.local/bin:/home/USER/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/home/USER
 Environment=USER=youruser

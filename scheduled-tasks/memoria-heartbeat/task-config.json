@@ -1,6 +1,6 @@
 {
   "schedule": "*/15 * * * *",
-  "agent": "marveen",
+  "agent": "wraith",
   "enabled": true,
   "type": "heartbeat",
   "skipIfBusy": true,

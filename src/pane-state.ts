@@ -1453,7 +1453,7 @@ export function parkedMainInputHasRemedy(pane: string): boolean {
 // Stuck tool-call watcher (2026-06-02 incident, Worked-for >Ns freeze)
 // =============================================================================
 //
-// Symptom: Marveen's TUI shows "Worked for 31s" (or "Brewed for", "Baked for")
+// Symptom: Wraith's TUI shows "Worked for 31s" (or "Brewed for", "Baked for")
 // indefinitely. The claude process is at 0.3% CPU (IO-wait, no progress), bun
 // poller is alive, hasChannelPluginAlive() returns true -- so the recovery
 // cascade gated on bun absence (#240) never fires. Real cause: the Telegram

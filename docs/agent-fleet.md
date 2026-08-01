@@ -6,7 +6,7 @@
 
 ## 🎯 Mit tud / miért érdekes
 
-Marveen egy **orchestrator** (PM-szerep), aki egy specializált ügynök-flottát koordinál — mindegyiknek megvan a maga szerepe (pl. backend-fejlesztés, marketing/frontend, videó, kutatás). Egy nagy feladatnál az orchestrator felbontja a munkát, kiosztja a megfelelő ügynöknek, és összefogja az eredményt.
+Wraith egy **orchestrator** (PM-szerep), aki egy specializált ügynök-flottát koordinál — mindegyiknek megvan a maga szerepe (pl. backend-fejlesztés, marketing/frontend, videó, kutatás). Egy nagy feladatnál az orchestrator felbontja a munkát, kiosztja a megfelelő ügynöknek, és összefogja az eredményt.
 
 Az ügynökök **közvetlenül üzennek egymásnak** egy közös üzenetsoron keresztül — nem rajtad keresztül megy minden. Az orchestrator delegál, a szakértő-ügynök dolgozik és visszajelez, te csak a lényeget kapod.
 
@@ -32,7 +32,7 @@ GET  /api/messages?agent=<agent>      # státusz
 
 A rendszer az üzenetet a célpont ügynök tmux-session-jébe juttatja (`[Uzenet @<felado>-tol]: ...` formátumban), aki feldolgozza és a saját csatornáján válaszol. Csak futó (tmux-session-nel rendelkező) ügynöknek lehet üzenni. Távoli ügynöknél ez azt jelenti, hogy az ssh-kapcsolat és a laptop tmux-szervere elérhető kell legyen a delivery-loop ciklusában; ha nem az, az üzenet a sorban marad és visszakapcsoláskor kézbesül (lásd [Távoli ügynökök](#-távoli-remote-ügynökök)).
 
-A címzett lehet egy **másik Marveen-rendszer ügynöke** is, rendszer-minősített névvel (`to: "teodor/backend-dev"`) — ilyenkor az üzenet HTTPS-en át a társrendszer inboxába kerül. Részletek: [Föderáció](federation.md).
+A címzett lehet egy **másik Wraith-rendszer ügynöke** is, rendszer-minősített névvel (`to: "teodor/backend-dev"`) — ilyenkor az üzenet HTTPS-en át a társrendszer inboxába kerül. Részletek: [Föderáció](federation.md).
 
 ### Életciklus
 
@@ -51,13 +51,13 @@ A teljes életciklus (start/stop/status/lista) és az inter-agent üzenetküldé
 
 ## 🌐 Távoli (remote) ügynökök
 
-Marveen egy always-on orchestrator gépen fut. Egy ügynök beállítható úgy, hogy a **tmux-session-je egy távoli gépen** (pl. egy fejlesztői gépen) fusson egy ott megadott munkakönyvtárban, miközben Marveen az orchestratorról indítja, állítja le, kérdezi le és üzen neki -- mindezt ssh-n keresztül.
+Wraith egy always-on orchestrator gépen fut. Egy ügynök beállítható úgy, hogy a **tmux-session-je egy távoli gépen** (pl. egy fejlesztői gépen) fusson egy ott megadott munkakönyvtárban, miközben Wraith az orchestratorról indítja, állítja le, kérdezi le és üzen neki -- mindezt ssh-n keresztül.
 
 ### ⭐ Alapelv: az ügynök élete független az ssh-kapcsolattól
 
 A távoli ügynök egy **detached tmux-session**-ben fut a távoli gép saját tmux-szerverén (`tmux new-session -d`), így a `claude` process a tmux-szerver gyereke, NEM az ssh-é. Következmények:
 
-- Egy ssh-szakadás SOHA nem állítja le a távoli ügynököt. A távoli gépen tovább fut és dolgozik; csak Marveen üzenés/megfigyelés képessége szünetel, és visszakapcsoláskor folytatódik.
+- Egy ssh-szakadás SOHA nem állítja le a távoli ügynököt. A távoli gépen tovább fut és dolgozik; csak Wraith üzenés/megfigyelés képessége szünetel, és visszakapcsoláskor folytatódik.
 - A sorban álló inter-agent üzenetek és ütemezett feladatok kivárják a szakadást, és visszakapcsoláskor kézbesülnek (a router 1 óra után dob el egy üzenetet, ha addig nem elérhető).
 - A dashboard `unreachable` állapotot mutat (nem `stopped`), és az auto-restart NEM indítja újra az elérhetetlen ügynököt.
 - Leállás CSAK explicit `POST /stop`-ra történik.
@@ -71,7 +71,7 @@ PUT /api/agents/<name>/remote   { "host": "", "workdir": "" }   # törlés -> ú
 
 - `host`: ssh-destination -- alias a `~/.ssh/config`-ból (ajánlott) vagy `user@host`. **NINCS `:port`** a host-stringben; a portot a `~/.ssh/config` `Port` direktívájába tedd. Shell-metakarakter nem engedett.
 - `workdir`: **abszolút** elérési út a távoli gépen (relatív/tilde nem engedett, hogy a `--continue` projekt-kódolás determinisztikus legyen).
-- Csak ha MINDKETTŐ érvényes, lesz az ügynök távoli; félig konfigurált ügynök helyi marad. A fő ügynök (`marveen`) mindig helyi.
+- Csak ha MINDKETTŐ érvényes, lesz az ügynök távoli; félig konfigurált ügynök helyi marad. A fő ügynök (`wraith`) mindig helyi.
 - A `GET /api/agents` válaszban megjelenik a `remoteHost`, `remoteWorkdir` és a `runState` (`running` | `stopped` | `unreachable`).
 
 ### ssh-config előfeltétel (orchestrator oldal)
@@ -85,7 +85,7 @@ Host devbox
   # Port 22   # ha nem a default
 ```
 
-Kell még: jelszó nélküli ssh-kulcs az orchestratortól a távoli gépig (a `BatchMode=yes` miatt soha nem blokkol promptra). A kód `ControlMaster`-multiplexinget használ egy privát socket-könyvtárban (`$XDG_RUNTIME_DIR/marveen-ssh`, mode 0700), hogy az 5mp-es delivery-loop és a watcherek egy kapcsolatot újrahasználjanak.
+Kell még: jelszó nélküli ssh-kulcs az orchestratortól a távoli gépig (a `BatchMode=yes` miatt soha nem blokkol promptra). A kód `ControlMaster`-multiplexinget használ egy privát socket-könyvtárban (`$XDG_RUNTIME_DIR/wraith-ssh`, mode 0700), hogy az 5mp-es delivery-loop és a watcherek egy kapcsolatot újrahasználjanak.
 
 ### Indítás / auth előfeltétel a távoli gépen
 
@@ -100,7 +100,7 @@ Kell még: jelszó nélküli ssh-kulcs az orchestratortól a távoli gépig (a `
 
 ### Működési modell: launch-only, channel-less
 
-A távoli ügynök a távoli gép SAJÁT `~/.claude` loginját és a távoli munkakönyvtár `CLAUDE.md`-jét használja. Nem visz át channel-tokent/vault-titkot/settings.json-t -- inter-agent only (Marveen delegál, az ügynök inter-agent üzenetben jelez vissza).
+A távoli ügynök a távoli gép SAJÁT `~/.claude` loginját és a távoli munkakönyvtár `CLAUDE.md`-jét használja. Nem visz át channel-tokent/vault-titkot/settings.json-t -- inter-agent only (Wraith delegál, az ügynök inter-agent üzenetben jelez vissza).
 
 ### Scaffolding-szinkron
 
@@ -175,7 +175,7 @@ Válasz: ágensenként `{ agent, currentModel, suggestedModel, reason, changeAdv
 
 ### Kanban integráció
 
-Ha `changeAdvised: true` bármely agensnél, és a felhasználó megerősíti, a rendszer automatikusan kanban-kártyát hoz létre az érintett ügynökhöz (`assignee: marveen`, státusz: `planned`).
+Ha `changeAdvised: true` bármely agensnél, és a felhasználó megerősíti, a rendszer automatikusan kanban-kártyát hoz létre az érintett ügynökhöz (`assignee: wraith`, státusz: `planned`).
 
 ---
 
@@ -227,7 +227,7 @@ POST /api/agents/import                  # bundle feltöltése (multipart: file=
                                          #   -- egy-ügynök ÉS flotta-bundle-t is fogad
 ```
 
-A fő ügynök (`marveen`) egyik módban sem exportálható (a PROJECT_ROOT-ban él,
+A fő ügynök (`wraith`) egyik módban sem exportálható (a PROJECT_ROOT-ban él,
 nem az `agents/` alatt) -- teljes gép-átálláshoz lásd a `scripts/backup.sh`-t és
 a [MIGRATION.md](MIGRATION.md)-t.
 

@@ -34,7 +34,7 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$LOG_TAG] $*"; }
 
 # --- resolve the channels session (launch-order / rename independent) ---
 MAIN_AGENT_ID="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
-MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"
+MAIN_AGENT_ID="${MAIN_AGENT_ID:-wraith}"
 MAIN_AGENT_ID="${MAIN_AGENT_ID//[^a-zA-Z0-9_-]/}"
 SESSION="${MAIN_AGENT_ID}-channels"
 
@@ -46,7 +46,7 @@ fi
 
 # --- gate 1: the channels session must exist ---
 if ! "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
-  log "session $SESSION absent -- marveen-channels.service owns start; no touch"
+  log "session $SESSION absent -- wraith-channels.service owns start; no touch"
   exit 0
 fi
 

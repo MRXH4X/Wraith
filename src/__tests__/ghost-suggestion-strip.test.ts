@@ -43,7 +43,7 @@ const REAL_INPUT_BOX = [
 // A FRESH Claude Code >= v2.1.201 session: the empty input box shows a dim
 // (SGR 2) EXAMPLE-SUGGESTION placeholder `Try "..."`, and the gap after the ❯
 // glyph is a NON-BREAKING SPACE (U+00A0) -- exactly like a genuinely parked
-// message. Captured live 2026-07-07 from marveen-worker (footer `bypass
+// message. Captured live 2026-07-07 from wraith-worker (footer `bypass
 // permissions on`, ghost preceded by SGR `39;2`, footer by `38;5;211`). On a
 // plain `-p` capture the dim is gone, so this reads as parked input ('typing')
 // and a fresh session whose only prompts arrive through the readiness gate can

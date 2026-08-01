@@ -30,7 +30,7 @@ function isTmuxSessionAlive(session: string): boolean {
   }
 }
 
-// Resolve a terminal target for both sub-agents and the MAIN agent (Marveen).
+// Resolve a terminal target for both sub-agents and the MAIN agent (Wraith).
 // The main agent has no agents/<name> dir and runs in `<id>-channels`, not
 // `agent-<name>` -- so the sub-agent assumptions (existsSync(agentDir) +
 // agentSessionName) 404 it (Zara hit this, 871005b). Branch on the main agent.

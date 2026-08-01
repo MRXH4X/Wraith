@@ -154,10 +154,10 @@ describe('decideHasPluginAlive -- slack/discord cross-tree scan', () => {
   it('slack poller alive but NOT a descendant of claude -> alive via cross-tree scan', () => {
     const SLACK_NODE = 5000
     const out = ps([
-      { pid: CLAUDE_PID, ppid: 1, command: 'claude --channels plugin:slack-channel@marveen-marketplace' },
+      { pid: CLAUDE_PID, ppid: 1, command: 'claude --channels plugin:slack-channel@wraith-marketplace' },
       // Slack node process owned by something else (e.g. an MCP server boot)
       // but matching the slack-channel plugin path.
-      { pid: SLACK_NODE, ppid: 1, command: 'node /home/user/.claude/plugins/marketplaces/marveen-marketplace/slack-channel/0.1.0/server.js' },
+      { pid: SLACK_NODE, ppid: 1, command: 'node /home/user/.claude/plugins/marketplaces/wraith-marketplace/slack-channel/0.1.0/server.js' },
     ])
     expect(decideHasPluginAlive({
       psOutput: out, claudePid: CLAUDE_PID, providerType: 'slack',
@@ -179,7 +179,7 @@ describe('decideHasPluginAlive -- slack/discord cross-tree scan', () => {
 
   it('cross-tree scan respects the matcher: synology process does NOT count as slack', () => {
     const out = ps([
-      { pid: CLAUDE_PID, ppid: 1, command: 'claude --channels plugin:slack-channel@marveen-marketplace' },
+      { pid: CLAUDE_PID, ppid: 1, command: 'claude --channels plugin:slack-channel@wraith-marketplace' },
       { pid: SYNOLOGY_BUN_PID, ppid: 1, command: SYNOLOGY_CMD },
     ])
     expect(decideHasPluginAlive({

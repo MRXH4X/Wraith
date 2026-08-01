@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# One-command post-install Claude Code auth for a Marveen install that was set up
+# One-command post-install Claude Code auth for a Wraith install that was set up
 # WITHOUT auth (installer option 3, "skip / set up later"). Prompts for an OAuth
-# setup-token or an API key, writes it into <install>/.env, restarts the Marveen
+# setup-token or an API key, writes it into <install>/.env, restarts the Wraith
 # services, and verifies.
 #
 # SAFE + TARGETED: it ONLY updates the chosen Claude auth line in .env (atomic,
@@ -21,7 +21,7 @@ ok()   { echo -e "  ${GREEN}✓${NC} $*"; }
 warn() { echo -e "  ${ORANGE}!${NC} $*"; }
 err()  { echo -e "  ${RED}✗${NC} $*"; }
 
-echo -e "${BOLD}Marveen -- Claude Code auth beallitasa${NC}"
+echo -e "${BOLD}Wraith -- Claude Code auth beallitasa${NC}"
 echo -e "  Install: $INSTALL_DIR"
 echo ""
 
@@ -66,7 +66,7 @@ fi
 
 # --- 3. Restart services (owner/access config UNTOUCHED) ---
 SLUG="$(grep -E '^MAIN_AGENT_ID=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
-SLUG="${SLUG:-marveen}"
+SLUG="${SLUG:-wraith}"
 echo ""
 echo -e "  Szolgaltatasok ujrainditasa..."
 if [ -x "$INSTALL_DIR/scripts/stop.sh" ] && [ -x "$INSTALL_DIR/scripts/start.sh" ]; then

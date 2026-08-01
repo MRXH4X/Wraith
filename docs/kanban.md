@@ -72,7 +72,7 @@ KANBAN_WIP_FULL_COLOR=#d46b00
 KANBAN_WIP_OVER_COLOR=#c53030
 ```
 
-Adatfolyam: `src/config.ts` → `/api/marveen` (`kanbanWip` kulcs) → `window._marveen.kanbanWip` (frontend). A frontend statikus, nincs build lépés -- szerver HUP elegendő a limitek megváltoztatásához.
+Adatfolyam: `src/config.ts` → `/api/wraith` (`kanbanWip` kulcs) → `window._wraith.kanbanWip` (frontend). A frontend statikus, nincs build lépés -- szerver HUP elegendő a limitek megváltoztatásához.
 
 ### Dashboard kanban felület
 
@@ -130,7 +130,7 @@ KANBAN_AGING_CAUTION_COLOR=#d46b00
 KANBAN_AGING_CRITICAL_COLOR=#c53030
 ```
 
-Értékek forrása: `src/config.ts` → `/api/marveen` (`kanbanAging` kulcs) → `window._marveen.kanbanAging` (frontend). A frontend statikus (`web/app.js`), nincs build lépés a küszöb-értékek frissítésekor -- szerver HUP elegendő.
+Értékek forrása: `src/config.ts` → `/api/wraith` (`kanbanAging` kulcs) → `window._wraith.kanbanAging` (frontend). A frontend statikus (`web/app.js`), nincs build lépés a küszöb-értékek frissítésekor -- szerver HUP elegendő.
 
 ### Oszloponkénti WIP-limit
 
@@ -205,7 +205,7 @@ Az üres (kártya nélküli) swimlane-ek nem jelennek meg.
 
 **Perzisztencia:**
 
-A csoportosítás-választás `localStorage`-ban (`marveen.kanbanGroupBy` kulcs) tárolódik, így a felhasználó utolsó választása böngészőnkénti újratöltés után is megmarad, és felülírja a `.env`-ben konfigurált alapértéket. A sáv-összecsukás állapota viszont csak a böngészőlap memóriájában él (oldal-frissítésnél törlődik), a táblafrissítések (pl. kártya mozgatás, 30 másodperces auto-refresh) azonban nem törlik.
+A csoportosítás-választás `localStorage`-ban (`wraith.kanbanGroupBy` kulcs) tárolódik, így a felhasználó utolsó választása böngészőnkénti újratöltés után is megmarad, és felülírja a `.env`-ben konfigurált alapértéket. A sáv-összecsukás állapota viszont csak a böngészőlap memóriájában él (oldal-frissítésnél törlődik), a táblafrissítések (pl. kártya mozgatás, 30 másodperces auto-refresh) azonban nem törlik.
 
 **Drag & drop:**
 
@@ -218,7 +218,7 @@ KANBAN_SWIMLANE_DEFAULT_GROUP=none         # none (alapért.) | assignee | prior
 KANBAN_SWIMLANE_SEPARATOR_COLOR=           # üres = CSS alapszín (var(--border))
 ```
 
-Adatfolyam: `src/config.ts` → `/api/marveen` (`kanbanSwimlanes` kulcs) → `window._marveen.kanbanSwimlanes` (frontend). A frontend statikus, nincs build lépés -- szerver HUP elegendő a beállítások megváltoztatásához.
+Adatfolyam: `src/config.ts` → `/api/wraith` (`kanbanSwimlanes` kulcs) → `window._wraith.kanbanSwimlanes` (frontend). A frontend statikus, nincs build lépés -- szerver HUP elegendő a beállítások megváltoztatásához.
 
 ### Gyors-szűrők és címkék
 
@@ -292,7 +292,7 @@ Egy üres címke-szűrő (nincs aktív címke kiválasztva) nem szűkít -- mind
 
 **Perzisztencia:**
 
-A címke-szűrő `localStorage`-ban tárolódik (`marveen.kanbanLabelFilter` kulcs, JSON-tömbként), ugyanazzal a mintával mint a swimlane-csoportosítás választása -- böngészőnkénti újratöltés után is megmarad.
+A címke-szűrő `localStorage`-ban tárolódik (`wraith.kanbanLabelFilter` kulcs, JSON-tömbként), ugyanazzal a mintával mint a swimlane-csoportosítás választása -- böngészőnkénti újratöltés után is megmarad.
 
 **Konfigurációs kulcsok (`.env`):**
 
@@ -300,4 +300,4 @@ A címke-szűrő `localStorage`-ban tárolódik (`marveen.kanbanLabelFilter` kul
 KANBAN_LABEL_COLORS=#3b82f6,#0ea5e9,#10b981,#14b8a6,#8b5cf6,#64748b  # választható paletta (hideg tónusok)
 ```
 
-Adatfolyam: `src/config.ts` → `/api/marveen` (`kanbanLabels.colors` kulcs) → `window._marveen.kanbanLabels` (frontend).
+Adatfolyam: `src/config.ts` → `/api/wraith` (`kanbanLabels.colors` kulcs) → `window._wraith.kanbanLabels` (frontend).

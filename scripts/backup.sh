@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Marveen backup.
+# Wraith backup.
 #
 # The archive has two top-level groups so a restore is unambiguous about
 # where each file belongs (see docs/MIGRATION.md):
@@ -90,14 +90,14 @@ if [[ -d "${HOME}/.claude/channels" ]]; then
 fi
 # launchd jobs for this fleet. The job labels are com.<MAIN_AGENT_ID>.<service>
 # (see src/web/main-agent.ts), so resolve MAIN_AGENT_ID the way the app does
-# (src/env.ts: read from .env, default "marveen" when unset) instead of
+# (src/env.ts: read from .env, default "wraith" when unset) instead of
 # hardcoding one deployment's prefix. Parsing mirrors env.ts: last definition
 # wins, surrounding matching quotes stripped.
-MAIN_AGENT_ID="marveen"
+MAIN_AGENT_ID="wraith"
 if [[ -f "${REPO_ROOT}/.env" ]]; then
   # `|| true`: with `set -o pipefail`, a no-match grep would otherwise fail the
   # whole substitution (and, under `set -e`, abort the backup) on any install
-  # that leaves MAIN_AGENT_ID unset and relies on the "marveen" default.
+  # that leaves MAIN_AGENT_ID unset and relies on the "wraith" default.
   _mid="$(grep -E '^[[:space:]]*MAIN_AGENT_ID[[:space:]]*=' "${REPO_ROOT}/.env" | tail -1 \
     | sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]*$//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/' || true)"
   [[ -n "${_mid}" ]] && MAIN_AGENT_ID="${_mid}"
@@ -113,7 +113,7 @@ fi
 
 # --- Manifest (stored at the archive root for self-description). -----------
 {
-  echo "Marveen backup ${STAMP}"
+  echo "Wraith backup ${STAMP}"
   echo "host: $(hostname 2>/dev/null || echo '?')   user: ${USER:-?}   home: ${HOME}"
   echo "repo root: ${REPO_ROOT}"
   echo "Restore: tar -xpzf <archive> -C <tmp>; copy repo/* -> project root, home/* -> \$HOME."

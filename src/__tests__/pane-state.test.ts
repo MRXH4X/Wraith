@@ -1542,7 +1542,7 @@ describe('parkedChannelInput (stuck channel-block gate + truncation guard)', () 
 })
 
 // ---------------------------------------------------------------------------
-// Contract tests: esc-to-interrupt live-region scoping (port from kovesdan/marveen)
+// Contract tests: esc-to-interrupt live-region scoping (port from kovesdan/wraith)
 //
 // Root cause: a watchdog report or log output that quotes "esc to interrupt"
 // anywhere in the scrollback permanently classified an otherwise-idle session
@@ -1650,7 +1650,7 @@ describe('parkedInputText', () => {
   // A long inter-agent message wrapped across two input-box lines by the TUI.
   const WRAPPED_PARKED = [
     '', SEP2,
-    '❯ [Uzenet @system-tol]: Uj csapattag erkezett: balazsmarveenja. Udv',
+    '❯ [Uzenet @system-tol]: Uj csapattag erkezett: balazswraithja. Udv',
     '  neki ha legkozelebb beszeltek!',
     SEP2,
     '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
@@ -1672,7 +1672,7 @@ describe('parkedInputText', () => {
 
   it('collapses terminal-wrapped lines into a single submittable line', () => {
     expect(parkedInputText(WRAPPED_PARKED)).toBe(
-      '[Uzenet @system-tol]: Uj csapattag erkezett: balazsmarveenja. Udv neki ha legkozelebb beszeltek!',
+      '[Uzenet @system-tol]: Uj csapattag erkezett: balazswraithja. Udv neki ha legkozelebb beszeltek!',
     )
   })
 })

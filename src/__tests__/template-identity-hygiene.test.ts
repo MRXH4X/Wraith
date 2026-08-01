@@ -28,7 +28,7 @@ const KNOWN_PLACEHOLDERS = ['PROJECT_ROOT', 'INSTALL_DIR', 'MAIN_AGENT_ID', 'BOT
 
 // An absolute macOS/Linux home path embeds a real username. The trailing
 // slash is optional so a bare literal like "/Users/bob" at end of value is
-// still caught. A `<...>` segment (e.g. /Users/<user>/marveen) is a doc
+// still caught. A `<...>` segment (e.g. /Users/<user>/wraith) is a doc
 // placeholder, not a real path, so it is allowed. URL lines are skipped by the
 // caller so a link like https://host/home/x is not mistaken for a home path.
 const HOME_PATH_RX = /\/(Users|home)\/(?!<)[A-Za-z0-9._-]+/
@@ -102,11 +102,11 @@ describe('shipped templates carry no hardcoded identity', () => {
 
   // web/app.js is the dashboard bundle, shipped verbatim to every install. It
   // must carry no deployment-specific operator identity: the owner display name
-  // flows from the backend (OWNER_NAME -> /api/marveen -> window._marveen.ownerName,
+  // flows from the backend (OWNER_NAME -> /api/wraith -> window._wraith.ownerName,
   // read via chatOwnerName()), never a hardcoded "Szabolcs"/"Szabi" literal, so a
   // renamed install labels its real owner. This is the exact regression #369
   // fixed -- the chat sidebar used to pin/label the owner thread off a
-  // `const CHAT_OWNER_AGENT = 'Szabolcs'` literal. The Marveen product brand and
+  // `const CHAT_OWNER_AGENT = 'Szabolcs'` literal. The Wraith product brand and
   // agent role-names are NOT identity and stay allowed (none match these regexes).
   it('web/app.js carries no absolute home path, personal email, or default owner-name literal', () => {
     const violations: string[] = []
@@ -121,7 +121,7 @@ describe('shipped templates carry no hardcoded identity', () => {
           violations.push(`web/app.js:${i + 1} personal email: ${line.trim().slice(0, 100)}`)
         }
         if (FOREIGN_DEFAULT_OWNER_RX.test(line)) {
-          violations.push(`web/app.js:${i + 1} default owner name literal (read it from window._marveen.ownerName via chatOwnerName()): ${line.trim().slice(0, 100)}`)
+          violations.push(`web/app.js:${i + 1} default owner name literal (read it from window._wraith.ownerName via chatOwnerName()): ${line.trim().slice(0, 100)}`)
         }
       })
     }

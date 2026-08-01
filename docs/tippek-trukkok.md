@@ -1,6 +1,6 @@
 # Tippek, Trükkök
 
-> Bevált fogások, amelyekkel gyorsabban és hatékonyabban dolgozhatsz a Marveen flottával.
+> Bevált fogások, amelyekkel gyorsabban és hatékonyabban dolgozhatsz a Wraith flottával.
 
 ---
 

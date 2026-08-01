@@ -12,7 +12,7 @@
 // shared token keep working unchanged (backward compatibility is not
 // negotiable); they simply do not gain per-device revocation.
 //
-// Re-pairing the same device (same marveen-remote:<uuid>) REPLACES both sides:
+// Re-pairing the same device (same wraith-remote:<uuid>) REPLACES both sides:
 // the authorized_keys line (merge-by-id, existing behavior) and the device key
 // (the old row is revoked, a fresh key is minted) -- so a device never
 // accumulates keys.
@@ -41,7 +41,7 @@ import { createDeviceKey, findDeviceKeyByInstallId, revokeDeviceKey } from './au
 export { RemoteEnrollError }
 
 export interface BridgeEnrollInput {
-  /** The pasted `ssh-ed25519 <base64> marveen-remote:<uuid>` line. */
+  /** The pasted `ssh-ed25519 <base64> wraith-remote:<uuid>` line. */
   keyLine: string
   /** Display name for the device key (shown in the device-key list). */
   name: string
@@ -75,20 +75,20 @@ export interface BridgeEnrollOutcome {
   bundle: string
 }
 
-/** MARVEEN_SSH_DIR is a test seam for isolated e2e instances (a scratch
+/** WRAITH_SSH_DIR is a test seam for isolated e2e instances (a scratch
  * server must never write the real ~/.ssh). It lives in a production code
  * path, so if it ever leaks into a real environment (inherited env, copied
  * .env, launchd plist) enrollment would silently write elsewhere and pairing
  * would "succeed but not work". Every use is therefore loudly logged and
  * flagged into the audit row (see sshDirOverride() callers). */
 export function sshDirOverride(): string | null {
-  return process.env.MARVEEN_SSH_DIR || null
+  return process.env.WRAITH_SSH_DIR || null
 }
 
 function resolveSshDir(): string {
   const override = sshDirOverride()
   if (override) {
-    logger.warn({ sshDir: override }, 'MARVEEN_SSH_DIR override active -- authorized_keys writes are redirected (test seam; must be unset in production)')
+    logger.warn({ sshDir: override }, 'WRAITH_SSH_DIR override active -- authorized_keys writes are redirected (test seam; must be unset in production)')
     return override
   }
   return join(homedir(), '.ssh')

@@ -222,7 +222,7 @@ export interface RemoveEnrolledResult {
 }
 
 /**
- * Remove the marveen-remote:<installId> line from <sshDir>/authorized_keys --
+ * Remove the wraith-remote:<installId> line from <sshDir>/authorized_keys --
  * the revoke counterpart of enrollAuthorizedKey, under the same lock and
  * atomic-replace discipline. A missing file or missing line reports
  * removed:false (idempotent: revoking twice must not fail).

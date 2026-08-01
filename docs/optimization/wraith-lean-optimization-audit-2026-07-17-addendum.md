@@ -1,6 +1,6 @@
 # Addendum to the 2026-07-17 Lean Optimization audit
 
-This is an addendum, not a revision. `marveen-lean-optimization-audit-2026-07-17.md`
+This is an addendum, not a revision. `wraith-lean-optimization-audit-2026-07-17.md`
 is left exactly as written — it is a record of what was believed on 2026-07-17,
 and rewriting it would destroy the evidence of how the picture changed.
 

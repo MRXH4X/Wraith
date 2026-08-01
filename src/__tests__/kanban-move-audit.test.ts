@@ -21,7 +21,7 @@ describe('kanban move audit trail', () => {
   it('records exactly one event with correct from/to status and actor on a status change', () => {
     createKanbanCard({ id: 'card-a', title: 'Audited card' })
 
-    const moved = moveKanbanCard('card-a', 'in_progress', 1, 'marveen')
+    const moved = moveKanbanCard('card-a', 'in_progress', 1, 'wraith')
     expect(moved).toBe(true)
 
     const events = getKanbanCardEvents('card-a')
@@ -29,7 +29,7 @@ describe('kanban move audit trail', () => {
     expect(events[0].card_id).toBe('card-a')
     expect(events[0].from_status).toBe('planned')
     expect(events[0].to_status).toBe('in_progress')
-    expect(events[0].actor).toBe('marveen')
+    expect(events[0].actor).toBe('wraith')
     expect(typeof events[0].created_at).toBe('number')
   })
 
@@ -37,13 +37,13 @@ describe('kanban move audit trail', () => {
     createKanbanCard({ id: 'card-b', title: 'Reordered card' })
 
     // Same status (planned), only sort_order differs -> not a transition.
-    const moved = moveKanbanCard('card-b', 'planned', 5, 'marveen')
+    const moved = moveKanbanCard('card-b', 'planned', 5, 'wraith')
     expect(moved).toBe(true)
     expect(getKanbanCardEvents('card-b')).toHaveLength(0)
   })
 
   it('records no event when no row matches', () => {
-    const moved = moveKanbanCard('nonexistent-card', 'done', 0, 'marveen')
+    const moved = moveKanbanCard('nonexistent-card', 'done', 0, 'wraith')
     expect(moved).toBe(false)
     expect(getKanbanCardEvents('nonexistent-card')).toHaveLength(0)
   })
@@ -62,9 +62,9 @@ describe('kanban move audit trail', () => {
   it('returns events in chronological order across multiple moves', () => {
     createKanbanCard({ id: 'card-d', title: 'Multi-move card' })
 
-    moveKanbanCard('card-d', 'in_progress', 0, 'marveen')
+    moveKanbanCard('card-d', 'in_progress', 0, 'wraith')
     moveKanbanCard('card-d', 'waiting', 0, 'samu')
-    moveKanbanCard('card-d', 'done', 0, 'marveen')
+    moveKanbanCard('card-d', 'done', 0, 'wraith')
 
     const events = getKanbanCardEvents('card-d')
     expect(events.map((e) => e.to_status)).toEqual(['in_progress', 'waiting', 'done'])

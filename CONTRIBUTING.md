@@ -1,4 +1,4 @@
-# Hogyan járulhatsz hozzá a Marveen projekthez?
+# Hogyan járulhatsz hozzá a Wraith projekthez?
 
 Örülünk, hogy érdeklődsz az AI csapat fejlesztése iránt! A következő lépésekkel tudsz csatlakozni:
 
@@ -7,7 +7,7 @@
 - **Új Skillek és Integrációk:** Ha új képességet adsz az ágenseknek, feltétlenül pótold a működés leírását a `docs/` mappában (pl. a `skill-factory.md` vagy új dokumentum formájában).
 - **Pull Request beküldése:** Nyiss PR-t a `develop` ág felé. A PR megnyitásakor automatikusan betöltődik a sablon (`.github/pull_request_template.md`); töltsd ki minden szakaszát, hogy a változtatásod egységesen, könnyen áttekinthetően legyen dokumentálva.
 
-# How can you contribute to the Marveen project?
+# How can you contribute to the Wraith project?
 
 We are glad that you are interested in developing the AI team! You can join with the following steps:
 

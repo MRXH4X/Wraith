@@ -187,8 +187,8 @@ describe('agent bundle export/import', () => {
   })
 
   it('builds a safe download filename', () => {
-    expect(bundleFilename('tester')).toBe('marveen-agent-tester.tar.gz')
-    expect(bundleFilename('../../etc/passwd')).toBe('marveen-agent-passwd.tar.gz')
+    expect(bundleFilename('tester')).toBe('wraith-agent-tester.tar.gz')
+    expect(bundleFilename('../../etc/passwd')).toBe('wraith-agent-passwd.tar.gz')
   })
 })
 
@@ -298,6 +298,6 @@ describe('fleet bundle export/import', () => {
   })
 
   it('builds a stable fleet download filename', () => {
-    expect(fleetBundleFilename()).toBe('marveen-fleet.tar.gz')
+    expect(fleetBundleFilename()).toBe('wraith-fleet.tar.gz')
   })
 })

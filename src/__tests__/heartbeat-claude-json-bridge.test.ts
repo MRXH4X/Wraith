@@ -43,7 +43,7 @@ describe('heartbeat ~/.claude.json bridge (2026-06-02 14:27 regression fix)', ()
     // The Claude Code TUI keys project-scope MCPs by absolute cwd. The
     // heartbeat sub-agent runs in agents/heartbeat-worker, so an empty
     // entry there means no MCPs visible. Duplicating the PROJECT_ROOT
-    // entry under the new key lets the sub-agent inherit Marveen's
+    // entry under the new key lets the sub-agent inherit Wraith's
     // Gmail + Calendar MCPs without any other change.
     expect(HB_SRC).toMatch(/projects\[PROJECT_ROOT\]/)
     expect(HB_SRC).toMatch(/projects\[HEARTBEAT_AGENT_CWD\]/)

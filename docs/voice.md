@@ -49,7 +49,7 @@ Az ügynökök közötti belső üzenetek (nincs `chat_id`) kihagyják a hangpip
 
 ### Hangmodellek
 
-A TTS Piper ONNX modelleket használ. A modellek helye: `~/.local/share/marveen-voice/voices/`.
+A TTS Piper ONNX modelleket használ. A modellek helye: `~/.local/share/wraith-voice/voices/`.
 
 Alapból elérhető magyar hangok:
 - `hu_HU-imre-medium` -- férfi hang (default)

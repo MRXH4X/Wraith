@@ -42,11 +42,11 @@ import { notifyChannel } from '../notify.js'
 
 const TMUX = resolveFromPath('tmux')
 
-// MARVEEN_WORKER_MODEL stays a process-level escape hatch (systemd
+// WRAITH_WORKER_MODEL stays a process-level escape hatch (systemd
 // `Environment=`), but the .env-backed DEFAULT_AGENT_MODEL is what an operator
 // can actually set: readEnvFile() returns a plain object and never populates
-// process.env, so a MARVEEN_WORKER_MODEL line in .env was silently ignored.
-const WORKER_MODEL = process.env.MARVEEN_WORKER_MODEL || DEFAULT_AGENT_MODEL
+// process.env, so a WRAITH_WORKER_MODEL line in .env was silently ignored.
+const WORKER_MODEL = process.env.WRAITH_WORKER_MODEL || DEFAULT_AGENT_MODEL
 
 // How long to wait for a freshly launched worker to reach an idle prompt.
 const WORKER_BOOT_TIMEOUT_MS = 90_000
@@ -92,8 +92,8 @@ export function makeWorkerCtx(session: string, homeDir: string): WorkerCtx {
  * the session name (WORKERHOME1): a sandbox or renamed install booted with its
  * own MAIN_AGENT_ID must never resolve to -- and write into -- the default
  * install's live worker config dir (the 2026-07-28 same-host sandbox boot
- * seeded credentials into the live ~/.marveen-worker/.claude-config this way).
- * The default id 'marveen' keeps the historical .marveen-worker path, so
+ * seeded credentials into the live ~/.wraith-worker/.claude-config this way).
+ * The default id 'wraith' keeps the historical .wraith-worker path, so
  * existing installs see no migration and their Keychain path-hash
  * (configDirKeychainService) is unchanged; any other id derives its own dir,
  * which hashes to its own Keychain service automatically.
@@ -118,17 +118,17 @@ export function workerStartAllowed(env: NodeJS.ProcessEnv = process.env): boolea
 // worker -- all existing callers default to this. Session name AND worker home
 // key off MAIN_AGENT_ID (per #611 + WORKERHOME1) so notify.sh's
 // "${MAIN_AGENT_ID}-worker" branch matches on renamed installs and a non-default
-// id gets its own isolated home; default installs stay "marveen-worker" /
-// ~/.marveen-worker (byte-identical to the historical fixed path).
+// id gets its own isolated home; default installs stay "wraith-worker" /
+// ~/.wraith-worker (byte-identical to the historical fixed path).
 const ctxSlow = makeWorkerCtx(
-  process.env.MARVEEN_WORKER_SESSION || `${MAIN_AGENT_ID}-worker`,
-  process.env.MARVEEN_WORKER_DIR || workerHomeFor(MAIN_AGENT_ID, 'slow'),
+  process.env.WRAITH_WORKER_SESSION || `${MAIN_AGENT_ID}-worker`,
+  process.env.WRAITH_WORKER_DIR || workerHomeFor(MAIN_AGENT_ID, 'slow'),
 )
 // Fast session: short, conversational tasks (< 300 chars, no analysis keywords).
 // Separate home + config dir eliminates any shared state with the slow session.
 const ctxFast = makeWorkerCtx(
-  process.env.MARVEEN_WORKER_SESSION_FAST || `${MAIN_AGENT_ID}-worker-fast`,
-  process.env.MARVEEN_WORKER_DIR_FAST || workerHomeFor(MAIN_AGENT_ID, 'fast'),
+  process.env.WRAITH_WORKER_SESSION_FAST || `${MAIN_AGENT_ID}-worker-fast`,
+  process.env.WRAITH_WORKER_DIR_FAST || workerHomeFor(MAIN_AGENT_ID, 'fast'),
 )
 
 // --- Message priority routing -------------------------------------------------
@@ -173,7 +173,7 @@ const WORKER_AUTH_FAILURE_RX =
 /**
  * The macOS Keychain service name Claude Code uses for a given CLAUDE_CONFIG_DIR.
  * sha256(configDir)[0:8] suffix -- reverse-engineered + verified 2026-06-10
- * against the live worker (sha256("/Users/marvin/.marveen-worker/.claude-config")
+ * against the live worker (sha256("/Users/marvin/.wraith-worker/.claude-config")
  * -> "1d2e1367"). Pure + exported so the locked test vector guards the algorithm.
  */
 export function configDirKeychainService(configDir: string): string {
@@ -327,7 +327,7 @@ interface WorkerSettings { enabledPlugins?: Record<string, boolean>; [k: string]
  *  - settings.json with every channel plugin disabled (no 409);
  *  - .credentials.json seeded from the host login (subscription auth);
  *  - .claude.json with projects[ctx.home] mirroring projects[PROJECT_ROOT]
- *    so the worker inherits Marveen's project-scoped MCP servers.
+ *    so the worker inherits Wraith's project-scoped MCP servers.
  * No CLAUDE.md is written here: the cwd is outside PROJECT_ROOT, so the worker
  * boots with a neutral context.
  */
@@ -581,7 +581,7 @@ function alertWorkerStuck(ctx: WorkerCtx, paneTail: string): void {
   if (Date.now() - ctx.lastStuckAlert < WORKER_STUCK_ALERT_COOLDOWN_MS) return
   ctx.lastStuckAlert = Date.now()
   void notifyChannel(
-    `⚠️ Marveen worker [${ctx.session}]: a hatter-worker session nem all keszen (beragadt dialogus vagy ismeretlen kepernyo). Onjavitas lefutott (Escape + restart), de a keszenlet nem allt helyre. Erintett: agens-generalas, capability-osszefoglalo, heartbeat, digest. Nezz ra: tmux attach -t ${ctx.session}`,
+    `⚠️ Wraith worker [${ctx.session}]: a hatter-worker session nem all keszen (beragadt dialogus vagy ismeretlen kepernyo). Onjavitas lefutott (Escape + restart), de a keszenlet nem allt helyre. Erintett: agens-generalas, capability-osszefoglalo, heartbeat, digest. Nezz ra: tmux attach -t ${ctx.session}`,
   ).catch(() => { /* notifyChannel logs internally */ })
 }
 

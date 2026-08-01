@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Migrate an existing install from the hardcoded "marveen" main agent id
+# Migrate an existing install from the hardcoded "wraith" main agent id
 # to the configurable MAIN_AGENT_ID slug derived from BOT_NAME. Run this
 # once after pulling the release that introduces MAIN_AGENT_ID.
 #
 # Behaviour:
 #   * Reads BOT_NAME from .env, computes the slug.
-#   * If the slug is "marveen" (default install), prints a note and exits --
+#   * If the slug is "wraith" (default install), prints a note and exits --
 #     nothing to migrate, the defaults already match.
 #   * Otherwise: stops the launchd services, rewrites the DB rows from
-#     "marveen" to the new slug, renames the plist files + Label keys,
+#     "wraith" to the new slug, renames the plist files + Label keys,
 #     writes MAIN_AGENT_ID into .env, and restarts.
 
 # Dashboard port: env WEB_PORT, else the install .env, else the 3420 default.
@@ -31,27 +31,27 @@ set -a
 source .env
 set +a
 
-BOT_NAME="${BOT_NAME:-Marveen}"
+BOT_NAME="${BOT_NAME:-Wraith}"
 NEW_SLUG=$(python3 - "$BOT_NAME" <<'PYEOF'
 import sys, unicodedata, re
 s = sys.argv[1].strip()
 s = unicodedata.normalize('NFKD', s).encode('ASCII', 'ignore').decode()
 s = re.sub(r'[^a-zA-Z0-9]+', '-', s).strip('-').lower()
-print(s or 'marveen')
+print(s or 'wraith')
 PYEOF
 )
 
-if [ "$NEW_SLUG" = "marveen" ]; then
-  echo "BOT_NAME=\"$BOT_NAME\" → slug \"marveen\" (default). Nothing to migrate."
+if [ "$NEW_SLUG" = "wraith" ]; then
+  echo "BOT_NAME=\"$BOT_NAME\" → slug \"wraith\" (default). Nothing to migrate."
   # Still write MAIN_AGENT_ID into .env for forward compatibility if missing.
   if ! grep -q '^MAIN_AGENT_ID=' .env; then
-    echo "MAIN_AGENT_ID=marveen" >> .env
-    echo "✓ MAIN_AGENT_ID=marveen added to .env"
+    echo "MAIN_AGENT_ID=wraith" >> .env
+    echo "✓ MAIN_AGENT_ID=wraith added to .env"
   fi
   exit 0
 fi
 
-echo "Migrating main agent id: marveen → $NEW_SLUG (BOT_NAME=\"$BOT_NAME\")"
+echo "Migrating main agent id: wraith → $NEW_SLUG (BOT_NAME=\"$BOT_NAME\")"
 read -r -p "This will restart the launchd services and update the DB. Continue? (y/N) " ans
 case "$ans" in
   y|Y|yes|YES) ;;
@@ -62,20 +62,20 @@ PLIST_DIR="$HOME/Library/LaunchAgents"
 OS="$(uname -s)"
 
 if [ "$OS" = "Darwin" ]; then
-  launchctl unload "$PLIST_DIR/com.marveen.channels.plist" 2>/dev/null || true
-  launchctl unload "$PLIST_DIR/com.marveen.dashboard.plist" 2>/dev/null || true
+  launchctl unload "$PLIST_DIR/com.wraith.channels.plist" 2>/dev/null || true
+  launchctl unload "$PLIST_DIR/com.wraith.dashboard.plist" 2>/dev/null || true
 fi
-tmux kill-session -t marveen-channels 2>/dev/null || true
+tmux kill-session -t wraith-channels 2>/dev/null || true
 
 # DB rewrite. Use the SQLite CLI that ships with the project.
 DB="$INSTALL_DIR/store/claudeclaw.db"
 if [ -f "$DB" ]; then
   sqlite3 "$DB" <<SQL
-UPDATE memories        SET agent_id   = '$NEW_SLUG' WHERE agent_id   = 'marveen';
-UPDATE daily_logs      SET agent_id   = '$NEW_SLUG' WHERE agent_id   = 'marveen';
-UPDATE agent_messages  SET from_agent = '$NEW_SLUG' WHERE from_agent = 'marveen';
-UPDATE agent_messages  SET to_agent   = '$NEW_SLUG' WHERE to_agent   = 'marveen';
-UPDATE kanban_cards    SET assignee   = '$NEW_SLUG' WHERE assignee   = 'marveen';
+UPDATE memories        SET agent_id   = '$NEW_SLUG' WHERE agent_id   = 'wraith';
+UPDATE daily_logs      SET agent_id   = '$NEW_SLUG' WHERE agent_id   = 'wraith';
+UPDATE agent_messages  SET from_agent = '$NEW_SLUG' WHERE from_agent = 'wraith';
+UPDATE agent_messages  SET to_agent   = '$NEW_SLUG' WHERE to_agent   = 'wraith';
+UPDATE kanban_cards    SET assignee   = '$NEW_SLUG' WHERE assignee   = 'wraith';
 SQL
   echo "✓ DB rows rewritten"
 fi
@@ -83,7 +83,7 @@ fi
 # Rename plists + patch Label.
 if [ "$OS" = "Darwin" ]; then
   for kind in channels dashboard; do
-    OLD="$PLIST_DIR/com.marveen.${kind}.plist"
+    OLD="$PLIST_DIR/com.wraith.${kind}.plist"
     NEW="$PLIST_DIR/com.${NEW_SLUG}.${kind}.plist"
     if [ -f "$OLD" ]; then
       mv "$OLD" "$NEW"
@@ -91,7 +91,7 @@ if [ "$OS" = "Darwin" ]; then
       python3 - "$NEW" "$NEW_SLUG" "$kind" <<'PYEOF'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); slug = sys.argv[2]; kind = sys.argv[3]
-p.write_text(p.read_text().replace(f"com.marveen.{kind}", f"com.{slug}.{kind}"))
+p.write_text(p.read_text().replace(f"com.wraith.{kind}", f"com.{slug}.{kind}"))
 PYEOF
       echo "✓ Renamed $OLD → $NEW"
     fi
@@ -110,24 +110,24 @@ else
 fi
 echo "✓ .env updated (MAIN_AGENT_ID=$NEW_SLUG)"
 
-# Rewrite any "agent": "marveen" examples in the generated CLAUDE.md so the
+# Rewrite any "agent": "wraith" examples in the generated CLAUDE.md so the
 # agent copying the curl snippet targets the right session. Keeps a backup.
 if [ -f "$INSTALL_DIR/CLAUDE.md" ]; then
-  CLAUDE_MATCHES=$(grep -c '"agent": "marveen"' "$INSTALL_DIR/CLAUDE.md" 2>/dev/null || echo 0)
+  CLAUDE_MATCHES=$(grep -c '"agent": "wraith"' "$INSTALL_DIR/CLAUDE.md" 2>/dev/null || echo 0)
   CLAUDE_MATCHES=$(echo "$CLAUDE_MATCHES" | tr -d '[:space:]')
   if [ -n "$CLAUDE_MATCHES" ] && [ "$CLAUDE_MATCHES" -gt 0 ]; then
     cp "$INSTALL_DIR/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md.pre-migrate-$(date +%Y%m%d-%H%M%S)"
     python3 - "$INSTALL_DIR/CLAUDE.md" "$NEW_SLUG" <<'PYEOF'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); slug = sys.argv[2]
-p.write_text(p.read_text().replace('"agent": "marveen"', f'"agent": "{slug}"'))
+p.write_text(p.read_text().replace('"agent": "wraith"', f'"agent": "{slug}"'))
 PYEOF
     echo "✓ CLAUDE.md agent example updated ($CLAUDE_MATCHES occurrence(s))"
   fi
 fi
 
 # Rewrite ~/.claude/scheduled-tasks/*/task-config.json agent fields: the
-# scheduler routes by this name, and "marveen" now targets a non-existent
+# scheduler routes by this name, and "wraith" now targets a non-existent
 # session on non-default installs.
 SCHED_DIR="$HOME/.claude/scheduled-tasks"
 if [ -d "$SCHED_DIR" ]; then
@@ -140,7 +140,7 @@ for cfg in root.glob('*/task-config.json'):
         data = json.loads(cfg.read_text())
     except Exception:
         continue
-    if data.get('agent') == 'marveen':
+    if data.get('agent') == 'wraith':
         data['agent'] = slug
         cfg.write_text(json.dumps(data, indent=2))
         fixed += 1
@@ -157,4 +157,4 @@ fi
 
 echo ""
 echo "Done. Dashboard: http://localhost:${WEB_PORT:-3420}"
-echo "tmux attach -t ${NEW_SLUG}-channels   (was marveen-channels)"
+echo "tmux attach -t ${NEW_SLUG}-channels   (was wraith-channels)"

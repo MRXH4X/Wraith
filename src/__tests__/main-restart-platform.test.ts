@@ -18,7 +18,7 @@ import { join } from 'node:path'
 // #713 fixed the auto-restart runner by picking the mechanism from the launchctl
 // BINARY (`mainRestartMechanism(existsSync('/bin/launchctl'))`). The other two
 // call sites were untouched and are what this change fixes; they delegate to
-// hardRestartMarveenChannels(), which already existed for the channel-monitor
+// hardRestartWraithChannels(), which already existed for the channel-monitor
 // down-cascade. So two shapes now coexist, and this guard therefore asserts the
 // INVARIANT both satisfy rather than one particular helper: a runner may name
 // launchctl only if the same file also gates it on that binary existing, and it
@@ -62,7 +62,7 @@ function hasLaunchctlGate(code: string): boolean {
 
 // A path that restarts main WITHOUT launchd.
 function hasNonLaunchdPath(code: string): boolean {
-  return /hardRestartMarveenChannels\(\)/.test(code) || /respawnMainSessionFresh\(\)/.test(code)
+  return /hardRestartWraithChannels\(\)/.test(code) || /respawnMainSessionFresh\(\)/.test(code)
 }
 
 describe('main-session restart is platform-correct (2026-07-26 launchctl ENOENT)', () => {
@@ -80,7 +80,7 @@ describe('main-session restart is platform-correct (2026-07-26 launchctl ENOENT)
       })
 
       it('surfaces a failed main restart when the helper reports one', () => {
-        // hardRestartMarveenChannels returns {ok,error} rather than throwing.
+        // hardRestartWraithChannels returns {ok,error} rather than throwing.
         // Ignoring `ok` would recreate the original silent-failure bug with a
         // different mechanism: the caller would record "restarted" and, in the
         // auto-restart case, stamp lastRestart and skip the slot for a day.
@@ -88,7 +88,7 @@ describe('main-session restart is platform-correct (2026-07-26 launchctl ENOENT)
         // returns void and warns internally, so there is no result to check
         // (a real remaining gap, called out in the PR rather than papered over).
         const code = stripComments(read(rel))
-        if (/hardRestartMarveenChannels\(\)/.test(code)) {
+        if (/hardRestartWraithChannels\(\)/.test(code)) {
           expect(code).toMatch(/if\s*\(\s*!\s*res\.ok\s*\)\s*throw/)
         }
       })
@@ -96,12 +96,12 @@ describe('main-session restart is platform-correct (2026-07-26 launchctl ENOENT)
   }
 
   // The macOS leg must SURVIVE this change: the fix is an EXTENSION to Linux,
-  // not a replacement, because marveen is also installed on macOS hosts. Both
+  // not a replacement, because wraith is also installed on macOS hosts. Both
   // directions are asserted so "we kept the mac path" is not just a claim in a
   // commit message.
   it('the helper keeps the launchd leg for macOS installs, gated on the plist', () => {
     const monitor = read('web/channel-monitor.ts')
-    expect(monitor).toMatch(/export function hardRestartMarveenChannels/)
+    expect(monitor).toMatch(/export function hardRestartWraithChannels/)
     // mac leg: non-linux AND the channels plist is actually registered.
     expect(monitor).toMatch(/process\.platform !== 'linux' && existsSync\(MAIN_CHANNELS_PLIST\)/)
     // ...and it still drives launchd, rather than having been stripped to a
@@ -116,7 +116,7 @@ describe('main-session restart is platform-correct (2026-07-26 launchctl ENOENT)
     // which is also the whole Linux leg.
     const monitor = read('web/channel-monitor.ts')
     expect(monitor).toMatch(/channels plist absent -- falling back to respawn-pane/)
-    expect(monitor).toMatch(/respawnMarveenSessionFresh\(\)/)
+    expect(monitor).toMatch(/respawnWraithSessionFresh\(\)/)
   })
 
   it('the launchd leg of the auto-restart runner is gated, and the fallback is the shared respawn helper', () => {
@@ -140,7 +140,7 @@ describe('main-session restart is platform-correct (2026-07-26 launchctl ENOENT)
 // can read as saturated/idle again before it has settled.
 //
 // The mechanism is the one already shared by every other respawner: the
-// lastMainRespawnAt() stamp plus MARVEEN_POST_RESPAWN_GRACE_MS. Deliberately NO
+// lastMainRespawnAt() stamp plus WRAITH_POST_RESPAWN_GRACE_MS. Deliberately NO
 // new tunable -- see stuck-tool-call-watcher.ts, which gates its recovery the
 // same way against the same stamp.
 describe('context guard defers a main restart inside the post-respawn grace', () => {

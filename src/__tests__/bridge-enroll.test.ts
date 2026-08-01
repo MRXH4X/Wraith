@@ -24,7 +24,7 @@ import type { RouteContext } from '../web/routes/types.js'
 
 const TOKEN = 'a'.repeat(64)
 
-/** Build a VALID `ssh-ed25519 <base64> marveen-remote:<uuid>` line: the blob
+/** Build a VALID `ssh-ed25519 <base64> wraith-remote:<uuid>` line: the blob
  *  is the real OpenSSH wire format around 32 random key bytes. */
 function makeKeyLine(installId = randomUUID()): { line: string; installId: string } {
   const type = Buffer.from('ssh-ed25519', 'utf8')
@@ -33,7 +33,7 @@ function makeKeyLine(installId = randomUUID()): { line: string; installId: strin
     Buffer.from([0, 0, 0, type.length]), type,
     Buffer.from([0, 0, 0, 32]), key,
   ])
-  return { line: `ssh-ed25519 ${blob.toString('base64')} marveen-remote:${installId}`, installId }
+  return { line: `ssh-ed25519 ${blob.toString('base64')} wraith-remote:${installId}`, installId }
 }
 
 const HOST_KEY_B64 = Buffer.concat([
@@ -71,7 +71,7 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(sshDir, { recursive: true, force: true })
-  delete process.env.MARVEEN_SSH_DIR
+  delete process.env.WRAITH_SSH_DIR
 })
 
 describe('bridgeEnroll', () => {
@@ -161,7 +161,7 @@ describe('removeAuthorizedKey (pure) + removeBridgeSshAccess', () => {
   it('pure removal keeps other lines untouched', () => {
     const { installId } = makeKeyLine()
     const keep = 'ssh-ed25519 AAAAkeep other@host'
-    const drop = `${RESTRICT_OPTIONS} ssh-ed25519 AAAAdrop marveen-remote:${installId}`
+    const drop = `${RESTRICT_OPTIONS} ssh-ed25519 AAAAdrop wraith-remote:${installId}`
     const r = removeAuthorizedKey(`${keep}\n${drop}\n`, installId)
     expect(r.removed).toBe(true)
     expect(r.content).toBe(`${keep}\n`)
@@ -222,8 +222,8 @@ describe('POST /api/security/bridge-enroll (HTTP)', () => {
     expect(listDeviceKeys()).toHaveLength(0)
   })
 
-  it('enrolls end-to-end over the route (MARVEEN_SSH_DIR seam) and audits', async () => {
-    process.env.MARVEEN_SSH_DIR = sshDir
+  it('enrolls end-to-end over the route (WRAITH_SSH_DIR seam) and audits', async () => {
+    process.env.WRAITH_SSH_DIR = sshDir
     // The route uses default deps; loopback keyscan may fail in CI, so give it
     // a host-key file candidate instead: point readFile via a real file the
     // resolver checks -- not injectable here, so accept either outcome:
@@ -239,7 +239,7 @@ describe('POST /api/security/bridge-enroll (HTTP)', () => {
     expect(findDeviceKeyByInstallId(installId)).not.toBeNull()
     const audit = getDb().prepare("SELECT new_value FROM config_change_log WHERE key='security.bridge_enroll'").all() as { new_value: string }[]
     expect(audit).toHaveLength(1)
-    // The active MARVEEN_SSH_DIR override must be visible in the audit row.
+    // The active WRAITH_SSH_DIR override must be visible in the audit row.
     expect(audit[0]!.new_value).toContain('sshdir_override=1')
   })
 })
@@ -251,7 +251,7 @@ describe('DELETE /api/auth/device-keys/:id for a paired key', () => {
     // Simulate the fs failure the UI must warn about: the line is already gone
     // (file deleted out-of-band), so removal cannot succeed.
     rmSync(join(sshDir, 'authorized_keys'), { force: true })
-    process.env.MARVEEN_SSH_DIR = sshDir
+    process.env.WRAITH_SSH_DIR = sshDir
     const r = await call(tryHandleAuth, 'DELETE', `/api/auth/device-keys/${outcome.deviceKeyId}`, { auth: { kind: 'token' } })
     expect(r.statusCode).toBe(200)
     // The key itself is revoked (dead) even though the ssh half failed...
@@ -266,7 +266,7 @@ describe('DELETE /api/auth/device-keys/:id for a paired key', () => {
   it('drops the authorized_keys line together with the key', async () => {
     const { line, installId } = makeKeyLine()
     const outcome = await bridgeEnroll({ keyLine: line, name: 'Pair' }, testDeps())
-    process.env.MARVEEN_SSH_DIR = sshDir
+    process.env.WRAITH_SSH_DIR = sshDir
     const r = await call(tryHandleAuth, 'DELETE', `/api/auth/device-keys/${outcome.deviceKeyId}`, { auth: { kind: 'token' } })
     expect(r.statusCode).toBe(200)
     expect(r.json().ssh_removed).toBe(true)

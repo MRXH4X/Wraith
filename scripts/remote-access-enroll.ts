@@ -5,7 +5,7 @@
 // operator can hand back to the device.
 //
 // Usage:
-//   npm run remote-enroll -- "ssh-ed25519 <base64 key> marveen-remote:<uuid>"
+//   npm run remote-enroll -- "ssh-ed25519 <base64 key> wraith-remote:<uuid>"
 //   npm run remote-enroll -- --host 203.0.113.10 --port 2222 "<public key line>"
 //   npm run remote-enroll -- --web-port 3421 "<public key line>"
 //   npm run remote-enroll -- --no-dashboard-token "<public key line>"
@@ -186,7 +186,7 @@ async function main(): Promise<void> {
     process.stderr.write(`warning: ${w}\n`)
   }
   process.stderr.write(
-    `${result.action === 'replaced' ? 'Replaced' : 'Added'} restricted entry for marveen-remote:${parsed.installId} in ${result.authorizedKeysPath}\n`,
+    `${result.action === 'replaced' ? 'Replaced' : 'Added'} restricted entry for wraith-remote:${parsed.installId} in ${result.authorizedKeysPath}\n`,
   )
 
   // Assemble the connection bundle. The consuming side requires the host key,

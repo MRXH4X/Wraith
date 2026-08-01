@@ -158,7 +158,7 @@ export function exportAgentBundle(
   opts: { includeSecrets?: boolean; exportedBy?: string; exportedAt?: string } = {},
 ): BundleManifest {
   const includeSecrets = opts.includeSecrets === true
-  const stage = makeTempDir('marveen-agent-export-')
+  const stage = makeTempDir('wraith-agent-export-')
   try {
     const stageAgentDir = join(stage, 'agent')
     stageAgentForExport(name, stageAgentDir, includeSecrets)
@@ -187,7 +187,7 @@ export function exportAgentBundle(
 export function readBundleManifest(extractedRoot: string): BundleManifest {
   const manifestPath = join(extractedRoot, 'manifest.json')
   if (!existsSync(manifestPath)) {
-    throw new Error('Invalid bundle: manifest.json missing (not a Marveen agent bundle?)')
+    throw new Error('Invalid bundle: manifest.json missing (not a Wraith agent bundle?)')
   }
   let parsed: unknown
   try { parsed = JSON.parse(readFileSync(manifestPath, 'utf-8')) } catch {
@@ -199,7 +199,7 @@ export function readBundleManifest(extractedRoot: string): BundleManifest {
   if (schemaVersion > BUNDLE_SCHEMA_VERSION) {
     throw new Error(
       `Bundle schema version ${schemaVersion} is newer than this install supports ` +
-      `(max ${BUNDLE_SCHEMA_VERSION}). Update Marveen on this machine first.`,
+      `(max ${BUNDLE_SCHEMA_VERSION}). Update Wraith on this machine first.`,
     )
   }
   const agentName = typeof m.agentName === 'string' ? m.agentName : ''
@@ -247,7 +247,7 @@ export function importAgentBundle(
   opts: { overrideName?: string; overwrite?: boolean; resolveDest?: (name: string) => string } = {},
 ): ImportResult {
   const resolveDest = opts.resolveDest ?? agentDir
-  const work = makeTempDir('marveen-agent-import-')
+  const work = makeTempDir('wraith-agent-import-')
   try {
     const bundlePath = join(work, 'bundle.tar.gz')
     writeFileSync(bundlePath, bundle)
@@ -293,7 +293,7 @@ export function importAgentBundle(
 // goes into a Content-Disposition header).
 export function bundleFilename(name: string): string {
   const safe = basename(name).replace(/[^A-Za-z0-9_-]/g, '') || 'agent'
-  return `marveen-agent-${safe}.tar.gz`
+  return `wraith-agent-${safe}.tar.gz`
 }
 
 // ===========================================================================
@@ -327,7 +327,7 @@ export function exportAllAgentsBundle(
   opts: { includeSecrets?: boolean; exportedBy?: string; exportedAt?: string } = {},
 ): FleetBundleManifest {
   const includeSecrets = opts.includeSecrets === true
-  const stage = makeTempDir('marveen-fleet-export-')
+  const stage = makeTempDir('wraith-fleet-export-')
   try {
     const agentsRoot = join(stage, 'agents')
     mkdirSync(agentsRoot, { recursive: true })
@@ -363,7 +363,7 @@ export function exportAllAgentsBundle(
 export function readFleetManifest(extractedRoot: string): FleetBundleManifest {
   const manifestPath = join(extractedRoot, 'manifest.json')
   if (!existsSync(manifestPath)) {
-    throw new Error('Invalid bundle: manifest.json missing (not a Marveen bundle?)')
+    throw new Error('Invalid bundle: manifest.json missing (not a Wraith bundle?)')
   }
   let parsed: unknown
   try { parsed = JSON.parse(readFileSync(manifestPath, 'utf-8')) } catch {
@@ -375,7 +375,7 @@ export function readFleetManifest(extractedRoot: string): FleetBundleManifest {
   if (schemaVersion > BUNDLE_SCHEMA_VERSION) {
     throw new Error(
       `Bundle schema version ${schemaVersion} is newer than this install supports ` +
-      `(max ${BUNDLE_SCHEMA_VERSION}). Update Marveen on this machine first.`,
+      `(max ${BUNDLE_SCHEMA_VERSION}). Update Wraith on this machine first.`,
     )
   }
   if (m.kind !== 'fleet') throw new Error('Invalid bundle: not a fleet bundle')
@@ -395,7 +395,7 @@ export function readFleetManifest(extractedRoot: string): FleetBundleManifest {
 // endpoint accept either format. Throws on a non-extractable / manifest-less
 // archive (same operator-facing wording as the full importers).
 export function peekBundleKind(bundle: Buffer): 'agent' | 'fleet' {
-  const work = makeTempDir('marveen-bundle-peek-')
+  const work = makeTempDir('wraith-bundle-peek-')
   try {
     const bundlePath = join(work, 'bundle.tar.gz')
     writeFileSync(bundlePath, bundle)
@@ -406,7 +406,7 @@ export function peekBundleKind(bundle: Buffer): 'agent' | 'fleet' {
     }
     const manifestPath = join(work, 'manifest.json')
     if (!existsSync(manifestPath)) {
-      throw new Error('Invalid bundle: manifest.json missing (not a Marveen bundle?)')
+      throw new Error('Invalid bundle: manifest.json missing (not a Wraith bundle?)')
     }
     let parsed: unknown
     try { parsed = JSON.parse(readFileSync(manifestPath, 'utf-8')) } catch {
@@ -436,7 +436,7 @@ export function importAllAgentsBundle(
   opts: { overwrite?: boolean; resolveDest?: (name: string) => string } = {},
 ): FleetImportResult {
   const resolveDest = opts.resolveDest ?? agentDir
-  const work = makeTempDir('marveen-fleet-import-')
+  const work = makeTempDir('wraith-fleet-import-')
   try {
     const bundlePath = join(work, 'bundle.tar.gz')
     writeFileSync(bundlePath, bundle)
@@ -479,5 +479,5 @@ export function importAllAgentsBundle(
 }
 
 export function fleetBundleFilename(): string {
-  return 'marveen-fleet.tar.gz'
+  return 'wraith-fleet.tar.gz'
 }

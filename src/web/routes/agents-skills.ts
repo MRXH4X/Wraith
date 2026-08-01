@@ -13,10 +13,10 @@ import { readBody, json } from '../http-helpers.js'
 import { sanitizeAgentName, sanitizeSkillName, safeJoin } from '../sanitize.js'
 import type { RouteContext } from './types.js'
 
-// Marveen's skills live at the global ~/.claude/skills/ path (shared with
+// Wraith's skills live at the global ~/.claude/skills/ path (shared with
 // the operator's Claude Code install); sub-agents under their own
 // agents/<name>/.claude/skills/. agentDir(MAIN_AGENT_ID) points at the
-// non-existent agents/marveen/ folder so we must branch here.
+// non-existent agents/wraith/ folder so we must branch here.
 function skillsRootFor(name: string): string {
   return name === MAIN_AGENT_ID
     ? join(homedir(), '.claude', 'skills')

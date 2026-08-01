@@ -16,7 +16,7 @@ Az oldal tetején öt fül szűri az eseményeket:
 - Eseménynapló -- az ágensek és a rendszer által naplózott általános események
 - Config -- a Beállítások oldalon eszközölt módosítások (pl. `KANBAN_WIP_IN_PROGRESS` 5-ről 8-ra, ki változtatta, mikor); titkos értékek sosem jelennek meg
 - Ötletláda -- ötlet-státuszváltások (pl. `new` -> `kanban` promóció, vagy visszavonás)
-- Store-fájlok -- az ágensek által létrehozott fájlok létrejöttének eseményei; a Marveen saját rendszerfájljai nem szerepelnek itt; ahol meghatározható, a fájlt létrehozó ágens neve is megjelenik (közvetlen tool-írásnál ez üres lehet)
+- Store-fájlok -- az ágensek által létrehozott fájlok létrejöttének eseményei; a Wraith saját rendszerfájljai nem szerepelnek itt; ahol meghatározható, a fájlt létrehozó ágens neve is megjelenik (közvetlen tool-írásnál ez üres lehet)
 
 A fülre kattintva az oldal azonnal az adott forrás eseményeit mutatja.
 

@@ -16,7 +16,7 @@ outward-facing action. It NEVER blocks the prompt (always exit 0) and stays sile
 for normal, fresh messages so it adds no noise.
 
 Coverage note: this covers any channel that stamps `ts` on the <channel> envelope
-(Telegram and the other native channel plugins). The marveenchat web UI does not
+(Telegram and the other native channel plugins). The wraithchat web UI does not
 currently stamp inbound text with a timestamp, so web-chat inputs are not covered
 here -- that needs the web layer to emit a send time (tracked separately).
 """

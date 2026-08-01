@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, statSync } from 'n
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-const tmpRoot = mkdtempSync(join(tmpdir(), 'marveen-autonomy-test-'))
+const tmpRoot = mkdtempSync(join(tmpdir(), 'wraith-autonomy-test-'))
 
 vi.mock('../config.js', () => ({
   PROJECT_ROOT: tmpRoot,

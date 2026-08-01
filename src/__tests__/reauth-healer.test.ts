@@ -137,7 +137,7 @@ describe('decideReauthAction: first-run gate', () => {
   })
 })
 
-// GAP 2a (PLAN.md, 2026-07-23 marveen-channels silent outage): once GAP 1 lands,
+// GAP 2a (PLAN.md, 2026-07-23 wraith-channels silent outage): once GAP 1 lands,
 // a dead main-agent token is a legitimate restart target (fresh process either
 // picks the still-good fleet token back up, or the token is quarantined by the
 // escalate branch first) -- decideReauthAction gains restartMain, gated at the

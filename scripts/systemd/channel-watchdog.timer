@@ -1,5 +1,5 @@
 [Unit]
-Description=Run the marveen channels watchdog every 5 minutes
+Description=Run the wraith channels watchdog every 5 minutes
 
 [Timer]
 OnBootSec=2min

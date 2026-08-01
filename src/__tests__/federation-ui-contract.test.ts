@@ -88,7 +88,7 @@ describe('federation UI wiring', () => {
     const fn = APP.slice(APP.indexOf('function fedApplyToMainAgent'), APP.indexOf('async function fedRefreshAndReload'))
     expect(fn).toContain("confirm(t('federation.confirm.apply'))")
     // Server-side apply endpoint -- NOT the client-agent-id-dependent restart
-    // (which 404'd when window._marveen was not loaded on the federation page).
+    // (which 404'd when window._wraith was not loaded on the federation page).
     expect(fn).toMatch(/fetch\('\/api\/federation\/apply'/)
     expect(fn).not.toMatch(/fetch\(`\/api\/agents\//)
     // Status auto-refreshes after config mutations (enable, peer add) instead

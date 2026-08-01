@@ -32,15 +32,15 @@ Detection (per pending placeholder, keyed by its session state file):
     WEDGED_SEC -> fire (blunt backstop for genuinely stuck turns; generous so
     long legit tasks aren't cut short).
 
-Standalone: scans every agent's per-agent telegram state dir. No marveen src
+Standalone: scans every agent's per-agent telegram state dir. No wraith src
 dependency; only Python stdlib + the `tmux` binary. Bot API base is overridable
 via TELEGRAM_API_BASE (tests point it at a local stub).
 """
 import os, glob, json, time, subprocess, urllib.request
 
 # State dirs to scan: per-agent dirs under the fleet, plus the default dir.
-# No hardcoded user paths -- derive from $HOME (override with MARVEEN_ROOT).
-FLEET_ROOT = os.environ.get("MARVEEN_ROOT") or os.path.expanduser("~/marveen")
+# No hardcoded user paths -- derive from $HOME (override with WRAITH_ROOT).
+FLEET_ROOT = os.environ.get("WRAITH_ROOT") or os.path.expanduser("~/wraith")
 SCAN_GLOBS = [
     os.path.join(FLEET_ROOT, "agents", "*", ".claude", "channels", "telegram", "progress"),
     os.path.expanduser("~/.claude/channels/telegram/progress"),

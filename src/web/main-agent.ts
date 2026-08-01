@@ -23,7 +23,7 @@ export function channelsPlistPath(serviceId: string): string {
   return join(homedir(), 'Library', 'LaunchAgents', `${channelsLaunchdLabel(serviceId)}.plist`)
 }
 
-// The main agent (Marveen) runs in a long-lived `${id}-channels` tmux
+// The main agent (Wraith) runs in a long-lived `${id}-channels` tmux
 // session managed by launchd, not the `agent-${name}` template that
 // sub-agents use. Anything that needs to address it has to use this name
 // rather than agentSessionName().
@@ -38,7 +38,7 @@ export const MAIN_CHANNELS_SESSION = channelsSessionName(MAIN_AGENT_ID)
 export const MAIN_CHANNELS_PLIST = channelsPlistPath(SERVICE_ID)
 
 // Whether an agent's process lifecycle (start/restart) must go through the
-// channels-session helper (systemd/launchd via hardRestartMarveenChannels)
+// channels-session helper (systemd/launchd via hardRestartWraithChannels)
 // rather than the `agent-<name>` tmux template that sub-agents use. True only
 // for the main agent: it has no `agents/<name>` dir and no `agent-<name>`
 // session, so the agent-process path would spawn a rogue duplicate session and

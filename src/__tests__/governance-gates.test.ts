@@ -243,7 +243,7 @@ describe('self-pace-gate compound-command false-positives', () => {
   // word), not a denylist of subcommands.
   it('does NOT deny a launchd job LABEL appearing in prose (no subcommand follows)', () => {
     expect(selfPaceDecision('Bash', { command: 'echo hello; launchctl com.jarvis.channels PID 555' }).deny).toBe(false)
-    expect(selfPaceDecision('Bash', { command: 'launchctl com.marveen.dashboard is up' }).deny).toBe(false)
+    expect(selfPaceDecision('Bash', { command: 'launchctl com.wraith.dashboard is up' }).deny).toBe(false)
   })
   it('STILL denies every real launchctl form after that narrowing', () => {
     // a subcommand word follows -> real invocation

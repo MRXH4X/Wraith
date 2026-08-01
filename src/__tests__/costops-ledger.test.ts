@@ -189,9 +189,9 @@ describe('costops ledger + summary', () => {
     const db = getDb()
     const w = monthWindow(NOW)
     const ins = db.prepare("INSERT INTO token_usage (agent,session_id,timestamp,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens) VALUES (?,?,?,?,?,?,?)")
-    ins.run('marveen', 's1', w.start + 100, 1000, 5000, 200, 50)
+    ins.run('wraith', 's1', w.start + 100, 1000, 5000, 200, 50)
     ins.run('qa', 's2', w.start + 200, 500, 2000, 0, 0)
-    ins.run('marveen', 's3', w.end + 100, 999, 999, 0, 0) // next month, excluded
+    ins.run('wraith', 's3', w.end + 100, 999, 999, 0, 0) // next month, excluded
     const s = getCostSummary(db, cfg({ fixed_costs: [] }), NOW)
     expect(s.token_usage.calls).toBe(2)
     expect(s.token_usage.agents).toBe(2)

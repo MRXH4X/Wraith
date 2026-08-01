@@ -92,7 +92,7 @@ describe('hookCommandWired', () => {
   it('settles on a backslash (Windows-style) path where the raw compare does not', () => {
     // Reproduces review point 1: the raw includes() disagrees with the
     // serialized form exactly where the escaped form matches.
-    const cmd = '"C:\\Program Files\\nodejs\\node.exe" "C:\\marveen\\scripts\\hooks\\egress-gate.mjs"'
+    const cmd = '"C:\\Program Files\\nodejs\\node.exe" "C:\\wraith\\scripts\\hooks\\egress-gate.mjs"'
     const ptuJson = JSON.stringify([{ matcher: 'WebFetch', hooks: [{ type: 'command', command: cmd, timeout: 10 }] }])
     expect(hookCommandWired(ptuJson, cmd)).toBe(true)   // escaped compare: settles
     expect(ptuJson.includes(cmd)).toBe(false)           // raw compare: never settles

@@ -1,5 +1,5 @@
 // Block B wiring: the profile layer must be ADDITIVE over the existing model
-// selection, not a replacement for it (marveen acceptance criterion,
+// selection, not a replacement for it (wraith acceptance criterion,
 // 2026-07-29). That additivity is also what makes it upstream-committable.
 //
 // Exercised through the real agent-config fs layer, not the pure resolver, so
@@ -95,7 +95,7 @@ describe('additive over the existing selector', () => {
 });
 
 describe('the existing model selector is untouched', () => {
-  // marveen: "Do NOT rip out or replace the existing opus5/sonnet5 selection."
+  // wraith: "Do NOT rip out or replace the existing opus5/sonnet5 selection."
   // These assert the pre-existing machinery is still whole, so a later
   // refactor cannot quietly turn the additive layer into a replacement.
   it('config-registry still owns the distribution default', () => {

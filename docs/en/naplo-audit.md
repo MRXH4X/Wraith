@@ -16,7 +16,7 @@ Five tabs at the top of the page filter the event stream:
 - Event log -- general events logged by agents and the system
 - Config -- changes made through the Settings page (e.g. `KANBAN_WIP_IN_PROGRESS` changed from 5 to 8, who changed it, when); secret values are never recorded
 - Ideas -- idea-box status transitions (e.g. `new` -> `kanban` on promotion, or reversal back to `new`); the note field shows the promotion path or reversal reason
-- Store files -- file creation events for files created by agents; Marveen's own system files are excluded; where determinable, the creating agent's name is shown (may be empty for direct tool writes)
+- Store files -- file creation events for files created by agents; Wraith's own system files are excluded; where determinable, the creating agent's name is shown (may be empty for direct tool writes)
 
 Clicking a tab filters the list immediately -- no page reload needed.
 

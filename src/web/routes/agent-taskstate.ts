@@ -16,7 +16,7 @@ import type { RouteContext } from './types.js'
 //  DELETE /api/agent-taskstate/:agent          <- explicit task-done clear
 //
 // All gated by the dashboard token in web.ts. The read->inject->consume split
-// is deliberate (Marveen): if the hook reads but dies before printing, the
+// is deliberate (Wraith): if the hook reads but dies before printing, the
 // record stays consumed=false so the next start still catches it.
 
 export async function tryHandleAgentTaskState(ctx: RouteContext): Promise<boolean> {

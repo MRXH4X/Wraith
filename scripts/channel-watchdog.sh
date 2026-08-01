@@ -8,7 +8,7 @@
 # dashboard's userbot inbound-probe handles the finer inbound-only deafness.
 #
 # Two INDEPENDENT detection signals (PLAN.md GAP 2b, 2026-07-23
-# marveen-channels silent outage -- the keepalive signal alone never sees a
+# wraith-channels silent outage -- the keepalive signal alone never sees a
 # dead model-API token, since the token-free keepalive probe only exercises
 # the Telegram Bot API, not Claude):
 #   STALE    -- store/.channel-keepalive mtime. Two token-free producers keep
@@ -63,7 +63,7 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$LOG_TAG] $*"; }
 
 # --- resolve the channels session + provider (launch-order / rename independent) ---
 MAIN_AGENT_ID="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
-MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"
+MAIN_AGENT_ID="${MAIN_AGENT_ID:-wraith}"
 MAIN_AGENT_ID="${MAIN_AGENT_ID//[^a-zA-Z0-9_-]/}"
 SESSION="${MAIN_AGENT_ID}-channels"
 # Same helper channels.sh already uses to provision the main-agent isolated
@@ -99,7 +99,7 @@ now=$(date +%s)
 
 # --- gate 1: the channels session must EXIST (bridge "running") ---
 if ! "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
-  log "session $SESSION not present -- systemd marveen-channels.service owns (re)start; watchdog no-op"
+  log "session $SESSION not present -- systemd wraith-channels.service owns (re)start; watchdog no-op"
   exit 0
 fi
 

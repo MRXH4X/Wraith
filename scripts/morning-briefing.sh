@@ -1,5 +1,5 @@
 #!/bin/bash
-# Marveen - Reggeli napindító
+# Wraith - Reggeli napindító
 # Trigger: systemd user timer (Linux, <agent>-morning.timer) vagy LaunchAgent
 # (macOS), naponta 7:27-kor. Naponta legfeljebb egyszer küld (lásd a guardot).
 

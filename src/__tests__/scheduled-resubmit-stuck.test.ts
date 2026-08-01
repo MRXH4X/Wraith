@@ -36,7 +36,7 @@ const OTHER_PARKED_PANE = `
   ${MARKER}
   Vegezd el a deli kutatast a szokasos forrasokbol.
 ─────────────────────────────────────────────
-❯ [Uzenet @marveen-tol]: fontos kerdes, ne kuldd el veletlenul
+❯ [Uzenet @wraith-tol]: fontos kerdes, ne kuldd el veletlenul
 ─────────────────────────────────────────────
   ⏵⏵ bypass permissions on (shift+tab to cycle)
 `

@@ -11,7 +11,7 @@
 # 3. Ha a claude kilép, a tmux session záródik, a script is kilép
 # 4. A launchd KeepAlive újraindítja
 #
-# Kézzel rácsatlakozás: tmux attach -t <MAIN_AGENT_ID>-channels (pl. marveen-channels)
+# Kézzel rácsatlakozás: tmux attach -t <MAIN_AGENT_ID>-channels (pl. wraith-channels)
 
 INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -54,7 +54,7 @@ if [ -f "$INSTALL_DIR/.env" ]; then
   unset _api_key _oauth
 fi
 CHANNEL_PROVIDER="${CHANNEL_PROVIDER:-telegram}"
-SESSION="${MAIN_AGENT_ID:-marveen}-channels"
+SESSION="${MAIN_AGENT_ID:-wraith}-channels"
 
 # Resolve plugin ID from provider.
 #
@@ -65,9 +65,9 @@ SESSION="${MAIN_AGENT_ID:-marveen}-channels"
 # the /mcp pane for it.
 resolve_plugin_ids() {
   case "$1" in
-    slack)    PLUGIN_ID="slack-channel@marveen-marketplace"; PLUGIN_PANE_ID="plugin:slack-channel:marveen-marketplace" ;;
-    whatsapp) PLUGIN_ID="whatsapp@marveen-marketplace";      PLUGIN_PANE_ID="plugin:whatsapp:marveen-marketplace" ;;
-    teams)    PLUGIN_ID="teams@marveen-marketplace";         PLUGIN_PANE_ID="plugin:teams:marveen-marketplace" ;;
+    slack)    PLUGIN_ID="slack-channel@wraith-marketplace"; PLUGIN_PANE_ID="plugin:slack-channel:wraith-marketplace" ;;
+    whatsapp) PLUGIN_ID="whatsapp@wraith-marketplace";      PLUGIN_PANE_ID="plugin:whatsapp:wraith-marketplace" ;;
+    teams)    PLUGIN_ID="teams@wraith-marketplace";         PLUGIN_PANE_ID="plugin:teams:wraith-marketplace" ;;
     discord)  PLUGIN_ID="discord@claude-plugins-official";   PLUGIN_PANE_ID="plugin:discord:discord" ;;
     *)        PLUGIN_ID="telegram@claude-plugins-official";  PLUGIN_PANE_ID="plugin:telegram:telegram" ;;
   esac
@@ -247,7 +247,7 @@ unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN
 # the parent client's socket. Any `tmux new-session` we spawn then tries to
 # attach to that socket and fails with "Permission denied" (different uid,
 # different socket dir, or just the new-session-from-inside-tmux block). The
-# child marveen-channels session must live on a fresh tmux client context, so
+# child wraith-channels session must live on a fresh tmux client context, so
 # scrub the env var before any tmux command runs.
 unset TMUX
 
@@ -330,7 +330,7 @@ MODEL_FLAG=""
 # -- the ROTATING macOS Keychain OAuth session, or (Linux) the shared
 # ~/.claude/.credentials.json -- both periodically expire and 401 the main bot
 # ("Please run /login"), while the isolated sub-agents (long-lived fleet
-# setup-token) never do (confirmed root cause of the 2026-07-23 marveen-channels
+# setup-token) never do (confirmed root cause of the 2026-07-23 wraith-channels
 # silent outage). The helper provisions an isolated CLAUDE_CONFIG_DIR (same code
 # path as the sub-agents, via dist/web/agent-process.js) and authenticates the
 # main agent from the fleet setup-token instead.
@@ -389,7 +389,7 @@ if [ -n "$_node_bin" ] && [ -f "$INSTALL_DIR/dist/web/agent-process.js" ]; then
       curl -s --max-time 5 -X POST "http://localhost:${_guard_port:-3420}/api/messages" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $(cat "$INSTALL_DIR/store/.dashboard-token")" \
-        -d "{\"from\":\"channels-sh-guard\",\"to\":\"${MAIN_AGENT_ID:-marveen}\",\"content\":\"[GUARD] A channels session most a KOZOS ~/.claude alol indult, pedig letezik izolalt config dir (.channels-config). A MAIN_AGENT_ISOLATED_CONFIG beallitas valoszinuleg elveszett (store/config-overrides.json torlodott es nincs .env kulcs). Az auth a rotalodo shared sessionbol megy, 401-veszely. Teendo: MAIN_AGENT_ISOLATED_CONFIG=1 visszaallitasa, majd channels session restart.\"}" \
+        -d "{\"from\":\"channels-sh-guard\",\"to\":\"${MAIN_AGENT_ID:-wraith}\",\"content\":\"[GUARD] A channels session most a KOZOS ~/.claude alol indult, pedig letezik izolalt config dir (.channels-config). A MAIN_AGENT_ISOLATED_CONFIG beallitas valoszinuleg elveszett (store/config-overrides.json torlodott es nincs .env kulcs). Az auth a rotalodo shared sessionbol megy, 401-veszely. Teendo: MAIN_AGENT_ISOLATED_CONFIG=1 visszaallitasa, majd channels session restart.\"}" \
         >/dev/null 2>&1 || true
       unset _guard_port
     fi
@@ -487,8 +487,8 @@ fi
 #
 # `start-server` first, because the "no server yet -> new-session inherits this
 # shell's env" assumption below is only safe when NOTHING ELSE creates the
-# server in between. At boot it does: systemd starts marveen-channels and
-# marveen-dashboard in the same second, and the dashboard's worker sessions win
+# server in between. At boot it does: systemd starts wraith-channels and
+# wraith-dashboard in the same second, and the dashboard's worker sessions win
 # the race about half the time. Then `set-environment -g` silently no-ops (no
 # server), the dashboard creates the server WITHOUT the token, and our
 # new-session inherits that empty global env instead of this shell's -- the
@@ -508,7 +508,7 @@ $TMUX set-environment -g CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION false 2>/dev/null 
 
 # Hybrid channel-coordinator model: the native plugin stays the PRIMARY inbound
 # path (it always polls getUpdates here -- never outbound-only). The standalone
-# marveen-channel-coordinator only BACKFILLS while this session's plugin is
+# wraith-channel-coordinator only BACKFILLS while this session's plugin is
 # down, so there is never a second concurrent poller in steady state. Nothing to
 # set here: the coordinator gates itself on native liveness.
 
@@ -550,9 +550,9 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
       if [ "$_eperm_restarted" = "0" ]; then
         _eperm_restarted=1
         $TMUX kill-session -t "$SESSION" 2>/dev/null
-        _CHANNELS_STARTDIR="$(mktemp -d /tmp/marveen-channels-XXXXXX)"
+        _CHANNELS_STARTDIR="$(mktemp -d /tmp/wraith-channels-XXXXXX)"
         # Carry the project CLAUDE.md into the fallback cwd so the session keeps
-        # Marveen's instructions/personality instead of running as a generic,
+        # Wraith's instructions/personality instead of running as a generic,
         # context-less assistant (the biggest degradation of the /tmp fallback).
         # Best-effort: a symlink failure degrades to the prior behaviour and
         # never blocks startup. The trust dialog for the fresh /tmp path still
@@ -597,16 +597,16 @@ unset _eperm_restarted
 
 # Set agent name once the session is ready. (/remote-control dropped: the operator no
 # longer uses Remote Control.)
-_bot_name="${BOT_NAME:-${MAIN_AGENT_ID:-marveen}}"
+_bot_name="${BOT_NAME:-${MAIN_AGENT_ID:-wraith}}"
 sleep 1
 $TMUX send-keys -t "$SESSION" "/name ${_bot_name}" Enter
 unset _bot_name
 
 # Reset the keep-alive watchdog baseline so a session that was just restarted
 # is not immediately judged stale by the dashboard's checkMainKeepaliveStaleness
-# (channel-monitor.ts, ~18min threshold). The dashboard's hardRestartMarveenChannels
+# (channel-monitor.ts, ~18min threshold). The dashboard's hardRestartWraithChannels
 # path writes both files when it triggers the restart, but a manual
-# `launchctl kickstart -k com.marveen.channels` (or the launchd KeepAlive's own
+# `launchctl kickstart -k com.wraith.channels` (or the launchd KeepAlive's own
 # restart after a crash) bypasses the dashboard - those code paths never touched
 # the watchdog baseline, and the old mtimes survived into the fresh session,
 # triggering a false-positive respawn loop within minutes (2026-06-01 18:26).
@@ -629,7 +629,7 @@ date +%s > "$INSTALL_DIR/store/.channel-last-respawn"
 #
 # Two-stage detection, both must indicate "no plugin" before we fire keystrokes:
 #
-#   1. pgrep -P claude_pid bun   -- looks for a bun child of the marveen-channels
+#   1. pgrep -P claude_pid bun   -- looks for a bun child of the wraith-channels
 #      claude process. This catches the case the env-var grep misses: Claude Code
 #      does NOT inherit TELEGRAM_STATE_DIR into the spawned poller on the main
 #      session (only on sub-agents), so an env-var-needle scan reports "no
@@ -646,7 +646,7 @@ date +%s > "$INSTALL_DIR/store/.channel-last-respawn"
 (
   sleep 15
   CLAUDE_PID="$($TMUX list-panes -t "$SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)"
-  # Check 1: bun grandchild of the marveen-channels claude
+  # Check 1: bun grandchild of the wraith-channels claude
   BUN_CHILD=""
   if [ -n "$CLAUDE_PID" ]; then
     BUN_CHILD="$(/usr/bin/pgrep -P "$CLAUDE_PID" bun 2>/dev/null | head -1)"

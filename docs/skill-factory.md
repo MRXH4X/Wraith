@@ -6,7 +6,7 @@
 
 ## 🎯 Mit tud / miért érdekes
 
-A legtöbb AI újra és újra elköveti ugyanazt a hibát. Marveen ehelyett **öntanuló**: amikor egy nem-triviális munkafolyamatot végigvisz (vagy beleszalad egy hibába és kijavítja), abból egy **újrahasznosítható skill**-t (recept) ír magának. Legközelebb ugyanaz a helyzet már nem próbálgatás, hanem rutin.
+A legtöbb AI újra és újra elköveti ugyanazt a hibát. Wraith ehelyett **öntanuló**: amikor egy nem-triviális munkafolyamatot végigvisz (vagy beleszalad egy hibába és kijavítja), abból egy **újrahasznosítható skill**-t (recept) ír magának. Legközelebb ugyanaz a helyzet már nem próbálgatás, hanem rutin.
 
 Ha menet közben jobb megoldást talál egy meglévő recepthez, nem írja újra az egészet — csak a megváltozott részt javítja (patch), és feljegyzi a "Buktatók" közé hogy miért.
 

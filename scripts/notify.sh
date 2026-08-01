@@ -1,5 +1,5 @@
 #!/bin/bash
-# Marveen - Ertesites kuldes Telegram-ra
+# Wraith - Ertesites kuldes Telegram-ra
 # Hasznalat: ./scripts/notify.sh "Uzenet szovege"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,7 +14,7 @@ fi
 TOKEN=$(grep '^TELEGRAM_BOT_TOKEN=' "$ENV_FILE" | cut -d= -f2-)
 CHAT_ID=$(grep '^ALLOWED_CHAT_ID=' "$ENV_FILE" | cut -d= -f2-)
 MAIN_AGENT_ID=$(grep '^MAIN_AGENT_ID=' "$ENV_FILE" | head -1 | cut -d= -f2-)
-MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"
+MAIN_AGENT_ID="${MAIN_AGENT_ID:-wraith}"
 
 if [ -z "$TOKEN" ]; then
   echo "Hiba: TELEGRAM_BOT_TOKEN nincs beallitva"
@@ -36,7 +36,7 @@ fi
 # every notification reads as the main bot. Detect the calling agent from the
 # tmux session name and prefix the message when it is NOT the main agent, so the
 # reader can see who it came from. Distribution-safe: the main agent id is read
-# from .env (default marveen), no hardcoded names.
+# from .env (default wraith), no hardcoded names.
 SENDER=""
 SESS=$(tmux display-message -p '#S' 2>/dev/null)
 case "$SESS" in

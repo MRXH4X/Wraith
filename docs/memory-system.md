@@ -6,7 +6,7 @@
 
 ## 🎯 Mit tud / miért érdekes
 
-A nyelvi modellek alapból "amnéziásak": minden munkamenet üres lappal indul. Marveen ezt egy **réteges, öntisztító memóriával** oldja meg, ami az emberi emlékezetet utánozza:
+A nyelvi modellek alapból "amnéziásak": minden munkamenet üres lappal indul. Wraith ezt egy **réteges, öntisztító memóriával** oldja meg, ami az emberi emlékezetet utánozza:
 
 - **hot** — ami MOST történik (aktív feladatok, függő döntések)
 - **warm** — stabil tudás (preferenciák, konfiguráció, projekt-kontextus)

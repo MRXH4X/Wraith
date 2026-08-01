@@ -34,7 +34,7 @@ SETTINGS="$HOME/.claude/settings.json"
 # The watchdog unit/label name keys off SERVICE_ID, matching install-linux.sh's
 # ${SERVICE_ID}-dashboard/-channels units and the macOS com.${SERVICE_ID}.*
 # launchd labels. Derive it from the install .env so a renamed install
-# (BOT_NAME != Marveen) does NOT get an orphaned marveen-* unit left behind.
+# (BOT_NAME != Wraith) does NOT get an orphaned wraith-* unit left behind.
 INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # Read a single key from a .env file without sourcing it.
 # Sourcing executes the file: an unquoted value with spaces (e.g. OWNER_NAME=Foo Bar)
@@ -54,8 +54,8 @@ read_env() {
 SERVICE_ID="$(read_env SERVICE_ID)"
 MAIN_AGENT_ID_ENV="$(read_env MAIN_AGENT_ID)"
 BOT_NAME="$(read_env BOT_NAME)"
-SERVICE_ID="${SERVICE_ID:-${MAIN_AGENT_ID_ENV:-marveen}}"
-BOT_NAME="${BOT_NAME:-Marveen}"
+SERVICE_ID="${SERVICE_ID:-${MAIN_AGENT_ID_ENV:-wraith}}"
+BOT_NAME="${BOT_NAME:-Wraith}"
 
 SUBMIT_HOOK="$DEST_DIR/telegram_progress.py"
 STOP_HOOK="$DEST_DIR/telegram_progress_clear.py"

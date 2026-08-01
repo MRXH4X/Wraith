@@ -24,7 +24,7 @@ vi.mock('../logger.js', () => ({
 }))
 
 vi.mock('../config.js', () => ({
-  MAIN_AGENT_ID: 'marveen',
+  MAIN_AGENT_ID: 'wraith',
   CHANNEL_PROVIDER: 'telegram',
   PROJECT_ROOT: '/tmp/test-claudeclaw',
 }))
@@ -43,13 +43,13 @@ vi.mock('../web/agent-process.js', () => ({
 }))
 
 vi.mock('../web/main-agent.js', () => ({
-  MAIN_CHANNELS_SESSION: 'marveen-channels',
+  MAIN_CHANNELS_SESSION: 'wraith-channels',
 }))
 
 const mockReconnect = vi.fn()
 vi.mock('../web/channel-mcp-reconnect.js', () => ({
   attemptChannelMcpReconnect: (name: string) => mockReconnect(name),
-  resolveAgentSession: (name: string) => name === 'marveen' ? 'marveen-channels' : `agent-${name}`,
+  resolveAgentSession: (name: string) => name === 'wraith' ? 'wraith-channels' : `agent-${name}`,
   resolveAgentProviderType: () => 'telegram' as const,
 }))
 
@@ -112,7 +112,7 @@ describe('startChannelHealthMonitor', () => {
     expect(mockSpawn).toHaveBeenCalled()
     const [, args] = mockSpawn.mock.calls[0]
     expect(String(args[0])).toContain('reconnect-cli')
-    expect(args[1]).toBe('marveen')
+    expect(args[1]).toBe('wraith')
     clearInterval(timer)
   })
 })

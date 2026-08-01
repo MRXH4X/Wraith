@@ -11,7 +11,7 @@
 # silence is never mistaken for a CostOps/app crash.
 #
 # App/service crashes do NOT change btime and never trigger this script -- they
-# are reported separately by the OnFailure= drop-ins (marveen-notify@.service).
+# are reported separately by the OnFailure= drop-ins (wraith-notify@.service).
 # That split is the whole point: btime-change => host restart; OnFailure => app.
 #
 # Safe by construction: read-only except for the state file; Telegram send is
@@ -20,13 +20,13 @@
 
 set -uo pipefail
 
-STATE_DIR="${MARVEEN_STORE:-$HOME/marveen/store}"
+STATE_DIR="${WRAITH_STORE:-$HOME/wraith/store}"
 STATE_FILE="$STATE_DIR/.last-btime"
 ENV_FILE="${TELEGRAM_ENV:-$HOME/.claude/channels/telegram/.env}"
 # Alert target chat-id -- MUST come from the install's own config; there is
 # deliberately NO hardcoded fallback (a hardcoded id would make every downstream
 # install send its host-stability alerts to that one private chat).
-CHAT_ID="${MARVEEN_ALERT_CHAT_ID:-}"
+CHAT_ID="${WRAITH_ALERT_CHAT_ID:-}"
 
 log() { echo "[host-restart-watchdog] $*"; }
 
@@ -83,7 +83,7 @@ if (( last_alive > 0 )); then
   gap_txt="~${gap_min} perc (utolsó aktivitás ${last_txt} előtt)"
 fi
 
-msg="Marveen ${HOST_KIND} restarted.
+msg="Wraith ${HOST_KIND} restarted.
 Új boot: ${boot_local}
 Becsült kiesés: ${gap_txt}
 (Ez host/VM szintű restart, NEM app-crash. A dashboard/channels app-crash külön OnFailure-értesítést küld.)"
@@ -102,7 +102,7 @@ if [[ -n "$token" && -n "$CHAT_ID" ]]; then
     --data-urlencode "text=${msg}" >/dev/null 2>&1 \
     && log "Telegram sent" || log "Telegram send failed (best-effort)"
 else
-  log "skipping Telegram (${HOST_KIND} restart still logged): missing${token:+}$( [[ -z "$token" ]] && echo ' TELEGRAM_BOT_TOKEN(via TELEGRAM_ENV)')$( [[ -z "$CHAT_ID" ]] && echo ' MARVEEN_ALERT_CHAT_ID')"
+  log "skipping Telegram (${HOST_KIND} restart still logged): missing${token:+}$( [[ -z "$token" ]] && echo ' TELEGRAM_BOT_TOKEN(via TELEGRAM_ENV)')$( [[ -z "$CHAT_ID" ]] && echo ' WRAITH_ALERT_CHAT_ID')"
 fi
 
 exit 0

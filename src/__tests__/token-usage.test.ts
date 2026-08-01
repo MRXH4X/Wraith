@@ -10,7 +10,7 @@ vi.mock('../config.js', async () => {
   const actual = await vi.importActual<typeof import('../config.js')>('../config.js')
   return {
     ...actual,
-    MAIN_AGENT_ID: 'marveen',
+    MAIN_AGENT_ID: 'wraith',
     STORE_DIR: actual.STORE_DIR,
     DB_FILENAME: actual.DB_FILENAME,
   }
@@ -65,7 +65,7 @@ beforeAll(() => {
   db.exec("DELETE FROM token_usage_cursors WHERE file_path LIKE '/tmp/%'")
 
   // Set up fake project dirs
-  const mainDir = join(PROJECTS_DIR, '-home-testuser-marveen')
+  const mainDir = join(PROJECTS_DIR, '-home-testuser-wraith')
   const agentDir = join(PROJECTS_DIR, '-home-testuser-agents-samu')
   const subagentDir = join(mainDir, 'subagents', 'sub-session-1')
   mkdirSync(subagentDir, { recursive: true })

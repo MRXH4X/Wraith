@@ -1,9 +1,9 @@
 // Provider-specific poller cmdline matcher.
 //
-// `hasChannelPluginAlive` walks the process tree under a marveen-channels claude
+// `hasChannelPluginAlive` walks the process tree under a wraith-channels claude
 // looking for the plugin's bun/node poller. Before this module, the per-provider
 // check was a loose substring search: `cmd.includes('/telegram/') && ...` or a
-// generic `bun + server.ts` fallback. In a multi-plugin setup -- e.g. Marveen
+// generic `bun + server.ts` fallback. In a multi-plugin setup -- e.g. Wraith
 // running both the upstream Telegram plugin AND a SynoChat worker (both spawned
 // as `bun run --cwd <plugin-dir>` children of the same claude pid) -- the
 // generic fallback can MATCH the unrelated SynoChat process and report
@@ -34,12 +34,12 @@ const RUNTIME_TOKEN_RX = /\b(bun|node)\b/
 //     so both `/telegram/<ver>` and `/telegram` (token-end) shapes are covered
 //     by the same path-boundary pattern.
 //   - discord: 'discord' -- same dual layout, same pattern.
-//   - slack: 'slack(-channel)?' -- the marveen `slack-channel@marveen-marketplace`
+//   - slack: 'slack(-channel)?' -- the wraith `slack-channel@wraith-marketplace`
 //     plugin checks in under a `slack-channel` directory, while any upstream
 //     `slack@...` plugin would land at `/slack`. Both are accepted. NOTE: if
 //     upstream ever ships the slack plugin under a different directory name
 //     (e.g. `slack-mcp` or similar), this slug needs an update; today it is
-//     derived from the marveen-marketplace plugin-id and the conventional
+//     derived from the wraith-marketplace plugin-id and the conventional
 //     upstream layout, both documented in scripts/channels.sh (PLUGIN_ID).
 //
 // The `(?:\/|\s|$)` trailing anchor accepts:
@@ -63,7 +63,7 @@ const SLUG_RX: Record<ChannelProviderType, RegExp> = {
 // orphan whose cwd no longer reflects the install dir, or a different upstream
 // distribution layout we cannot test against from here) would still be caught
 // by this signal. Preserving it as an OR-branch avoids a regression for any
-// slack user whose poller cmdline differs from the marveen-marketplace shape
+// slack user whose poller cmdline differs from the wraith-marketplace shape
 // we tested against. Whole-word anchored (`\b`) so a substring inside an
 // unrelated argv does not match. ONLY applies to provider='slack' -- the
 // telegram/discord branches stay strict.

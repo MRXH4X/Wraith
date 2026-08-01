@@ -50,7 +50,7 @@ describe('delivery transport selection', () => {
 
 describe('sessionInList existence check (shared by router + scheduler)', () => {
   it('finds the exact remote/local session name in list-sessions output', () => {
-    const listOutput = 'agent-other\nagent-dev\nmarveen-channels\n'
+    const listOutput = 'agent-other\nagent-dev\nwraith-channels\n'
     expect(sessionInList(listOutput, 'agent-dev')).toBe(true)
     expect(sessionInList(listOutput, 'agent-missing')).toBe(false)
   })

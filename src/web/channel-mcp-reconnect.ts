@@ -140,7 +140,7 @@ export function chooseSubmenuTarget(pane: string): RegExp | null {
 /**
  * Attempt to reconnect a channel MCP plugin by navigating the /mcp
  * menu in the agent's tmux session. Generalises the existing
- * softReconnectMarveen() logic to any agent.
+ * softReconnectWraith() logic to any agent.
  *
  * Sequence: Escape → /mcp Enter → Up×N until plugin found → Enter →
  * step the `❯` cursor onto "Reconnect" (or "Enable" when disabled),

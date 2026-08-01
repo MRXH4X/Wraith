@@ -1,12 +1,12 @@
-# NOTE: replace /path/to/marveen (install dir) and /home/USER (home) with your values.
+# NOTE: replace /path/to/wraith (install dir) and /home/USER (home) with your values.
 [Unit]
-Description=Marveen disk-space guard (reap scratch + alert before the root fs fills)
-After=marveen-dashboard.service network-online.target
+Description=Wraith disk-space guard (reap scratch + alert before the root fs fills)
+After=wraith-dashboard.service network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/path/to/marveen/scripts/disk-space-guard.sh
+ExecStart=/path/to/wraith/scripts/disk-space-guard.sh
 Environment=PATH=/home/USER/.local/bin:/home/USER/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/home/USER
 Environment=TZ=Europe/Budapest

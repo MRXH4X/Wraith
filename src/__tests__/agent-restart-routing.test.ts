@@ -3,7 +3,7 @@ import { isMainChannelsAgent } from '../web/main-agent.js'
 import { MAIN_AGENT_ID } from '../config.js'
 
 // Locks the restart-routing policy: the main channels agent restarts via the
-// systemd/launchd channels helper (hardRestartMarveenChannels), while every
+// systemd/launchd channels helper (hardRestartWraithChannels), while every
 // sub-agent keeps the agent-<name> process lifecycle. See the restart route in
 // src/web/routes/agents.ts.
 describe('isMainChannelsAgent', () => {
@@ -19,6 +19,6 @@ describe('isMainChannelsAgent', () => {
 
   it('is false for empty / unknown names', () => {
     expect(isMainChannelsAgent('')).toBe(false)
-    expect(isMainChannelsAgent('marveen-channels')).toBe(false) // the session name, not the agent id
+    expect(isMainChannelsAgent('wraith-channels')).toBe(false) // the session name, not the agent id
   })
 })

@@ -1,12 +1,12 @@
-# NOTE: replace /path/to/marveen (install dir) and /home/USER (home) with your values.
+# NOTE: replace /path/to/wraith (install dir) and /home/USER (home) with your values.
 [Unit]
-Description=Marveen stuck-modal guard (close a wedged /mcp modal in the main channels session)
-After=marveen-dashboard.service network-online.target
+Description=Wraith stuck-modal guard (close a wedged /mcp modal in the main channels session)
+After=wraith-dashboard.service network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/path/to/marveen/scripts/stuck-modal-guard.sh
+ExecStart=/path/to/wraith/scripts/stuck-modal-guard.sh
 Environment=PATH=/home/USER/.local/bin:/home/USER/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/home/USER
 Environment=TZ=Europe/Budapest

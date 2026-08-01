@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Independent backstop auth-dead probe for scripts/channel-watchdog.sh (PLAN.md
-// GAP 2b, 2026-07-23 marveen-channels silent outage). Reads captured pane text
+// GAP 2b, 2026-07-23 wraith-channels silent outage). Reads captured pane text
 // from stdin (not argv -- pane content can contain shell-hostile characters),
 // dynamically imports dist/web/reauth-detect.js so there is a single source of
 // truth for the marker regexes (reauth-healer.ts uses the same function), and

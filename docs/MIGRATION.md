@@ -1,6 +1,6 @@
 # Migration runbook — moving the fleet to a new machine
 
-Goal: move the whole Marveen fleet to a stronger host with **zero
+Goal: move the whole Wraith fleet to a stronger host with **zero
 data loss** and minimal downtime. Read this end to end before starting.
 
 The single most important rule: **ONE BOT = ONE POLLER.** A Telegram/Slack bot
@@ -31,7 +31,7 @@ the Docker volumes (3) are **separate** and must be moved on their own.
 - `~/.claude/scheduled-tasks/**` — file-based scheduled tasks (SKILL.md + task-config.json)
 - `~/.claude/channels/*/.env` — MAIN orchestrator channel token
 - `~/.claude/channels/*/access.json`, `invites.json`, `approved/**` — pairing allowlist + approvals
-- `~/Library/LaunchAgents/com.<MAIN_AGENT_ID>.*.plist` -- launchd jobs (the prefix is your `MAIN_AGENT_ID`, `marveen` by default)
+- `~/Library/LaunchAgents/com.<MAIN_AGENT_ID>.*.plist` -- launchd jobs (the prefix is your `MAIN_AGENT_ID`, `wraith` by default)
 
 **(3) Docker volumes — NOT in the tarball, migrate separately**
 - `stack_influxdb-data`, `stack_influxdb-config` — InfluxDB 2.7 time-series (Loxone history)
@@ -82,7 +82,7 @@ the Docker volumes (3) are **separate** and must be moved on their own.
    pin `claude` to the same version and keep auto-update OFF
    (`DISABLE_AUTOUPDATER=1`) to avoid the binary-churn PATH failure.
 2. **Clone the repo** to the same absolute path if possible
-   (`/Users/<user>/marveen`). A different path means every launchd plist and
+   (`/Users/<user>/wraith`). A different path means every launchd plist and
    any absolute reference must be updated (see pitfalls).
 3. **Restore the tarball**, preserving modes (the token files are `0600`):
    ```bash
@@ -113,7 +113,7 @@ the Docker volumes (3) are **separate** and must be moved on their own.
    - If the user/home/repo path changed, edit each
      `~/Library/LaunchAgents/com.<MAIN_AGENT_ID>.*.plist` (`ProgramArguments`,
      `WorkingDirectory`, `StandardOutPath`, env `HOME`/`PATH`) to the new paths.
-     The label prefix is your `MAIN_AGENT_ID` (`marveen` by default).
+     The label prefix is your `MAIN_AGENT_ID` (`wraith` by default).
    - Load them: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.<MAIN_AGENT_ID>.<job>.plist`
      (the core jobs are `channels` and `dashboard`; load any other
      `com.<MAIN_AGENT_ID>.*` jobs you run too).
@@ -161,7 +161,7 @@ the Docker volumes (3) are **separate** and must be moved on their own.
 - **Tailscale.** The dashboard's external reach (`WEB_HOST`, `DASHBOARD_PUBLIC_URL`)
   depends on the host's Tailscale identity. Install/log in Tailscale on the new
   host; the machine gets a new tailnet name/IP, so update any URL that pinned
-  the old hostname. (See `marveen-dashboard-kulso-eleres` skill.)
+  the old hostname. (See `wraith-dashboard-kulso-eleres` skill.)
 - **claude auto-update.** Keep `DISABLE_AUTOUPDATER=1`; the global-install
   auto-updater rewrites the native binary and the `/usr/local/bin/claude`
   symlink can vanish mid-swap → "claude not found on PATH" rapid-fail loops.

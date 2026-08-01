@@ -62,7 +62,7 @@ import {
   readAgentDiscordConfig,
   readAgentGooglechatConfig,
   readAgentTeamsConfig,
-  readMarveenTelegramConfig,
+  readWraithTelegramConfig,
   sendAvatarChangeMessage,
   sendWelcomeMessage,
   validateTelegramToken,
@@ -74,7 +74,7 @@ import {
   revokeInvite,
   agentChannelDir,
 } from '../channel-invites.js'
-import { hardRestartMarveenChannels } from '../channel-monitor.js'
+import { hardRestartWraithChannels } from '../channel-monitor.js'
 import { isMainChannelsAgent, MAIN_CHANNELS_SESSION } from '../main-agent.js'
 import {
   getProvider,
@@ -218,7 +218,7 @@ function agentRunStateCached(name: string, isRemote: boolean): AgentRunState {
 // long in practice (current Discord scheme is 64-bit, with the leading bit
 // always 0). Rejects empty, whitespace-only, non-numeric, or wrong-length
 // values before any state write so a typo in the dashboard cannot bounce the
-// live Marveen session through hardRestartMarveenChannels().
+// live Wraith session through hardRestartWraithChannels().
 export function validateDiscordChannelId(cid: string | undefined): { ok: boolean; error?: string } {
   const trimmed = cid?.trim()
   if (!trimmed || !/^[0-9]{17,20}$/.test(trimmed)) {
@@ -258,7 +258,7 @@ function managedSettingsPath(): string {
   }
 }
 const MANAGED_SETTINGS_PATH = managedSettingsPath()
-const SLACK_ALLOWLIST_ENTRY = { plugin: 'slack-channel', marketplace: 'marveen-marketplace' }
+const SLACK_ALLOWLIST_ENTRY = { plugin: 'slack-channel', marketplace: 'wraith-marketplace' }
 
 export function isManagedSettingsReady(): boolean {
   if (!existsSync(MANAGED_SETTINGS_PATH)) return false
@@ -956,7 +956,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   if (avatarUploadMatch && method === 'GET') {
     const name = decodeURIComponent(avatarUploadMatch[1])
     const avatarPath = findAvatarForAgent(name)
-    // 1h client cache: see /api/marveen/avatar for the staleness trade-off.
+    // 1h client cache: see /api/wraith/avatar for the staleness trade-off.
     if (avatarPath) { serveFile(req, res, avatarPath, { cacheSeconds: 3600 }); return true }
     res.writeHead(404); res.end()
     return true
@@ -1052,7 +1052,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   if (setupMatch && method === 'POST') {
     const [name, provider] = setupMatch
     const isMain = name === MAIN_AGENT_ID
-    // Marveen lives at PROJECT_ROOT, not under agents/marveen/ -- skip the
+    // Wraith lives at PROJECT_ROOT, not under agents/wraith/ -- skip the
     // dir check for the main agent and route writes to ~/.claude/channels/.
     if (!isMain && !existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
 
@@ -1086,7 +1086,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       let gcRestarted = false
       let gcWasRunning = false
       if (isMain) {
-        const r = hardRestartMarveenChannels()
+        const r = hardRestartWraithChannels()
         gcRestarted = r.ok
         gcWasRunning = true
       } else {
@@ -1110,8 +1110,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
     // Discord-specific channelId guard: the dashboard ships the channel where
     // the bot will post by default; without it the plugin spins up but cannot
-    // resolve a default channel, and on the main Marveen agent the missing
-    // value would still trigger hardRestartMarveenChannels and bounce the
+    // resolve a default channel, and on the main Wraith agent the missing
+    // value would still trigger hardRestartWraithChannels and bounce the
     // live session for no useful reason. Reject before any state write.
     if (provider === 'discord') {
       const cidCheck = validateDiscordChannelId(channelId)
@@ -1164,11 +1164,11 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // Main agent doesn't have an agent-config.json or enabled-plugins entry
     // (the channels session reuses the system claude install), so skip the
     // sub-agent-specific bookkeeping. Restart goes through the dedicated
-    // marveen-channels helper instead of the agent process lifecycle.
+    // wraith-channels helper instead of the agent process lifecycle.
     let restarted = false
     let wasRunning = false
     if (isMain) {
-      const r = hardRestartMarveenChannels()
+      const r = hardRestartWraithChannels()
       restarted = r.ok
       wasRunning = true
     } else {
@@ -1502,7 +1502,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     let botName: string | undefined
     if (provider === 'telegram') {
       botName = name === MAIN_AGENT_ID
-        ? readMarveenTelegramConfig().botUsername
+        ? readWraithTelegramConfig().botUsername
         : readAgentTelegramConfig(name).botUsername
       if (!botName) {
         const stateDir = name === MAIN_AGENT_ID ? channelStateDir(provider) : channelStateDir(provider, agentDir(name))
@@ -1535,7 +1535,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     let botName: string | undefined
     if (provider === 'telegram') {
       botName = name === MAIN_AGENT_ID
-        ? readMarveenTelegramConfig().botUsername
+        ? readWraithTelegramConfig().botUsername
         : readAgentTelegramConfig(name).botUsername
     }
     const cleanBotName = botName?.replace(/^@/, '')
@@ -1724,7 +1724,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   if (startMatch && method === 'POST') {
     const name = decodeURIComponent(startMatch[1])
     if (isMainChannelsAgent(name)) {
-      json(res, { error: 'Main agent lifecycle is service-managed; use /api/marveen/restart for recovery' }, 400)
+      json(res, { error: 'Main agent lifecycle is service-managed; use /api/wraith/restart for recovery' }, 400)
       return true
     }
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
@@ -1746,7 +1746,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   if (stopMatch && method === 'POST') {
     const name = decodeURIComponent(stopMatch[1])
     if (isMainChannelsAgent(name)) {
-      json(res, { error: 'Main agent lifecycle is service-managed; use /api/marveen/restart for recovery' }, 400)
+      json(res, { error: 'Main agent lifecycle is service-managed; use /api/wraith/restart for recovery' }, 400)
       return true
     }
     const result = stopAgentProcess(name)
@@ -1803,7 +1803,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // `/remote-control` (needs a full-scope login token the agent lacks). Mirror
     // the precedent in the channels-config handler above. Sub-agents unchanged.
     if (isMainChannelsAgent(name)) {
-      const r = hardRestartMarveenChannels()
+      const r = hardRestartWraithChannels()
       if (r.ok) { json(res, { ok: true }); return true }
       json(res, { error: r.error || 'Restart failed' }, 500)
       return true
@@ -1844,7 +1844,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const names = listAgentNames().filter((n) => n !== MAIN_AGENT_ID)
     if (names.length === 0) { json(res, { error: 'No agents to export' }, 404); return true }
     const includeSecrets = /[?&]secrets=(1|true)\b/.test(req.url || '')
-    const work = mkdtempSync(join(tmpdir(), 'marveen-fleet-dl-'))
+    const work = mkdtempSync(join(tmpdir(), 'wraith-fleet-dl-'))
     const outPath = join(work, fleetBundleFilename())
     try {
       exportAllAgentsBundle(outPath, names, {
@@ -1878,7 +1878,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     }
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
     const includeSecrets = /[?&]secrets=(1|true)\b/.test(req.url || '')
-    const work = mkdtempSync(join(tmpdir(), 'marveen-agent-dl-'))
+    const work = mkdtempSync(join(tmpdir(), 'wraith-agent-dl-'))
     const outPath = join(work, bundleFilename(name))
     try {
       exportAgentBundle(name, outPath, {

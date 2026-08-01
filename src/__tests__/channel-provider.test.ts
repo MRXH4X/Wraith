@@ -32,7 +32,7 @@ describe('getProvider', () => {
   it('returns slack provider with correct pluginId', () => {
     const p = getProvider('slack')
     expect(p.type).toBe('slack')
-    expect(p.pluginId).toBe('slack-channel@marveen-marketplace')
+    expect(p.pluginId).toBe('slack-channel@wraith-marketplace')
     expect(p.envKeys).toContain('SLACK_BOT_TOKEN')
     expect(p.stateDir).toBe('slack')
   })

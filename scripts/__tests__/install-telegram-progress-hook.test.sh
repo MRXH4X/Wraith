@@ -56,9 +56,9 @@ run_env_parse() {
   local install_dir="$1"
   # Extract the read_env function + the 5 lines that follow it (the calls).
   # The function starts with 'read_env()' and ends at the blank line before
-  # SERVICE_ID assignment; we grab them all up to BOT_NAME="${BOT_NAME:-Marveen}".
+  # SERVICE_ID assignment; we grab them all up to BOT_NAME="${BOT_NAME:-Wraith}".
   local func_block
-  func_block="$(sed -n '/^read_env()/,/^BOT_NAME=.*Marveen/p' "$SCRIPT")"
+  func_block="$(sed -n '/^read_env()/,/^BOT_NAME=.*Wraith/p' "$SCRIPT")"
   bash -c "
     set -euo pipefail
     INSTALL_DIR='$install_dir'
@@ -134,8 +134,8 @@ mkdir -p "$CASE"
 OUT="$(run_env_parse "$CASE")"
 EXIT=$?
 assert_zero "no .env: exits 0"                  $EXIT
-assert_eq   "no .env: SERVICE_ID=marveen"  "SERVICE_ID=marveen" "$(echo "$OUT" | grep '^SERVICE_ID=')"
-assert_eq   "no .env: BOT_NAME=Marveen"    "BOT_NAME=Marveen"   "$(echo "$OUT" | grep '^BOT_NAME=')"
+assert_eq   "no .env: SERVICE_ID=wraith"  "SERVICE_ID=wraith" "$(echo "$OUT" | grep '^SERVICE_ID=')"
+assert_eq   "no .env: BOT_NAME=Wraith"    "BOT_NAME=Wraith"   "$(echo "$OUT" | grep '^BOT_NAME=')"
 
 # ---------------------------------------------------------------------------
 # (f) MAIN_AGENT_ID fallback when SERVICE_ID absent
@@ -163,7 +163,7 @@ assert_eq   "MAIN_AGENT_ID fallback: SERVICE_ID resolves to myagent" \
 echo ""
 echo "(g) Full script: hook files are copied to DEST_DIR"
 CASE="$TMP/case-g"
-INSTALL_G="$CASE/marveen"
+INSTALL_G="$CASE/wraith"
 HOME_G="$CASE/home"
 HOOKS_SRC_G="$INSTALL_G/scripts/hooks"
 mkdir -p "$HOOKS_SRC_G" "$HOME_G/.claude/hooks"
@@ -192,7 +192,7 @@ OUT="$(HOME="$HOME_G" bash "$SCRIPT" 2>&1)" || true
 # spaced OWNER_NAME is present. Since the script resolves its own install dir,
 # we verify via run_env_parse that SERVICE_ID is read correctly (covered by b/f).
 # Here we just confirm the real script exits 0 with a clean .env (no spaces).
-cat > "/tmp/marveen-hook-fix/.env" <<'EOF'
+cat > "/tmp/wraith-hook-fix/.env" <<'EOF'
 SERVICE_ID=testbot
 BOT_NAME=TestBot
 EOF
@@ -205,7 +205,7 @@ for f in telegram_progress.py telegram_progress_clear.py \
   if [ -f "$HOME_G/.claude/hooks/$f" ]; then pass "full script: $f copied"
   else fail "full script: $f NOT copied"; fi
 done
-rm -f "/tmp/marveen-hook-fix/.env"
+rm -f "/tmp/wraith-hook-fix/.env"
 
 # ---------------------------------------------------------------------------
 echo ""

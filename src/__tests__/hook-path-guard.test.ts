@@ -1,5 +1,5 @@
 // Fleet-freeze prevention tests (2026-07-14 incident):
-// A second marveen checkout in /tmp wrote hook paths into the shared
+// A second wraith checkout in /tmp wrote hook paths into the shared
 // ~/.claude/settings.json. On reboot /tmp was cleared, the scripts
 // disappeared, python3 exited non-zero, and Claude Code blocked every
 // UserPromptSubmit -- silently freezing the entire fleet for hours.

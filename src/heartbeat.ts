@@ -21,11 +21,11 @@ import { CHANNEL_PLUGIN_IDS } from './web/plugin-ids.js'
 
 // Isolation cwd for the heartbeat sub-agent. Keep this OUT of PROJECT_ROOT
 // so the @anthropic-ai/claude-agent-sdk-spawned headless claude does NOT
-// load Marveen's project + user plugin config -- in particular the
+// load Wraith's project + user plugin config -- in particular the
 // claude-plugins-official Telegram channel plugin, which would spawn its
-// own `bun` poller against the same bot token Marveen is already polling
-// (409 Conflict crashes the live Marveen poller). 2026-06-01: ~65 % of
-// daily Marveen restarts clustered in the 0-10 min window after each
+// own `bun` poller against the same bot token Wraith is already polling
+// (409 Conflict crashes the live Wraith poller). 2026-06-01: ~65 % of
+// daily Wraith restarts clustered in the 0-10 min window after each
 // hourly heartbeat fire BECAUSE of this collision; 20:00 fire window
 // directly observed taking the bun-poller down within 2 min.
 //
@@ -52,12 +52,12 @@ const HEARTBEAT_CONFIG_DIR = join(HEARTBEAT_AGENT_CWD, '.claude-config')
 
 // Plugins that MUST be disabled at the project-scope settings.json for the
 // heartbeat sub-agent. The user-scope ~/.claude/settings.json keeps these
-// enabled for Marveen / sub-agents that legitimately need them; the
+// enabled for Wraith / sub-agents that legitimately need them; the
 // project-scope override is just for this isolated cwd. 2026-06-02 09:00
 // incident: the original #237 fix only emptied `.mcp.json` (project-scope
 // MCPs), but the user-scope `enabledPlugins` is GLOBAL and was still
 // loading the Telegram plugin in the sub-agent. The sub-agent then spawned
-// its own bun poller against the same bot token -> 409 Conflict -> Marveen
+// its own bun poller against the same bot token -> 409 Conflict -> Wraith
 // channel down by 09:02:45. Project-scope `enabledPlugins: false` overrides
 // the user-scope `true` per Claude Code settings precedence.
 const HEARTBEAT_DISABLED_PLUGINS = Object.values(CHANNEL_PLUGIN_IDS)
@@ -163,7 +163,7 @@ function ensureHeartbeatWorkerCwd(): void {
     // is no source file to symlink into the isolated config dir. Read the
     // blob and materialise it as .credentials.json so the sub-agent finds
     // standard config-dir auth there (the same path Claude Code uses on
-    // Linux installs natively). Marveen 2026-06-02 live A/B confirmed this
+    // Linux installs natively). Wraith 2026-06-02 live A/B confirmed this
     // path succeeds where the CLAUDE_CODE_OAUTH_TOKEN env-var approach
     // failed with 401 (the Keychain output is the full JSON, not a bare
     // bearer token). The write is mode 0600 (owner rw only). Re-written
@@ -183,7 +183,7 @@ function ensureHeartbeatWorkerCwd(): void {
     //
     // Copy the real ~/.claude.json into the isolated config dir AND
     // duplicate the `projects[PROJECT_ROOT]` entry under
-    // `projects[HEARTBEAT_AGENT_CWD]` so the sub-agent inherits Marveen's
+    // `projects[HEARTBEAT_AGENT_CWD]` so the sub-agent inherits Wraith's
     // server-gmail-autoauth-mcp + server-google-calendar-mcp config from
     // its own cwd key. Channel-plugin isolation stays in force because
     // enabledPlugins is governed by the CLAUDE_CONFIG_DIR settings.json
@@ -234,7 +234,7 @@ function lstatSyncSafe(p: string): ReturnType<typeof lstatSync> | null {
 // ("Not logged in -- Please run /login") and exits before sending the
 // heartbeat (verified live 13:00 hb of 2026-06-02).
 //
-// IMPORTANT (Marveen 2026-06-02 review with live test): the `security -w`
+// IMPORTANT (Wraith 2026-06-02 review with live test): the `security -w`
 // output is the FULL credentials JSON, NOT a bare bearer token:
 //   { "claudeAiOauth": { accessToken, refreshToken, expiresAt, ... },
 //     "mcpOAuth": { ... } }
@@ -243,7 +243,7 @@ function lstatSyncSafe(p: string): ReturnType<typeof lstatSync> | null {
 // attempt to drop the JSON into CLAUDE_CODE_OAUTH_TOKEN (env-var) failed
 // with 401 because that env expects a bare access token (sk-ant-oat...).
 // The config-dir .credentials.json path is the one Claude Code expects
-// on Linux installs and Marveen's live A/B test confirmed it succeeds.
+// on Linux installs and Wraith's live A/B test confirmed it succeeds.
 //
 // SECURITY:
 //   - `security` is invoked via execFileSync so the JSON never traverses
@@ -502,13 +502,13 @@ async function executeHeartbeat(): Promise<void> {
 
   try {
     // CRITICAL: run the sub-agent in an isolated cwd that does NOT load
-    // the Marveen project's plugin config. The default cwd=PROJECT_ROOT
+    // the Wraith project's plugin config. The default cwd=PROJECT_ROOT
     // makes the SDK-spawned headless claude load claude-plugins-official
     // (the Telegram channel plugin), which spawns its own `bun` poller
-    // against the same bot token Marveen is already polling. Telegram's
+    // against the same bot token Wraith is already polling. Telegram's
     // getUpdates allows only ONE concurrent long-poll per bot, so the
-    // second poll triggers a 409 Conflict and the live Marveen bun
-    // child dies -- which is why ~65 % of all Marveen restarts on
+    // second poll triggers a 409 Conflict and the live Wraith bun
+    // child dies -- which is why ~65 % of all Wraith restarts on
     // 2026-06-01 clustered in the 0-10 min window after every hourly
     // heartbeat fire. The agents/heartbeat-worker dir has an empty
     // .mcp.json and no agent-config, so claude finds no channel plugin
@@ -517,11 +517,11 @@ async function executeHeartbeat(): Promise<void> {
     // config root we just built. That's the gate that actually prevents
     // the user-scope enabledPlugins:{telegram:true} from leaking in --
     // the project-scope override in #247 did NOT (verified: 09/10/11/12
-    // hb all loaded the plugin and crashed Marveen via 409 Conflict).
+    // hb all loaded the plugin and crashed Wraith via 409 Conflict).
     // Auth lives in $HEARTBEAT_CONFIG_DIR/.credentials.json -- the
     // ensureHeartbeatWorkerCwd() call above wrote it from the macOS
     // Keychain JSON. The previous version injected the JSON via the
-    // CLAUDE_CODE_OAUTH_TOKEN env var (Marveen-suggested but later
+    // CLAUDE_CODE_OAUTH_TOKEN env var (Wraith-suggested but later
     // empirically disproved: that env expects a bare bearer token, the
     // JSON blob comes back 401 "Invalid bearer token"). Config-dir file
     // path is what Claude Code's Linux installs use natively and what

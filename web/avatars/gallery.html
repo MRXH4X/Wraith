@@ -2,7 +2,7 @@
 <html lang="hu">
 <head>
 <meta charset="UTF-8">
-<title>Pixel Avatar Gallery - Marveen Team</title>
+<title>Pixel Avatar Gallery - Wraith Team</title>
 <style>
   body { background: #1a1a2e; color: #eee; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 40px; }
   h1 { text-align: center; color: #00d4ff; font-size: 2rem; margin-bottom: 10px; }
@@ -17,7 +17,7 @@
 </head>
 <body>
 <h1>Pixel Avatar Gallery</h1>
-<p class="subtitle">20 Minecraft-style agent avatars for Marveen</p>
+<p class="subtitle">20 Minecraft-style agent avatars for Wraith</p>
 <div class="grid">
   <div class="card"><img src="01_robot.png" alt="Robot"><div class="name">Robot</div><div class="num">#01</div></div>
   <div class="card"><img src="02_wizard_girl.png" alt="Wizard Girl"><div class="name">Wizard Girl</div><div class="num">#02</div></div>
@@ -42,9 +42,9 @@
 </div>
 <script>
   // Reflect the configured brand in the standalone gallery heading. Falls back
-  // to the static "Marveen" text above when /api/marveen is unreachable, so a
+  // to the static "Wraith" text above when /api/wraith is unreachable, so a
   // stock install renders byte-identically.
-  fetch('/api/marveen').then(function (r) { return r.ok ? r.json() : null }).then(function (m) {
+  fetch('/api/wraith').then(function (r) { return r.ok ? r.json() : null }).then(function (m) {
     if (!m) return
     var b = m.brandName || m.name
     if (!b) return

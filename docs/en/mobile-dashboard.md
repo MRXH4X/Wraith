@@ -1,6 +1,6 @@
 # Dashboard on mobile (secure access)
 
-By default the Marveen dashboard listens only on the host's own localhost (127.0.0.1:3420), so it is not reachable from a phone directly. This guide shows how to access the dashboard securely from mobile, with an app-like icon.
+By default the Wraith dashboard listens only on the host's own localhost (127.0.0.1:3420), so it is not reachable from a phone directly. This guide shows how to access the dashboard securely from mobile, with an app-like icon.
 
 ## Security in short
 

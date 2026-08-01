@@ -12,7 +12,7 @@
 //   incoming_events -- every inbound Telegram update, deduped on (source,update_id)
 //   poll_offset     -- the persisted getUpdates offset (one row), so a restart
 //                      resumes instead of replaying or skipping.
-// The handoff to Marveen reuses the existing agent_messages table + the proven
+// The handoff to Wraith reuses the existing agent_messages table + the proven
 // message-router (5s tick, tmux injection, wrapUntrusted) -- we just INSERT a
 // pending row from 'telegram-coordinator' to the main agent.
 
@@ -182,7 +182,7 @@ export function markEventFailed(eventId: number, error: string): void {
 //       insert and createHandoffMessage -> agent_message_id IS NULL), or
 //   (b) they were handed off but the message-router abandoned the agent_message
 //       after its retry window (am.status = 'failed') -- the user's message
-//       never actually reached Marveen.
+//       never actually reached Wraith.
 // Events whose handoff is still in-flight (am.status pending/delivered/done) are
 // NOT returned, so we never double-deliver a message that is merely waiting.
 // Idempotency against re-handoff is further guaranteed by UNIQUE(source,update_id)

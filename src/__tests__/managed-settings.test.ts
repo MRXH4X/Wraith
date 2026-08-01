@@ -10,7 +10,7 @@ import {
   resetAgentEnabledPlugins,
 } from '../web/routes/agents.js'
 
-const SLACK_ENTRY = { plugin: 'slack-channel', marketplace: 'marveen-marketplace' }
+const SLACK_ENTRY = { plugin: 'slack-channel', marketplace: 'wraith-marketplace' }
 const TELEGRAM_ENTRY = { plugin: 'telegram', marketplace: 'claude-plugins-official' }
 
 let tmpDir: string
@@ -142,7 +142,7 @@ describe('setAgentEnabledPlugins (algorithm)', () => {
     if (provider === 'slack') {
       plugins['telegram@claude-plugins-official'] = false
     } else {
-      plugins['slack-channel@marveen-marketplace'] = false
+      plugins['slack-channel@wraith-marketplace'] = false
     }
     existing.enabledPlugins = plugins
     writeFileSync(settingsPath, JSON.stringify(existing, null, 2))
@@ -153,14 +153,14 @@ describe('setAgentEnabledPlugins (algorithm)', () => {
     set(p, 'slack')
     const data = JSON.parse(readFileSync(p, 'utf-8'))
     expect(data.enabledPlugins['telegram@claude-plugins-official']).toBe(false)
-    expect(data.enabledPlugins['slack-channel@marveen-marketplace']).toBeUndefined()
+    expect(data.enabledPlugins['slack-channel@wraith-marketplace']).toBeUndefined()
   })
 
   it('disables slack when provider is telegram', () => {
     const p = join(tmpDir, '.claude', 'settings.json')
     set(p, 'telegram')
     const data = JSON.parse(readFileSync(p, 'utf-8'))
-    expect(data.enabledPlugins['slack-channel@marveen-marketplace']).toBe(false)
+    expect(data.enabledPlugins['slack-channel@wraith-marketplace']).toBe(false)
     expect(data.enabledPlugins['telegram@claude-plugins-official']).toBeUndefined()
   })
 

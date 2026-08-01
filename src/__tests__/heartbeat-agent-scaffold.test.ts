@@ -83,7 +83,7 @@ describe('renderHeartbeatClaudeMd', () => {
     const out = renderHeartbeatClaudeMd(ID)
     // With a non-default owner/bot, the upstream default names must not
     // leak through from any hardcoded string.
-    expect(out).not.toMatch(/Szabolcs|Szabi|Marveen/)
+    expect(out).not.toMatch(/Szabolcs|Szabi|Wraith/)
   })
 
   it('contains no em-dash (project style rule)', () => {

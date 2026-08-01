@@ -13,7 +13,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK_DIR="$(cd "$(git -C "$ROOT" rev-parse --git-common-dir)" && pwd)/hooks"
 DISPATCH="$HOOK_DIR/pre-push"
 GUARD="$HOOK_DIR/pre-push.d/10-no-force-push-protected"
-MARK="marveen-pre-push-dispatcher"
+MARK="wraith-pre-push-dispatcher"
 mkdir -p "$HOOK_DIR/pre-push.d"
 
 # 1. The guard sub-hook: reject a non-fast-forward push to a protected branch.

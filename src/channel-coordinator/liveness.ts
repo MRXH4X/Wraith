@@ -25,7 +25,7 @@ const TMUX = resolveFromPath('tmux')
 export const KEEPALIVE_FILE = join(PROJECT_ROOT, 'store', '.channel-keepalive')
 export const KEEPALIVE_STALE_MS = 18 * 60 * 1000
 // After any main-session respawn the plugin needs time to come up; never call
-// the native "down" inside this window (matches MARVEEN_POST_RESPAWN_GRACE_MS).
+// the native "down" inside this window (matches WRAITH_POST_RESPAWN_GRACE_MS).
 export const STARTUP_GRACE_MS = 360_000
 export const RESPAWN_STAMP_FILE = join(PROJECT_ROOT, 'store', '.channel-last-respawn')
 
@@ -236,7 +236,7 @@ export function readRespawnStampMs(): number {
 }
 
 // Age of the keepalive file in ms, or null if missing/unreadable. The scheduled
-// keepalive prompt (run inside the marveen-channels TUI) touches this every
+// keepalive prompt (run inside the wraith-channels TUI) touches this every
 // ~6 min; if the TUI is wedged it cannot, so the file ages.
 export function readKeepaliveAgeMs(nowMs: number): number | null {
   try {

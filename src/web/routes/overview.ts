@@ -121,8 +121,8 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
 
     const agentsForTeam: Array<{ id: string; label: string; role: string; running: boolean; hasAvatar: boolean; avatarUrl: string }> = []
     const mainHasAvatar = [
-      join(PROJECT_ROOT, 'store', 'marveen-avatar.png'),
-      join(PROJECT_ROOT, 'store', 'marveen-avatar.jpg'),
+      join(PROJECT_ROOT, 'store', 'wraith-avatar.png'),
+      join(PROJECT_ROOT, 'store', 'wraith-avatar.jpg'),
     ].some(existsSync)
     agentsForTeam.push({
       id: MAIN_AGENT_ID,
@@ -130,7 +130,7 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
       role: 'main',
       running: true,
       hasAvatar: mainHasAvatar,
-      avatarUrl: `/api/marveen/avatar`,
+      avatarUrl: `/api/wraith/avatar`,
     })
     for (const a of subAgents) {
       const team = readAgentTeam(a)

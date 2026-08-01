@@ -53,9 +53,9 @@ nyitható. Egy MÁR FELÉPÜLT ssh-alagút viszont a következő bontásig
 kapcsolatokat nem ellenőrzi újra. Ha azonnali vágás kell, állítsd le a Bridge
 appot az eszközön, vagy zárd le a szerveren az eszköz élő SSH-kapcsolatát.
 Ha az SSH-sor törlése hibára fut, a felület külön figyelmeztetést mutat --
-ilyenkor a sort kézzel töröld: a Marveent futtató user
+ilyenkor a sort kézzel töröld: a Wraitht futtató user
 `~/.ssh/authorized_keys` fájljából vedd ki az eszköz
-`marveen-remote:<install-id>` kommentű sorát. Az eszköz ettől nem "kizárt
+`wraith-remote:<install-id>` kommentű sorát. Az eszköz ettől nem "kizárt
 felhasználó": újra-párosítással (új kulcs-sor beillesztése) bármikor
 visszahozható. A `security:reset` a
 párosított kulcsokat is visszavonja, de az SSH-sorokat nem bántja -- azok a

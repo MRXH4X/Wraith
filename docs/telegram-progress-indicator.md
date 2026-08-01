@@ -73,7 +73,7 @@ Loop-safe: a per-session `enforce-<sid>.marker` guarantees at most one block, an
   Code merges additively) it can never post a double placeholder.
 - **Fleet-wide**: the hooks live in the global `~/.claude/settings.json`, so
   every existing and future agent gets it automatically; the watchdog scans all
-  agents under `$MARVEEN_ROOT` (default `~/marveen`).
+  agents under `$WRAITH_ROOT` (default `~/wraith`).
 
 ## Install
 
@@ -93,12 +93,12 @@ It is idempotent and is auto-run by `scripts/sync-hooks.sh` on every update. It:
 - `telegram_progress_watchdog.py`: `DOWN_GRACE_SEC` (default 120s — agent down +
   placeholder older than this -> error) and `WEDGED_SEC` (default 15m — agent up
   but placeholder this old -> error).
-- `MARVEEN_ROOT` env var overrides the fleet root the watchdog scans.
+- `WRAITH_ROOT` env var overrides the fleet root the watchdog scans.
 
 ## Remove
 
 Delete the four `~/.claude/hooks/telegram_progress*.py` files and their entries
 in `~/.claude/settings.json`, then unload the watchdog
-(`launchctl unload ~/Library/LaunchAgents/com.marveen.telegram-progress-watchdog.plist`
-on macOS, or `systemctl --user disable --now marveen-telegram-progress-watchdog.timer`
+(`launchctl unload ~/Library/LaunchAgents/com.wraith.telegram-progress-watchdog.plist`
+on macOS, or `systemctl --user disable --now wraith-telegram-progress-watchdog.timer`
 on Linux).

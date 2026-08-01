@@ -49,7 +49,7 @@ export async function tryHandleSecurity(ctx: RouteContext): Promise<boolean> {
   const keyLine = str(body.key_line).trim()
   const name = str(body.name).trim()
   if (!keyLine) {
-    json(res, { error: 'key_line is required (the ssh-ed25519 ... marveen-remote:<uuid> line shown by the Bridge)' }, 400)
+    json(res, { error: 'key_line is required (the ssh-ed25519 ... wraith-remote:<uuid> line shown by the Bridge)' }, 400)
     return true
   }
   if (!NAME_RE.test(name)) {
@@ -70,7 +70,7 @@ export async function tryHandleSecurity(ctx: RouteContext): Promise<boolean> {
   try {
     const outcome = await bridgeEnroll({ keyLine, name, host, sshPort })
     // Metadata only into the trail -- never the bundle or key material. An
-    // active MARVEEN_SSH_DIR override (test seam) is flagged so an incident
+    // active WRAITH_SSH_DIR override (test seam) is flagged so an incident
     // where pairing "succeeded but does not work" is explainable from the
     // audit row alone.
     const overrideNote = sshDirOverride() ? ' sshdir_override=1' : ''

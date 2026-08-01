@@ -1,6 +1,6 @@
 # Dashboard mobilon (biztonságos elérés)
 
-A Marveen dashboard alapból csak a gazdagép saját localhostján (127.0.0.1:3420) figyel, ezért telefonról közvetlenül nem érhető el. Ez a leírás bemutatja, hogyan érd el biztonságosan a dashboardot mobilról, app-szerű ikonnal.
+A Wraith dashboard alapból csak a gazdagép saját localhostján (127.0.0.1:3420) figyel, ezért telefonról közvetlenül nem érhető el. Ez a leírás bemutatja, hogyan érd el biztonságosan a dashboardot mobilról, app-szerű ikonnal.
 
 ## Biztonság röviden
 

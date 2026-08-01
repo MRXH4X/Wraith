@@ -6,15 +6,15 @@ import { join } from 'node:path'
 // pairing" while the agent's Channel view listed the very same request.
 //
 // Cause, traced through the code: the wizard asks mainAgentId(), which falls
-// back to the literal 'marveen' until /api/marveen has populated
-// window._marveen. On a renamed install that literal is NOT the main agent, so
+// back to the literal 'wraith' until /api/wraith has populated
+// window._wraith. On a renamed install that literal is NOT the main agent, so
 // the backend takes its sub-agent branch (agents.ts: name !== MAIN_AGENT_ID &&
 // !existsSync(agentDir(name))) and answers 404 -- which the wizard then parsed
 // as a body and turned into an empty list. The Channel view uses the selected
 // agent, so it was unaffected.
 //
 // The same boot race is already documented and guarded for the Messages page
-// (ensureMarveenLoaded). This change applies that existing guard at the second
+// (ensureWraithLoaded). This change applies that existing guard at the second
 // call site; it deliberately does NOT remove the mainAgentId() fallback, which
 // other call sites rely on.
 //
@@ -48,14 +48,14 @@ function loadPendingBlock(): string {
 
 describe('PAIRAPPROVE1: the wizard resolves the real agent id before asking', () => {
   it('the boot-race guard still exists and is what we reuse', () => {
-    expect(APP).toContain('async function ensureMarveenLoaded()')
+    expect(APP).toContain('async function ensureWraithLoaded()')
     // it must remain a no-op once the id is known, or every poll refetches
-    expect(APP).toMatch(/async function ensureMarveenLoaded\(\)\s*\{\s*\n\s*if \(window\._marveen\?\.agentId\) return/)
+    expect(APP).toMatch(/async function ensureWraithLoaded\(\)\s*\{\s*\n\s*if \(window\._wraith\?\.agentId\) return/)
   })
 
   it('awaits the guard BEFORE fetching pending (order is the whole fix)', () => {
     const blk = loadPendingBlock()
-    const guard = blk.indexOf('await ensureMarveenLoaded()')
+    const guard = blk.indexOf('await ensureWraithLoaded()')
     const fetchAt = blk.indexOf('await fetch(')
     expect(guard, 'guard not called in loadPending').toBeGreaterThan(-1)
     expect(fetchAt).toBeGreaterThan(-1)
@@ -86,7 +86,7 @@ describe('PAIRAPPROVE1: the wizard resolves the real agent id before asking', ()
   })
 
   it('leaves the mainAgentId fallback alone (other call sites depend on it)', () => {
-    expect(APP).toMatch(/return window\._marveen\?\.agentId \|\| 'marveen'/)
+    expect(APP).toMatch(/return window\._wraith\?\.agentId \|\| 'wraith'/)
   })
 
   it('keeps the expiry filter, which is correct (the plugin writes ms)', () => {

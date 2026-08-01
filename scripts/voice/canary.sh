@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ -f "$SCRIPT_DIR/_vtools.py" ]]; then
   DEST="$SCRIPT_DIR"
 else
-  DEST="$HOME/.local/share/marveen-voice"
+  DEST="$HOME/.local/share/wraith-voice"
 fi
 # Graceful skip when the (opt-in) voice stack is not installed: a missing venv
 # must read as "nothing to test", not as a weekly false-alarm regression.

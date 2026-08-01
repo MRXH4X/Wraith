@@ -44,7 +44,7 @@ const BANNER = `
 
 async function main() {
   console.log(BANNER)
-  header('Udvozol a Marveen telepito!')
+  header('Udvozol a Wraith telepito!')
   console.log('Ez a varazslo vegigvezet a beallitasokon.\n')
 
   // --- Kovetelmeny ellenorzes ---
@@ -165,7 +165,7 @@ async function main() {
 
   // .env iras
   header('4. .env fajl irasa')
-  let envContent = '# Marveen konfiguracio\n'
+  let envContent = '# Wraith konfiguracio\n'
   for (const [key, value] of Object.entries(config)) {
     envContent += `${key}=${value}\n`
   }
@@ -321,7 +321,7 @@ WantedBy=default.target`
 
   // Kész
   header('Kesz!')
-  ok('Marveen sikeresen telepitve!')
+  ok('Wraith sikeresen telepitve!')
   console.log('')
   console.log('Kovetkezo lepesek:')
   console.log(`  1. Ha nem adtad meg a chat ID-t: kuldj /chatid-t a botnak`)
