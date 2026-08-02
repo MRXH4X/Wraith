@@ -264,6 +264,15 @@ To revoke a device, delete the line whose comment matches its id (`wraith-remote
 ./scripts/start.sh
 ```
 
+### Eltávolítás
+
+```bash
+./uninstall.sh --dry-run   # eloszor csak a tervet mutatja, semmit nem valtoztat
+./uninstall.sh              # interaktiv: "TOROL" beirasaval megerositve visszabont mindent
+```
+
+Leállítja és törli a systemd --user egységeket (Linux) / launchd agenteket (macOS), az élő tmux session-öket, az ügynök-worker konfigmappákat, a Wraith által seedelt skilleket/ütemezett feladatokat a `~/.claude/` alól, és a klón-könyvtárat (mentéssel törlés előtt). A `--keep-data` kapcsolóval a `store/` (memória, kanban, Vault) és a klón-könyvtár megmarad; a `--purge-ollama` kapcsolóval az `ollama` szolgáltatás is leáll. Részletek: `./uninstall.sh --help`.
+
 ### VPS / AWS EC2 telepítés (szerver)
 
 Linux VPS-en (Ubuntu 22+, Debian 12+) az `./install.sh` automatikusan az `install-linux.sh`-t futtatja. Headless szerveren a bejelentkezéshez OAuth token kell, mert nincs böngésző.
