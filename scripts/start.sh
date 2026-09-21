@@ -1,0 +1,89 @@
+#!/bin/bash
+# Start main agent services
+
+# Dashboard port: env WEB_PORT, else the install .env, else the 3420 default.
+WEB_PORT="${WEB_PORT:-$(grep -E '^WEB_PORT=' "$(dirname "$0")/../.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' "')}"
+WEB_PORT="${WEB_PORT:-3420}"
+
+INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Read only what this script actually needs; avoid `set -a && source .env`,
+# which would leak TELEGRAM_BOT_TOKEN into the environment and then into
+# every tmux session the dashboard launches (see channels.sh for details).
+if [ -f "$INSTALL_DIR/.env" ]; then
+  SLUG="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2-)"
+  BOT_NAME="$(grep -E '^BOT_NAME=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2-)"
+fi
+SLUG="${SLUG:-wraith}"
+
+WRAITH_LANG="$(cat "${INSTALL_DIR}/.lang" 2>/dev/null || echo hu)"
+# shellcheck source=../install-lang.sh
+source "${INSTALL_DIR}/install-lang.sh"
+
+# Root VPS / container: claude refuses --dangerously-skip-permissions as uid 0.
+# The dashboard (and the agent tmux sessions it spawns) hit the same wall as
+# channels.sh, so export the sandbox escape hatch for the whole stack when root.
+[ "$(id -u)" = "0" ] && export IS_SANDBOX=1
+
+# Prune stale hook paths (e.g. /tmp scratchpad installs that survived a reboot)
+# before launching agents -- a missing hook script causes non-zero exit which
+# blocks every UserPromptSubmit, creating a silent fleet lockout (2026-07-14 incident).
+INSTALL_DIR="$INSTALL_DIR" python3 "${INSTALL_DIR}/scripts/boot-hook-prune.py" 2>&1 | grep -v '^$' | sed 's/^/[boot-hook-prune] /' || true
+
+echo "${BOT_NAME:-Wraith} $(_t start.starting)"
+OS="$(uname -s)"
+LAUNCHD_FAILED=""
+if [ "$OS" = "Darwin" ]; then
+  # `launchctl load` alone leaves a RunAtLoad job pended on modern macOS, so
+  # this script used to print the dashboard URL and "channel started" over two
+  # units that never ran. Same helper as install-macos.sh: load, kickstart,
+  # verify.
+  . "${INSTALL_DIR}/scripts/launchd-unit.sh"
+  for _svc in dashboard channels; do
+    if [ -z "$(start_launchd_unit "com.${SLUG}.${_svc}")" ]; then
+      LAUNCHD_FAILED="${LAUNCHD_FAILED}${_svc} "
+    fi
+  done
+  unset _svc
+elif [ "$OS" = "Linux" ]; then
+  if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; then
+    systemctl --user start "${SLUG}-dashboard" "${SLUG}-channels"
+  else
+    echo "systemd not available (WSL or container), using direct launch..."
+    mkdir -p "$INSTALL_DIR/store"
+    # The entry is src/index.ts (built to dist/index.js); the old src/web/serve.ts
+    # is gone. better-sqlite3 is unsupported under bun (oven-sh/bun#4290), and on
+    # some setups `node` on PATH actually resolves to bun -- so pick a real node
+    # (its --version starts with "v"; bun's does not) and run the built output.
+    NODE_BIN=""
+    for cand in node nodejs; do
+      cand_path="$(command -v "$cand" 2>/dev/null)" || continue
+      case "$("$cand_path" --version 2>/dev/null)" in
+        v*) NODE_BIN="$cand_path"; break ;;
+      esac
+    done
+    if [ -z "$NODE_BIN" ]; then
+      echo "ERROR: no real node found on PATH (bun cannot run better-sqlite3)." >&2
+      exit 1
+    fi
+    [ -f "$INSTALL_DIR/dist/index.js" ] || (cd "$INSTALL_DIR" && npm run build)
+    nohup "$NODE_BIN" "$INSTALL_DIR/dist/index.js" > "$INSTALL_DIR/store/dashboard.log" 2>&1 &
+    echo $! > "$INSTALL_DIR/store/dashboard.pid"
+    nohup bash "$INSTALL_DIR/scripts/channels.sh" > "$INSTALL_DIR/store/channels.log" 2>&1 &
+    echo $! > "$INSTALL_DIR/store/channels.pid"
+  fi
+fi
+
+if [ -n "$LAUNCHD_FAILED" ]; then
+  # "nem igazolt", not "nem indult el", and no claim about what that means for
+  # the bot: this reports what the verification established, nothing beyond it.
+  echo "✗ A szolgaltatas indulasa nem igazolt: ${LAUNCHD_FAILED}" >&2
+  for _svc in $LAUNCHD_FAILED; do
+    echo "  Ujraprobalas: launchctl kickstart -p gui/$(id -u)/com.${SLUG}.${_svc}" >&2
+    echo "  Ellenorzes:   launchctl print gui/$(id -u)/com.${SLUG}.${_svc} | grep -E 'state|pid'" >&2
+  done
+  unset _svc
+  exit 1
+fi
+echo "✓ Dashboard: http://localhost:${WEB_PORT:-3420}"
+echo "$(_t start.channel_started)"

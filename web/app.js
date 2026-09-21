@@ -1,0 +1,16625 @@
+// === Avatar cache-busting epoch ===
+// Avatar URLs used to carry ?t=Date.now() on every render, which defeated the
+// browser cache and re-downloaded ~1MB per avatar on each rerender (brutal on
+// slow remote links). Instead the URLs are stable (server sends max-age +
+// ETag) until an avatar is actually changed in THIS session, which bumps the
+// epoch and re-busts every avatar URL rendered afterwards.
+let _avatarEpoch = 0
+function bumpAvatarEpoch() { _avatarEpoch = Date.now() }
+function avatarBust() { return _avatarEpoch ? `?t=${_avatarEpoch}` : '' }
+
+// === i18n runtime ===
+// Priority: localStorage['wraith.lang'] > DASHBOARD_LANG (server default, read
+// from /api/settings on init) > 'hu' (hardcoded fallback).
+// Rick's spec (kanban card 209696a9): t(key,params), window._i18n={hu,en},
+// window._lang; {name} interpolation; EN-fallback then key; dev-mode warning.
+;(() => {
+  const LS_KEY = 'wraith.lang'
+  const VALID = new Set(['hu', 'en'])
+
+  // Brand tokens ({brand} = product/brand name, {bot} = main agent display
+  // name, {agentId} = canonical slug) are filled from /api/wraith once it
+  // resolves (see initSidebarBrand). Until then these defaults keep a stock
+  // install byte-identical. Explicit params passed to t() still win over them.
+  window._brandTokens = window._brandTokens || { brand: 'Wraith', bot: 'Wraith', agentId: 'wraith' }
+
+  window.t = function t(key, params = {}) {
+    const lang = window._lang || 'hu'
+    const str =
+      window._i18n?.[lang]?.[key] ??
+      window._i18n?.['en']?.[key] ??
+      key
+    if (str === key && localStorage.getItem('wraith.dev') === '1') {
+      console.warn('[i18n] missing key:', key)
+    }
+    const vals = { ...window._brandTokens, ...params }
+    return str.replace(/\{(\w+)\}/g, (_, k) => (vals[k] != null ? vals[k] : `{${k}}`))
+  }
+
+  function applyLang(lang) {
+    window._lang = VALID.has(lang) ? lang : 'hu'
+  }
+
+  // Initialise from localStorage; server default fetched async below.
+  applyLang(localStorage.getItem(LS_KEY) || 'hu')
+
+  // Fetch server default (DASHBOARD_LANG) and apply only if localStorage not
+  // set. Deferred to a MICROTASK: this IIFE evaluates before the fetch-wrapper
+  // IIFE installs the Bearer-injecting window.fetch, so an eager call here
+  // went out with the native fetch, got 401 from the /api gate, and the
+  // server default was silently dead code. Microtasks run after the whole
+  // classic script has evaluated, when window.fetch is the wrapped version.
+  queueMicrotask(() => {
+    fetch('/api/settings')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data || localStorage.getItem(LS_KEY)) return
+        const entry = (data.settings || []).find(s => s.key === 'DASHBOARD_LANG')
+        if (!entry || !VALID.has(entry.value) || entry.value === window._lang) return
+        // Apply WITHOUT persisting (localStorage must keep overriding the
+        // server default), and re-run the render dance: the initial
+        // DOMContentLoaded render almost always beats this response, so a
+        // plain applyLang would leave the page painted in the old language.
+        applyLang(entry.value)
+        if (typeof renderNav === 'function') renderNav()
+        if (typeof renderStaticI18n === 'function') renderStaticI18n()
+        const activeLink = document.querySelector('.sb-link.active[data-page]')
+        if (activeLink && typeof switchPage === 'function') switchPage(activeLink.dataset.page)
+      })
+      .catch(() => {})
+  })
+
+  window.setLang = function setLang(lang) {
+    if (!VALID.has(lang)) return
+    window._lang = lang
+    localStorage.setItem(LS_KEY, lang)
+    renderNav()
+    // Static elements (kanban column titles, hints, empty states) are otherwise
+    // only translated at DOMContentLoaded -- re-apply them on every switch so the
+    // currently-open page updates live, not just after a manual reload.
+    if (typeof renderStaticI18n === 'function') renderStaticI18n()
+    // Re-render the active page by re-triggering the switchPage handler.
+    const activeLink = document.querySelector('.sb-link.active[data-page]')
+    if (activeLink) {
+      const pageId = activeLink.dataset.page
+      if (typeof switchPage === 'function') switchPage(pageId)
+    }
+  }
+})()
+
+// === Dashboard auth bootstrap ===
+// The server prints an URL like http://127.0.0.1:3420/?token=XXX on startup.
+// On first visit we pluck the token out of the URL, store it in localStorage,
+// strip it from the visible URL, and then inject it into every /api/* fetch
+// as a Bearer header so the server lets us through.
+
+// The main (channels) agent's real id. The backend /api/wraith route returns
+// the configured MAIN_AGENT_ID (NOT the literal "wraith") in window._wraith;
+// use this everywhere an agent id is sent to /api/agents/... or compared to a
+// fleet name, so the dashboard works on non-"wraith" installs. Falls back to
+// "wraith" only before /api/wraith has resolved (or on a legacy backend).
+function mainAgentId() {
+  return window._wraith?.agentId || 'wraith'
+}
+
+(() => {
+  const TOKEN_KEY = 'wraith-dashboard-token'
+  const urlParams = new URLSearchParams(window.location.search)
+  const urlToken = urlParams.get('token')
+  // Keep the token in memory for the whole session in addition to localStorage.
+  // Some iOS/Safari privacy modes purge or block localStorage (especially over
+  // plain http / non-primary origins); an in-memory copy keeps the session
+  // authenticated even when the persisted copy is unavailable.
+  let sessionToken = urlToken || ''
+  if (urlToken) {
+    try { localStorage.setItem(TOKEN_KEY, urlToken) } catch { /* storage blocked */ }
+    urlParams.delete('token')
+    const clean = window.location.pathname + (urlParams.toString() ? '?' + urlParams : '') + window.location.hash
+    window.history.replaceState({}, '', clean)
+  } else {
+    try { sessionToken = localStorage.getItem(TOKEN_KEY) || '' } catch { /* storage blocked */ }
+  }
+
+  const originalFetch = window.fetch.bind(window)
+  window.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input))
+    // Only attach the token to same-origin API calls. Relative paths always
+    // resolve to same-origin; absolute URLs must match the current origin.
+    const isSameOriginApi =
+      url.startsWith('/api/') ||
+      (url.startsWith(window.location.origin + '/api/'))
+    if (isSameOriginApi) {
+      let token = sessionToken
+      if (!token) { try { token = localStorage.getItem(TOKEN_KEY) } catch { token = '' } }
+      if (token) {
+        init = init || {}
+        const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined))
+        headers.set('Authorization', 'Bearer ' + token)
+        init.headers = headers
+      }
+    }
+    const res = await originalFetch(input, init)
+    if (res.status === 401 && isSameOriginApi) {
+      // Token missing, wrong, or revoked. Wipe and prompt once per page load.
+      // Keep a URL-provided session token so a transient 401 does not lock out
+      // a session whose localStorage copy was purged.
+      try { localStorage.removeItem(TOKEN_KEY) } catch { /* storage blocked */ }
+      if (!urlToken) sessionToken = ''
+      if (!window.__wraithAuthPrompted) {
+        window.__wraithAuthPrompted = true
+        handleAuthFailure()
+      }
+    }
+    return res
+  }
+
+  // On a 401, ask the public status probe whether a username+password login is
+  // available on this instance. If so, show the login overlay; otherwise fall
+  // back to the existing token flows (PWA paste field or the console-URL alert).
+  async function handleAuthFailure() {
+    let status = null
+    try {
+      const r = await originalFetch('/api/auth/status')
+      if (r.ok) status = await r.json()
+    } catch { /* offline or probe failed -- fall through to token flows */ }
+    if (status && status.login_available) {
+      showLoginOverlay()
+      return
+    }
+    // An installed (home-screen) PWA has its own localStorage, separate from
+    // Safari's, and the manifest start_url has no ?token=, so the very first
+    // standalone launch is token-less and 401s. There is no address bar to paste
+    // a ?token= URL into either. Offer an in-app paste field that writes the
+    // token to the app's own storage, then reload.
+    const isStandalone = window.navigator.standalone === true ||
+      (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+    if (isStandalone) {
+      showStandaloneTokenPrompt(TOKEN_KEY)
+    } else {
+      alert(
+        'Dashboard authentication failed. Check the server log for the access URL ' +
+        '(look for "Dashboard access URL" with ?token=...), then reopen it in your browser.'
+      )
+    }
+  }
+
+  // Full-screen username+password login overlay. Posts to /api/auth/login; on
+  // success the browser has the mv_session cookie and we reload authenticated.
+  function showLoginOverlay() {
+    if (document.getElementById('mv-login-overlay')) return
+    const tr = (k, fallback) => (typeof window.t === 'function' ? window.t(k) : fallback) || fallback
+    const overlay = document.createElement('div')
+    overlay.id = 'mv-login-overlay'
+    overlay.className = 'mv-auth-overlay'
+    overlay.innerHTML =
+      '<form class="mv-auth-card" id="mv-login-form">' +
+        '<h2>' + tr('auth.login.title', 'Sign in') + '</h2>' +
+        '<p class="mv-auth-desc">' + tr('auth.login.desc', 'Enter your dashboard username and password.') + '</p>' +
+        '<input id="mv-login-user" type="text" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="' + tr('auth.login.username', 'Username') + '">' +
+        '<input id="mv-login-pass" type="password" autocomplete="current-password" placeholder="' + tr('auth.login.password', 'Password') + '">' +
+        '<button type="submit" id="mv-login-submit">' + tr('auth.login.submit', 'Sign in') + '</button>' +
+        '<div class="mv-auth-err" id="mv-login-err"></div>' +
+      '</form>'
+    document.body.appendChild(overlay)
+    const form = overlay.querySelector('#mv-login-form')
+    const userEl = overlay.querySelector('#mv-login-user')
+    const passEl = overlay.querySelector('#mv-login-pass')
+    const errEl = overlay.querySelector('#mv-login-err')
+    const submitEl = overlay.querySelector('#mv-login-submit')
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault()
+      errEl.textContent = ''
+      const username = (userEl.value || '').trim()
+      const password = passEl.value || ''
+      if (!username || !password) { errEl.textContent = tr('auth.login.err_empty', 'Enter a username and password.'); return }
+      submitEl.disabled = true
+      try {
+        const r = await originalFetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        })
+        if (r.ok) { window.location.reload(); return }
+        if (r.status === 429) {
+          let retry = 0
+          try { retry = (await r.json()).retry_after_s || 0 } catch { /* ignore */ }
+          errEl.textContent = tr('auth.login.err_throttled', 'Too many attempts. Try again later.') + (retry ? ' (' + retry + 's)' : '')
+        } else {
+          errEl.textContent = tr('auth.login.err_invalid', 'Invalid credentials.')
+        }
+      } catch {
+        errEl.textContent = tr('auth.login.err_network', 'Network error.')
+      } finally {
+        submitEl.disabled = false
+      }
+    })
+    setTimeout(() => userEl.focus(), 50)
+  }
+
+  // Full-screen, one-time token paste for installed PWAs (see the 401 handler).
+  // The user pastes the access token (the value after ?token= in the server's
+  // startup URL, or from the dashboard Settings / mobile-login QR); it is saved
+  // to this app instance's localStorage and the page reloads authenticated.
+  function showStandaloneTokenPrompt(tokenKey) {
+    if (document.getElementById('mv-token-overlay')) return
+    // Lang files are not yet loaded here; use a local inline lookup so EN mode works.
+    const _lang = localStorage.getItem('wraith.lang') || 'hu'
+    const _pwa = {
+      hu: {
+        title: 'Hozzáférés szükséges',
+        desc: 'A home-screen app saját tárhelye még üres. Illeszd be a dashboard access tokent (a szerver indítási URL-jében a ?token= utáni rész, vagy a Beállítások / mobil-login QR), és elmentődik ehhez az apphoz.',
+        btn: 'Mentés és újratöltés',
+        empty_token: 'Üres token.'
+      },
+      en: {
+        title: 'Access Required',
+        desc: "The home-screen app's own storage is empty. Paste the dashboard access token (the part after ?token= in the server startup URL, or from Settings / mobile-login QR), and it will be saved for this app.",
+        btn: 'Save & Reload',
+        empty_token: 'Empty token.'
+      }
+    }
+    const _p = _pwa[_lang] || _pwa.hu
+    const overlay = document.createElement('div')
+    overlay.id = 'mv-token-overlay'
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#1a1917;color:#faf9f5;' +
+      'display:flex;align-items:center;justify-content:center;padding:24px;' +
+      'font-family:system-ui,-apple-system,sans-serif'
+    overlay.innerHTML =
+      '<div style="max-width:420px;width:100%;display:flex;flex-direction:column;gap:14px">' +
+        '<h2 style="margin:0;font-size:18px;text-align:center">' + _p.title + '</h2>' +
+        '<p style="margin:0;font-size:14px;opacity:0.8;line-height:1.5;text-align:center">' +
+          _p.desc + '</p>' +
+        '<textarea id="mv-token-input" rows="3" autocapitalize="off" autocorrect="off" spellcheck="false" ' +
+          'style="width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #555;' +
+          'background:#0f0e0d;color:#faf9f5;font-size:14px;font-family:monospace" placeholder="token..."></textarea>' +
+        '<button id="mv-token-save" style="padding:12px;border:0;border-radius:8px;background:#10b981;' +
+          'color:#fff;font-size:15px;font-weight:600">' + _p.btn + '</button>' +
+        '<div id="mv-token-err" style="color:#f87171;font-size:13px;min-height:16px;text-align:center"></div>' +
+      '</div>'
+    document.body.appendChild(overlay)
+    const input = overlay.querySelector('#mv-token-input')
+    const errEl = overlay.querySelector('#mv-token-err')
+    const submit = () => {
+      const raw = (input.value || '').trim()
+      if (!raw) { errEl.textContent = _p.empty_token; return }
+      // Accept either a bare token or the whole startup URL (the user often
+      // pastes the full https://host/?token=... link). Pull just the token out.
+      let token = raw
+      if (raw.includes('token=')) {
+        let extracted = null
+        try { extracted = new URL(raw).searchParams.get('token') } catch { /* not a full URL */ }
+        if (!extracted) {
+          // covers ?token=, &token=, and the hash form (/#...?token=...)
+          const m = raw.match(/[?&#]token=([^&#\s]+)/)
+          if (m) extracted = m[1]
+        }
+        if (extracted) { try { token = decodeURIComponent(extracted) } catch { token = extracted } }
+      }
+      token = token.trim()
+      if (!token) { errEl.textContent = _p.empty_token; return }
+      localStorage.setItem(tokenKey, token)
+      window.location.reload()
+    }
+    overlay.querySelector('#mv-token-save').addEventListener('click', submit)
+    setTimeout(() => input.focus(), 50)
+  }
+})()
+
+// === Theme ===
+const html = document.documentElement
+const themeToggle = document.getElementById('themeToggle')
+const savedTheme = localStorage.getItem('cc-theme')
+if (savedTheme) {
+  html.setAttribute('data-theme', savedTheme)
+} else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+  html.setAttribute('data-theme', 'dark')
+}
+themeToggle.addEventListener('click', () => {
+  const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'
+  html.setAttribute('data-theme', next)
+  localStorage.setItem('cc-theme', next)
+})
+
+// === Language toggle ===
+;(() => {
+  const btn = document.getElementById('langToggle')
+  if (!btn) return
+  function syncLangBtn() {
+    btn.textContent = (window._lang || 'hu').toUpperCase()
+  }
+  syncLangBtn()
+  btn.addEventListener('click', () => {
+    const next = (window._lang || 'hu') === 'hu' ? 'en' : 'hu'
+    window.setLang(next)
+    syncLangBtn()
+  })
+  // Keep button in sync when setLang is called from elsewhere (e.g. /api/settings async load).
+  const _origSetLang = window.setLang
+  window.setLang = function setLang(lang) {
+    _origSetLang(lang)
+    syncLangBtn()
+  }
+})()
+
+// === Page switching ===
+const navLinks = document.querySelectorAll('.sb-link[data-page], .nav-link[data-page]')
+const pages = document.querySelectorAll('.page')
+
+function confirmSettingsLeave() {
+  if (settingsDirty.size === 0) return true
+  return window.confirm(t('settings.unsaved_warning'))
+}
+
+function switchPage(pageId) {
+  // 'team' is merged into 'agents'; any internal call still passing 'team' redirects.
+  if (pageId === 'team') { _agentsActiveView = 'tree'; pageId = 'agents' }
+  // Guard unsaved settings before leaving the settings page
+  if (!document.getElementById('settingsPage').hidden && pageId !== 'settings' && !confirmSettingsLeave()) return
+  pages.forEach((p) => (p.hidden = p.id !== pageId + 'Page'))
+  navLinks.forEach((l) => l.classList.toggle('active', l.dataset.page === pageId))
+  openSidebarGroupForPage(pageId)
+  // Kanban needs full-width layout (overrides main's max-width: 1200px)
+  document.querySelector('main').classList.toggle('kanban-active', pageId === 'kanban')
+  // Activity page runs a live poll; stop it whenever we navigate away.
+  if (pageId !== 'activity') stopActivityPoll()
+  if (pageId === 'activity') startActivityPoll()
+  // Agents page tints each Terminal button green while that agent is working;
+  // same 3s poll + source as Activity. Stop it when we leave the page.
+  if (pageId !== 'agents') stopAgentsBusyPoll()
+  // Kanban auto-refresh: start on enter, stop on leave.
+  if (pageId !== 'kanban') stopKanbanRefresh()
+  if (pageId === 'overview') loadOverview()
+  if (pageId === 'kanban') { if (typeof _initGanttViewSwitcher === 'function') _initGanttViewSwitcher(); loadKanban(); startKanbanRefresh() }
+  if (pageId === 'tasks') loadSchedules()
+  if (pageId === 'agents') { loadAgents().then(() => _setAgentsView(_agentsActiveView || 'grid')); startAgentsBusyPoll() }
+  if (pageId === 'memories') { loadMemAgents(); loadMemStats(); loadMemories() }
+  if (pageId === 'skills') loadGlobalSkills()
+  if (pageId === 'connectors') loadConnectors()
+  if (pageId === 'migrate') loadMigrateAgents()
+  if (pageId === 'docs') loadDocs()
+  if (pageId === 'research') loadResearch()
+  if (pageId === 'status') loadStatus()
+  if (pageId === 'recall') loadRecallPage()
+  if (pageId === 'bgTasks') loadBgTasksPage()
+  if (pageId === 'vault') loadVaultPage()
+  if (pageId === 'approvals') loadApprovalsPage()
+  if (pageId === 'settings') loadSettings()
+  if (pageId === 'updates') loadUpdates()
+  // 'team' page is merged into 'agents' -- redirect for any lingering deep-links
+  if (pageId === 'messages') loadMessagesPage()
+  if (pageId === 'tokenUsage') loadTokenUsage()
+  if (pageId === 'costs') loadCosts()
+  if (pageId === 'ideas') loadIdeasPage()
+  if (pageId === 'archived') loadArchivedPage()
+  if (pageId === 'naplo') loadNaplo()
+  if (pageId === 'federation') loadFederationPage()
+}
+
+// Mobile off-canvas sidebar toggle. No-op visual effect on desktop (the
+// hamburger/backdrop are display:none there); on narrow screens it slides the
+// sidebar in over a backdrop.
+const sidebarEl = document.querySelector('.sidebar')
+const sidebarBackdrop = document.getElementById('sidebarBackdrop')
+const mobileMenuBtn = document.getElementById('mobileMenuBtn')
+function setSidebarOpen(open) {
+  if (sidebarEl) sidebarEl.classList.toggle('open', open)
+  if (sidebarBackdrop) sidebarBackdrop.classList.toggle('open', open)
+  if (mobileMenuBtn) mobileMenuBtn.setAttribute('aria-expanded', open ? 'true' : 'false')
+}
+if (mobileMenuBtn) mobileMenuBtn.addEventListener('click', () => setSidebarOpen(!sidebarEl.classList.contains('open')))
+if (sidebarBackdrop) sidebarBackdrop.addEventListener('click', () => setSidebarOpen(false))
+
+navLinks.forEach((link) => {
+  link.addEventListener('click', (e) => {
+    e.preventDefault()
+    const pageId = link.dataset.page
+    // Same hash won't fire 'hashchange', so re-render manually; otherwise let the
+    // hashchange listener drive switchPage so the URL stays the single source of truth.
+    if (location.hash.slice(1) === pageId) switchPage(pageId)
+    else location.hash = pageId
+    setSidebarOpen(false) // close the drawer after navigating on mobile
+  })
+})
+
+// === Collapsible sidebar groups ===
+// Open/closed state lives in localStorage (wraith.sidebarGroups) as a JSON
+// array of open group keys. Missing or corrupt state means everything starts
+// collapsed -- that is the designed default, not an error.
+const SIDEBAR_GROUPS_LS_KEY = 'wraith.sidebarGroups'
+// Declarative single source of truth for the group -> pages mapping. The markup
+// order is only the default snapshot: at boot the static links are re-parented
+// into their group containers per this map, so regrouping a page (say, moving
+// naplo under system) or relabeling a group is a one-line change right here.
+const SIDEBAR_GROUPS = [
+  { key: 'team',        labelKey: 'nav.group.team',        pages: ['agents', 'activity', 'messages', 'tasks', 'bgTasks'] },
+  { key: 'knowledge',   labelKey: 'nav.group.knowledge',   pages: ['memories', 'skills', 'research', 'ideas'] },
+  { key: 'stats',       labelKey: 'nav.group.stats',       pages: ['costs', 'tokenUsage'] },
+  { key: 'system',      labelKey: 'nav.group.system',      pages: ['status', 'naplo', 'updates', 'settings', 'vault'] },
+  { key: 'connections', labelKey: 'nav.group.connections', pages: ['connectors', 'federation', 'migrate'] },
+]
+const sidebarGroupEls = document.querySelectorAll('.sb-group[data-group]')
+// data-page -> group key, derived from the map (not the DOM) so the map wins.
+const PAGE_SIDEBAR_GROUP = {}
+SIDEBAR_GROUPS.forEach((def) => def.pages.forEach((p) => { PAGE_SIDEBAR_GROUP[p] = def.key }))
+// Re-parent the 23 static links to match the map. Moving an existing DOM node
+// does not invalidate the navLinks refs captured by querySelectorAll at boot.
+SIDEBAR_GROUPS.forEach((def) => {
+  const group = document.querySelector(`.sb-group[data-group="${def.key}"]`)
+  if (!group) return
+  const label = group.querySelector('.sb-group-label')
+  if (label) label.dataset.i18n = def.labelKey
+  const items = group.querySelector('.sb-group-items')
+  if (!items) return
+  def.pages.forEach((p) => {
+    const link = document.querySelector(`.sb-link[data-page="${p}"]`)
+    if (link) items.appendChild(link)
+  })
+})
+
+function loadSidebarGroupState() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(SIDEBAR_GROUPS_LS_KEY))
+    return Array.isArray(arr) ? arr.filter((k) => typeof k === 'string') : []
+  } catch { return [] }
+}
+
+function setSidebarGroupOpen(groupEl, open, persist = true) {
+  groupEl.classList.toggle('open', open)
+  const btn = groupEl.querySelector('.sb-group-header')
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false')
+  if (persist) {
+    const key = groupEl.dataset.group
+    const state = loadSidebarGroupState().filter((k) => k !== key)
+    if (open) state.push(key)
+    try { localStorage.setItem(SIDEBAR_GROUPS_LS_KEY, JSON.stringify(state)) } catch {}
+  }
+}
+
+// Called from switchPage: the active page's group must always be visible so the
+// "where am I" highlight is never hidden inside a collapsed group.
+function openSidebarGroupForPage(pageId) {
+  const key = PAGE_SIDEBAR_GROUP[pageId]
+  if (!key) return
+  sidebarGroupEls.forEach((g) => {
+    // persist=false: only user clicks may be remembered. Persisting the
+    // auto-open would let everyday navigation accumulate all 5 groups as
+    // saved-open and quietly bring back the flat 23-item menu.
+    if (g.dataset.group === key && !g.classList.contains('open')) setSidebarGroupOpen(g, true, false)
+  })
+}
+
+{
+  const openKeys = loadSidebarGroupState()
+  sidebarGroupEls.forEach((g) => setSidebarGroupOpen(g, openKeys.includes(g.dataset.group), false))
+}
+sidebarGroupEls.forEach((g) => {
+  const btn = g.querySelector('.sb-group-header')
+  if (btn) btn.addEventListener('click', () => setSidebarGroupOpen(g, !g.classList.contains('open')))
+})
+
+
+// ============================================================
+// === i18n nav + static element rendering ===
+// ============================================================
+
+// Map: data-page value -> nav i18n key.
+const NAV_I18N = {
+  overview: 'nav.overview', kanban: 'nav.kanban', archived: 'nav.archived',
+  agents: 'nav.agents', activity: 'nav.activity', team: 'nav.team',
+  messages: 'nav.messages', tasks: 'nav.tasks', memories: 'nav.memories',
+  recall: 'nav.recall', naplo: 'nav.recall', bgTasks: 'nav.bgTasks',
+  skills: 'nav.skills', connectors: 'nav.connectors', migrate: 'nav.migrate',
+  approvals: 'nav.approvals',
+  docs: 'nav.docs', research: 'nav.research', status: 'nav.status',
+  settings: 'nav.settings', vault: 'nav.vault', tokenUsage: 'nav.tokenUsage',
+  ideas: 'nav.ideas', federation: 'nav.federation', updates: 'nav.updates', costs: 'nav.costs',
+}
+
+function renderNav() {
+  document.querySelectorAll('.sb-link[data-page] .sb-label').forEach((span) => {
+    const page = span.closest('[data-page]')?.dataset?.page
+    if (page && NAV_I18N[page]) span.textContent = t(NAV_I18N[page])
+  })
+}
+
+// Map: element ID -> i18n key, for static HTML elements not handled by page render fns.
+const STATIC_I18N_MAP = {
+  // Kanban column headers
+  'countPlanned':   null,  // dynamic count, skip
+  // Overview
+  'overviewTeamMeta': 'overview.card.team_meta',
+  // Docs
+  'docsContent': null,  // rendered by JS
+}
+
+// Simpler approach: update known static text nodes directly by selector.
+// Page id -> { title key, subtitle key (or null) }
+const PAGE_HEADER_I18N = {
+  agentsPage:     { title: 'agents.page_title',     sub: 'agents.page_subtitle' },
+  activityPage:   { title: 'activity.page_title',   sub: 'activity.page_subtitle' },
+  tasksPage:      { title: 'tasks.page_title',       sub: 'tasks.page_subtitle' },
+  skillsPage:     { title: 'skills.page_title',      sub: 'skills.page_subtitle' },
+  memoriesPage:   { title: 'memories.page_title',    sub: 'memories.page_subtitle' },
+  recallPage:     { title: 'recall.page_title',      sub: 'recall.page_subtitle' },
+  bgTasksPage:    { title: 'bgTasks.page_title',     sub: 'bgTasks.page_subtitle' },
+  connectorsPage: { title: 'connectors.page_title',  sub: 'connectors.page_subtitle' },
+  migratePage:    { title: 'migrate.page_title',     sub: 'migrate.page_subtitle' },
+  docsPage:       { title: 'docs.page_title',        sub: 'docs.page_subtitle' },
+  researchPage:   { title: 'research.page_title',    sub: 'research.page_subtitle' },
+  statusPage:     { title: 'status.page_title',      sub: 'status.page_subtitle' },
+  teamPage:       { title: 'team.page_title',        sub: 'team.page_subtitle' },
+  messagesPage:   { title: 'messages.page_title',    sub: 'messages.page_subtitle' },
+  settingsPage:   { title: 'settings.page_title',    sub: 'settings.page_subtitle' },
+  ideasPage:      { title: 'ideas.page_title',       sub: 'ideas.page_subtitle' },
+  vaultPage:      { title: 'vault.page_title',       sub: 'vault.page_subtitle' },
+  tokenUsagePage: { title: 'tokenUsage.page_title',  sub: 'tokenUsage.page_subtitle' },
+  updatesPage:    { title: 'updates.page_title',     sub: null },
+  naploPage:      { title: 'naplo.page_title',       sub: 'naplo.page_subtitle' },
+  costsPage:      { title: 'costs.page_title',       sub: 'costs.page_subtitle' },
+  federationPage: { title: 'federation.page_title',  sub: 'federation.page_subtitle' },
+  approvalsPage:  { title: 'approvals.page_title',   sub: 'approvals.page_subtitle' },
+}
+
+function renderStaticI18n() {
+  // Page headers + subtitles
+  for (const [pageId, keys] of Object.entries(PAGE_HEADER_I18N)) {
+    const pageEl = document.getElementById(pageId)
+    if (!pageEl) continue
+    const h1 = pageEl.querySelector('.page-header h1')
+    if (h1 && keys.title) h1.textContent = t(keys.title)
+    const sub = pageEl.querySelector('.page-header .subtitle')
+    if (sub && keys.sub) sub.textContent = t(keys.sub)
+  }
+  // Kanban column titles
+  const colTitles = document.querySelectorAll('.kanban-col-title')
+  const statusKeys = ['kanban.col.planned', 'kanban.col.in_progress', 'kanban.col.waiting', 'kanban.col.testing', 'kanban.col.done']
+  const statuses = ['planned', 'in_progress', 'waiting', 'testing', 'done']
+  colTitles.forEach((el) => {
+    const status = el.closest('[data-status]')?.dataset?.status
+    if (status) {
+      const idx = statuses.indexOf(status)
+      if (idx !== -1) el.textContent = t(statusKeys[idx])
+    }
+  })
+  // Docs hints
+  const docsHint = document.getElementById('docsContent')
+  if (docsHint && docsHint.querySelector('p.muted')) {
+    docsHint.querySelector('p.muted').textContent = t('docs.select_hint')
+  }
+  // Messages empty state
+  const chatEmpty = document.querySelector('.chat-thread-empty p')
+  if (chatEmpty) chatEmpty.textContent = t('messages.select_agent')
+  // Team hint
+  const teamHint = document.querySelector('#teamPage > p')
+  if (teamHint) teamHint.textContent = t('team.hint')
+
+  // Overview stat labels (siblings of statAgents, statTasks, statMemories, statSkills)
+  const statLabelKeys = ['overview.stat.agents', 'overview.stat.tasks', 'overview.stat.memories', 'overview.stat.skills']
+  const statValueIds = ['statAgents', 'statTasks', 'statMemories', 'statSkills']
+  statValueIds.forEach((id, i) => {
+    const valEl = document.getElementById(id)
+    if (valEl) {
+      const labelEl = valEl.parentElement?.querySelector('.overview-stat-label')
+      if (labelEl) labelEl.textContent = t(statLabelKeys[i])
+    }
+  })
+
+  // Overview card headers
+  const overviewTeamH3 = document.querySelector('#overviewPage .overview-grid .overview-card:nth-child(1) h3')
+  if (overviewTeamH3) overviewTeamH3.textContent = t('overview.card.team')
+  const overviewTeamMeta = document.getElementById('overviewTeamMeta')
+  if (overviewTeamMeta) overviewTeamMeta.textContent = t('overview.meta.live')
+  const overviewActivityH3 = document.querySelector('#overviewPage .overview-grid .overview-card:nth-child(2) h3')
+  if (overviewActivityH3) overviewActivityH3.textContent = t('overview.card.activity')
+  // Kanban filter labels
+  const kanbanProjectLabel = document.querySelector('label[for="kanbanProjectFilter"]')
+  if (kanbanProjectLabel) kanbanProjectLabel.textContent = t('kanban.filter.project_label')
+  const kanbanGroupLabel = document.querySelector('label[for="kanbanGroupBy"]')
+  if (kanbanGroupLabel) kanbanGroupLabel.textContent = t('kanban.filter.group_label')
+
+  // Kanban project filter "Mind" option (first option)
+  const kanbanProjectFilter = document.getElementById('kanbanProjectFilter')
+  if (kanbanProjectFilter?.options[0]) kanbanProjectFilter.options[0].text = t('kanban.filter.all_projects')
+
+  // Kanban group-by options
+  const kanbanGroupBy = document.getElementById('kanbanGroupBy')
+  if (kanbanGroupBy) {
+    const opts = kanbanGroupBy.options
+    if (opts[0]) opts[0].text = t('kanban.filter.group_none')
+    if (opts[1]) opts[1].text = t('kanban.filter.group_assignee')
+    if (opts[2]) opts[2].text = t('kanban.filter.group_priority')
+  }
+
+  // Generic data-i18n sweep for static HTML elements
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const val = t(el.dataset.i18n)
+    if (el.children.length === 0) {
+      el.textContent = val
+    } else {
+      const nodes = [...el.childNodes]
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        if (nodes[i].nodeType === 3 && nodes[i].textContent.trim()) {
+          nodes[i].textContent = ' ' + val
+          break
+        }
+      }
+    }
+  })
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+    el.placeholder = t(el.dataset.i18nPlaceholder)
+  })
+  document.querySelectorAll('[data-i18n-title]').forEach(el => {
+    el.title = t(el.dataset.i18nTitle)
+  })
+  document.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
+    el.setAttribute('aria-label', t(el.dataset.i18nAriaLabel))
+  })
+  // Elements whose translation contains inline markup (strong/code/a): set innerHTML.
+  document.querySelectorAll('[data-i18n-html]').forEach(el => {
+    el.innerHTML = t(el.dataset.i18nHtml)
+  })
+}
+
+// Initial render on page load.
+document.addEventListener('DOMContentLoaded', () => {
+  renderNav()
+  renderStaticI18n()
+}, { once: true })
+// Fallback if DOMContentLoaded already fired (scripts deferred).
+if (document.readyState !== 'loading') {
+  renderNav()
+  renderStaticI18n()
+}
+
+// ============================================================
+// === Activity (live agent status) ===
+// ============================================================
+
+let activityTimer = null
+
+const ACTIVITY_STATE_META = {
+  working: { label: () => t('activity.state.working'), cls: 'act-working', tip: 'Élő állapot (a tmux pane tartalmából, 3 másodpercenként): éppen dolgozik / gondolkodik.' },
+  idle: { label: () => t('activity.state.idle'), cls: 'act-idle', tip: 'Élő állapot (3 másodpercenként): fut, de épp nem csinál semmit.' },
+  unknown: { label: () => t('activity.state.unknown'), cls: 'act-unknown', tip: 'Élő állapot: nem sikerült megállapítani a session pane tartalmából.' },
+  error: { label: () => t('activity.state.error'), cls: 'act-error', tip: 'Élő állapot: hiba látszik az ágens session paneljén.' },
+  stopped: { label: () => t('activity.state.stopped'), cls: 'act-stopped', tip: 'Élő állapot: az ágens session nem fut.' },
+}
+
+// === Kanban auto-refresh ===
+let kanbanRefreshTimer = null
+
+function startKanbanRefresh() {
+  if (kanbanRefreshTimer) clearInterval(kanbanRefreshTimer)
+  kanbanRefreshTimer = setInterval(loadKanban, 30000)
+}
+
+function stopKanbanRefresh() {
+  if (kanbanRefreshTimer) {
+    clearInterval(kanbanRefreshTimer)
+    kanbanRefreshTimer = null
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopKanbanRefresh()
+  } else if (!document.getElementById('kanbanPage').hidden) {
+    loadKanban()
+    startKanbanRefresh()
+  }
+})
+
+function startActivityPoll() {
+  loadActivity()
+  if (activityTimer) clearInterval(activityTimer)
+  activityTimer = setInterval(loadActivity, 3000)
+}
+
+function stopActivityPoll() {
+  if (activityTimer) {
+    clearInterval(activityTimer)
+    activityTimer = null
+  }
+}
+
+async function loadActivity() {
+  try {
+    const res = await fetch('/api/agents/activity')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const entries = await res.json()
+    renderActivity(entries)
+    const upd = document.getElementById('activityUpdated')
+    if (upd) upd.textContent = t('activity.updated', { time: new Date().toLocaleTimeString('hu-HU') })
+  } catch (e) {
+    const list = document.getElementById('activityList')
+    if (list) list.innerHTML = '<p class="activity-empty">' + t('activity.error_load') + ': ' + escapeHtml(String(e.message || e)) + '</p>'
+  }
+}
+
+function renderActivity(entries) {
+  const list = document.getElementById('activityList')
+  if (!list) return
+  if (!Array.isArray(entries) || entries.length === 0) {
+    list.innerHTML = '<p class="activity-empty">' + t('activity.empty') + '</p>'
+    return
+  }
+  list.innerHTML = entries.map((a) => {
+    const metaRaw = ACTIVITY_STATE_META[a.state] || ACTIVITY_STATE_META.unknown
+    const meta = { ...metaRaw, label: typeof metaRaw.label === 'function' ? metaRaw.label() : metaRaw.label }
+    const tail = (a.tail || []).map((l) => escapeHtml(l)).join('\n')
+    const mainBadge = a.isMain ? '<span class="act-main-badge">' + t('activity.badge.main') + '</span>' : ''
+    // Permission-mode chip. Shown for every mode EXCEPT the ones that let the
+    // agent work on its own -- inverted on purpose: an unfamiliar mode is
+    // exactly the one worth surfacing, so a future Claude Code mode shows up
+    // here instead of hiding behind a list nobody remembered to extend.
+    // Without this an agent parked in an ask-first mode renders as plain
+    // 'idle', which is how one sat unusable for hours on 2026-07-27.
+    const AUTONOMOUS_MODES = ['bypass permissions', 'accept edits', 'auto mode']
+    const modeChip = a.mode && !AUTONOMOUS_MODES.includes(a.mode)
+      ? '<span class="act-mode-badge" title="' + escapeHtml(t('activity.tooltip.mode', { mode: a.mode })) + '">' + escapeHtml(a.mode) + '</span>'
+      : ''
+    const canOpen = !!a.running
+    const termIcon = canOpen
+      ? '<svg class="act-term-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" title="' + t('activity.tooltip.terminal') + '"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>'
+      : ''
+    return (
+      '<div class="activity-card ' + meta.cls + (canOpen ? ' act-clickable' : '') + '" data-agent="' + escapeHtml(a.name) + '">' +
+        '<div class="activity-card-head">' +
+          '<span class="activity-name">' + escapeHtml(a.name) + mainBadge + '</span>' +
+          '<span style="display:flex;align-items:center;gap:8px">' +
+            modeChip +
+            termIcon +
+            '<span class="activity-badge ' + meta.cls + '" title="' + escapeHtml(meta.tip || '') + '">' + meta.label + '</span>' +
+          '</span>' +
+        '</div>' +
+        (tail
+          ? '<pre class="activity-tail">' + tail + '</pre>'
+          : '<p class="activity-tail-empty">' + (a.running ? 'nincs friss kimenet' : 'a session nem fut') + '</p>') +
+      '</div>'
+    )
+  }).join('')
+}
+
+// Event delegation: clicking a running activity-card opens the terminal modal
+;(() => {
+  const actList = document.getElementById('activityList')
+  if (actList) {
+    actList.addEventListener('click', (e) => {
+      const card = e.target.closest('.activity-card.act-clickable[data-agent]')
+      if (card) openTerminalModal(card.dataset.agent)
+    })
+  }
+})()
+
+
+// ============================================================
+// === Kanban ===
+// ============================================================
+
+let kanbanCards = []
+let kanbanAssignees = []
+let kanbanProjects = []
+// Label registry (id/name/color), independent of which cards currently carry
+// which labels -- card.labels (embedded by GET /api/kanban) holds that link.
+let kanbanAllLabels = []
+// Active label-filter ids -- the quick-filter chip row AND the per-card
+// footer label pills both toggle this same set (two entry points, one
+// filter dimension). OR-combined within itself (any active label matches),
+// AND-combined with the existing project/assignee filters. Persisted in
+// localStorage alongside the swimlane groupBy choice.
+let kanbanLabelFilter = new Set()
+let kanbanProjectFilter = ''
+// Assignee filter for the kanban board. '' = show all. Set via the
+// assignee dropdown / "Csak Gábor" toggle injected by setupAssigneeFilter().
+// Matched case-insensitively against card.assignee so a casing mismatch
+// (e.g. card "gorcsevivan" vs list "GorcsevIvan") still filters correctly.
+let kanbanAssigneeFilter = ''
+// Swimlane grouping: 'none' (flat board, default) | 'assignee' | 'priority'.
+// The initial value is pulled from window._wraith.kanbanSwimlanes.defaultGroup
+// the first time loadKanban() runs (see kanbanGroupByInitialized below), then
+// fully user-controlled via the toolbar dropdown.
+let kanbanGroupBy = 'none'
+let kanbanGroupByInitialized = false
+// Which swimlane keys (assignee name or priority value) are collapsed. Lives
+// for the page session only -- intentionally not persisted across reloads.
+const kanbanCollapsedLanes = new Set()
+// Set of status column keys that are hidden from the board view.
+// Empty = all columns visible. Persisted in localStorage.
+let kanbanHiddenColumns = new Set()
+
+const cardModalOverlay = document.getElementById('cardModalOverlay')
+const cardDetailOverlay = document.getElementById('cardDetailOverlay')
+const breakdownOverlay = document.getElementById('breakdownOverlay')
+let breakdownCardId = null
+let breakdownSubtasks = []
+// Breakdown modal is shared between kanban-card breakdown and idea promote.
+let breakdownMode = 'kanban' // 'kanban' | 'idea'
+let breakdownIdeaId = null
+const columns = document.querySelectorAll('.kanban-col-body')
+
+// Modal wiring
+document.getElementById('cardModalClose').addEventListener('click', () => closeModal(cardModalOverlay))
+document.getElementById('cardDetailClose').addEventListener('click', () => closeModal(cardDetailOverlay))
+cardModalOverlay.addEventListener('click', (e) => { if (e.target === cardModalOverlay) closeModal(cardModalOverlay) })
+cardDetailOverlay.addEventListener('click', (e) => { if (e.target === cardDetailOverlay) closeModal(cardDetailOverlay) })
+
+// Add card buttons per column
+document.querySelectorAll('.kanban-add-btn').forEach((btn) => {
+  btn.addEventListener('click', () => openNewCardModal(btn.dataset.status))
+})
+
+async function loadKanban() {
+  try {
+    // Always refresh the wraith config so values changed on the Settings page
+    // (e.g. WIP limits) show up on the board on the next Kanban open, without a
+    // hard reload. The full /api/wraith payload includes kanbanAging, kanbanWip,
+    // kanbanSwimlanes and kanbanLabels, so the labels (from the labels feature)
+    // stay populated too. Also covers opening the Kanban page first, before the
+    // Agents page populated window._wraith.
+    try {
+      const mr = await fetch('/api/wraith')
+      if (mr.ok) window._wraith = { ...(window._wraith || {}), ...(await mr.json()) }
+    } catch { /* ignore -- aging/WIP/swimlanes/labels just won't render until _wraith loads */ }
+    if (!kanbanGroupByInitialized) {
+      kanbanGroupByInitialized = true
+      // A user's own past choice (saved to localStorage) wins over the
+      // server-configured default, so switching the grouping sticks across
+      // page reloads instead of resetting every time.
+      const stored = localStorage.getItem('wraith.kanbanGroupBy')
+      const defaultGroup = window._wraith?.kanbanSwimlanes?.defaultGroup
+      const initialGroup = (stored === 'assignee' || stored === 'priority' || stored === 'none')
+        ? stored
+        : (defaultGroup === 'assignee' || defaultGroup === 'priority' ? defaultGroup : 'none')
+      if (initialGroup !== 'none') {
+        kanbanGroupBy = initialGroup
+        const sel = document.getElementById('kanbanGroupBy')
+        if (sel) sel.value = initialGroup
+      }
+      // Active label-filter selection, restored the same way as the groupBy
+      // choice -- a fresh page load should not lose the filters set up.
+      try {
+        const storedLabels = JSON.parse(localStorage.getItem('wraith.kanbanLabelFilter') || '[]')
+        if (Array.isArray(storedLabels)) kanbanLabelFilter = new Set(storedLabels)
+      } catch { /* ignore malformed storage */ }
+      try {
+        const storedHiddenCols = JSON.parse(localStorage.getItem('wraith.kanbanHiddenColumns') || '[]')
+        if (Array.isArray(storedHiddenCols)) kanbanHiddenColumns = new Set(storedHiddenCols)
+      } catch { /* ignore malformed storage */ }
+    }
+    const [cardsRes, assigneesRes, projectsRes, labelsRes] = await Promise.all([
+      fetch('/api/kanban'),
+      fetch('/api/kanban/assignees'),
+      fetch('/api/kanban-projects'),
+      fetch('/api/kanban/labels'),
+    ])
+    kanbanCards = await cardsRes.json()
+    kanbanAssignees = await assigneesRes.json()
+    kanbanProjects = await projectsRes.json()
+    kanbanAllLabels = await labelsRes.json()
+    populateProjectFilter()
+    populateProjectSuggestions()
+    setupAssigneeFilter()
+    renderKanban()
+  } catch (err) {
+    console.error('Kanban betöltés hiba:', err)
+  }
+}
+
+document.getElementById('kanbanGroupBy').addEventListener('change', (e) => {
+  kanbanGroupBy = e.target.value
+  localStorage.setItem('wraith.kanbanGroupBy', kanbanGroupBy)
+  renderKanban()
+})
+
+function populateProjectFilter() {
+  const sel = document.getElementById('kanbanProjectFilter')
+  const prev = sel.value
+  sel.innerHTML = '<option value="">Mind</option>'
+  for (const p of kanbanProjects) {
+    const opt = document.createElement('option')
+    opt.value = p
+    opt.textContent = p
+    if (p === prev) opt.selected = true
+    sel.appendChild(opt)
+  }
+  if (prev && !kanbanProjects.includes(prev)) kanbanProjectFilter = ''
+}
+
+function renderKanbanColumnChips() {
+  const container = document.getElementById('kanbanColumnChips')
+  if (!container) return
+  container.innerHTML = ''
+  for (const def of KANBAN_STATUS_DEFS) {
+    const hidden = kanbanHiddenColumns.has(def.status)
+    const label = typeof def.title === 'function' ? def.title() : def.title
+    const chip = document.createElement('span')
+    chip.className = 'kanban-col-chip' + (hidden ? ' hidden' : '')
+    chip.title = hidden ? t('kanban.filter.column_show') : t('kanban.filter.column_hide')
+    chip.textContent = label
+    chip.addEventListener('click', () => {
+      if (kanbanHiddenColumns.has(def.status)) kanbanHiddenColumns.delete(def.status)
+      else kanbanHiddenColumns.add(def.status)
+      localStorage.setItem('wraith.kanbanHiddenColumns', JSON.stringify([...kanbanHiddenColumns]))
+      renderKanban()
+    })
+    container.appendChild(chip)
+  }
+}
+
+function populateProjectSuggestions() {
+  const dl = document.getElementById('projectSuggestions')
+  if (!dl) return
+  dl.innerHTML = ''
+  for (const p of kanbanProjects) {
+    const opt = document.createElement('option')
+    opt.value = p
+    dl.appendChild(opt)
+  }
+}
+
+document.getElementById('kanbanProjectFilter').addEventListener('change', (e) => {
+  kanbanProjectFilter = e.target.value
+  renderKanban()
+})
+
+// The kanban "owner" is the assignee whose type is 'owner' -- the person the
+// board is primarily run for, on any deployment. Identified by type, never by
+// a hard-coded display name, so the quick "show what's on me" view is generic.
+// Returns null when no owner-type assignee exists (then the quick button is
+// hidden and only the general per-assignee dropdown is shown).
+function ownerAssigneeName() {
+  const owner = kanbanAssignees.find((a) => a.type === 'owner')
+  return owner ? owner.name : null
+}
+
+// Reflect the active state of the owner quick-toggle button (hidden when there
+// is no owner-type assignee).
+function syncOwnerFilterBtn() {
+  const btn = document.getElementById('kanbanOwnerBtn')
+  if (!btn) return
+  const owner = ownerAssigneeName()
+  if (!owner) { btn.style.display = 'none'; return }
+  btn.style.display = ''
+  const on = !!kanbanAssigneeFilter && kanbanAssigneeFilter.toLowerCase() === owner.toLowerCase()
+  btn.style.background = on ? 'var(--accent)' : 'var(--bg)'
+  btn.style.color = on ? '#081a2d' : 'var(--fg)'
+  btn.setAttribute('aria-pressed', on ? 'true' : 'false')
+}
+
+// Inject the assignee filter (per-assignee dropdown + an owner "Rám vár" quick
+// toggle) into the kanban toolbar. Built in JS rather than as static markup so
+// the toolbar stays self-contained. Idempotent: the controls are created once;
+// later calls only refresh the <option>s from the current assignee list.
+function setupAssigneeFilter() {
+  const projectSel = document.getElementById('kanbanProjectFilter')
+  if (!projectSel) return
+  const toolbar = projectSel.parentElement
+  let sel = document.getElementById('kanbanAssigneeFilter')
+  if (!sel) {
+    const label = document.createElement('label')
+    label.setAttribute('for', 'kanbanAssigneeFilter')
+    label.textContent = t('kanban.filter.assignee_label')
+    label.style.cssText = 'font-size:13px;color:var(--muted);white-space:nowrap;margin-left:8px;'
+
+    sel = document.createElement('select')
+    sel.id = 'kanbanAssigneeFilter'
+    sel.style.cssText = 'font-size:13px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg);min-width:140px;'
+    sel.addEventListener('change', (e) => {
+      kanbanAssigneeFilter = e.target.value
+      syncOwnerFilterBtn()
+      renderKanban()
+    })
+
+    const ownerBtn = document.createElement('button')
+    ownerBtn.id = 'kanbanOwnerBtn'
+    ownerBtn.type = 'button'
+    ownerBtn.textContent = t('kanban.filter.owner_btn')
+    ownerBtn.title = t('kanban.owner_filter')
+    ownerBtn.style.cssText = 'font-size:13px;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg);cursor:pointer;'
+    ownerBtn.addEventListener('click', () => {
+      const owner = ownerAssigneeName()
+      if (!owner) return
+      const on = kanbanAssigneeFilter.toLowerCase() === owner.toLowerCase()
+      kanbanAssigneeFilter = on ? '' : owner
+      // Keep the dropdown in sync (only selectable if the owner is a known assignee).
+      sel.value = kanbanAssignees.some((a) => a.name === kanbanAssigneeFilter) ? kanbanAssigneeFilter : ''
+      syncOwnerFilterBtn()
+      renderKanban()
+    })
+
+    toolbar.appendChild(label)
+    toolbar.appendChild(sel)
+    toolbar.appendChild(ownerBtn)
+  }
+
+  // (Re)populate options from the current assignee list, preserving selection.
+  const prev = kanbanAssigneeFilter
+  sel.innerHTML = '<option value="">Mind</option>'
+  for (const a of kanbanAssignees) {
+    const opt = document.createElement('option')
+    opt.value = a.name
+    // Show the persona displayName (id as fallback), matching #216; the
+    // option value / filter key stays the agent id.
+    opt.textContent = a.displayName || a.name
+    if (a.name === prev) opt.selected = true
+    sel.appendChild(opt)
+  }
+  // syncOwnerFilterBtn shows/hides the owner quick-button based on whether an
+  // owner-type assignee exists in the freshly loaded list.
+  syncOwnerFilterBtn()
+}
+
+// Project + assignee + label filters, independent of the priority quick-filter
+// Project + assignee filters only -- the baseline the label quick-filter
+// chip counts are computed against, independent of which labels are
+// currently active, so a chip's count stays meaningful whether it's the one
+// being toggled or not.
+function kanbanCardMatchesBaseFilters(card) {
+  if (kanbanProjectFilter && (card.project || '') !== kanbanProjectFilter) return false
+  const assigneeFilter = kanbanAssigneeFilter.toLowerCase()
+  if (assigneeFilter && String(card.assignee || '').trim().toLowerCase() !== assigneeFilter) return false
+  return true
+}
+
+// The label-filter dimension itself: a card matches when no label filter is
+// active, or when it carries at least one of the active labels (OR within
+// the dimension).
+function kanbanCardMatchesLabelFilter(card) {
+  if (kanbanLabelFilter.size === 0) return true
+  const cardLabelIds = (card.labels || []).map((l) => l.id)
+  return cardLabelIds.some((id) => kanbanLabelFilter.has(id))
+}
+
+// Shared by both the header quick-filter chips and the per-card footer label
+// pills -- one filter dimension, two entry points into the same toggle.
+function toggleKanbanLabelFilter(labelId) {
+  if (kanbanLabelFilter.has(labelId)) kanbanLabelFilter.delete(labelId)
+  else kanbanLabelFilter.add(labelId)
+  persistKanbanFilters()
+  renderKanban()
+}
+
+function clearKanbanQuickFilters() {
+  kanbanLabelFilter.clear()
+  persistKanbanFilters()
+  renderKanban()
+}
+
+function persistKanbanFilters() {
+  localStorage.setItem('wraith.kanbanLabelFilter', JSON.stringify([...kanbanLabelFilter]))
+}
+
+// Quick-filter chip row: one chip per defined label (not per priority), tinted
+// with that label's own colour. Clicking toggles the same kanbanLabelFilter
+// set the footer pills use.
+function renderKanbanQuickFilters() {
+  const row = document.getElementById('kanbanQuickFilters')
+  if (!row) return
+  row.innerHTML = ''
+  for (const label of kanbanAllLabels) {
+    const count = kanbanCards.filter((c) =>
+      kanbanCardMatchesBaseFilters(c) && (c.labels || []).some((l) => l.id === label.id)
+    ).length
+    const active = kanbanLabelFilter.has(label.id)
+    const chip = document.createElement('span')
+    chip.className = 'kanban-quick-filter-chip' + (active ? ' active' : '')
+    chip.dataset.labelId = label.id
+    chip.style.setProperty('--chip-color', label.color)
+    chip.innerHTML = `#${escapeHtml(label.name)} <span class="kanban-quick-filter-count">${count}</span>${active ? '<span class="kanban-quick-filter-clear">&times;</span>' : ''}`
+    chip.addEventListener('click', () => toggleKanbanLabelFilter(label.id))
+    row.appendChild(chip)
+  }
+  if (kanbanLabelFilter.size > 0) {
+    const clearAll = document.createElement('button')
+    clearAll.className = 'kanban-quick-filter-clear-all'
+    clearAll.textContent = t('kanban.filter.clear')
+    clearAll.addEventListener('click', clearKanbanQuickFilters)
+    row.appendChild(clearAll)
+  }
+}
+
+function renderKanban() {
+  const cardById = new Map(kanbanCards.map(c => [c.id, c]))
+
+  renderKanbanColumnChips()
+  renderKanbanQuickFilters()
+
+  // Determine which top-level cards are visible under current filters.
+  const visibleCardIds = new Set()
+  for (const card of kanbanCards) {
+    if (!kanbanCardMatchesBaseFilters(card)) continue
+    if (!kanbanCardMatchesLabelFilter(card)) continue
+    visibleCardIds.add(card.id)
+  }
+
+  // A subtask is "embedded" when its parent is visible AND both share the same
+  // column. Embedded subtasks are hidden as standalone cards and rendered
+  // inside the parent card instead. Filter state of the subtask itself is
+  // intentionally ignored so it always shows under its visible parent.
+  const embeddedSubtaskIds = new Set()
+  for (const card of kanbanCards) {
+    if (!card.parent_id) continue
+    const parent = cardById.get(card.parent_id)
+    if (!parent || !visibleCardIds.has(parent.id)) continue
+    if (parent.status === card.status) embeddedSubtaskIds.add(card.id)
+  }
+
+  const grouped = { planned: [], in_progress: [], waiting: [], testing: [], done: [] }
+  for (const card of kanbanCards) {
+    if (embeddedSubtaskIds.has(card.id)) continue
+    if (!visibleCardIds.has(card.id)) continue
+    if (grouped[card.status]) grouped[card.status].push(card)
+  }
+
+  // Update counts (embedded subtasks don't count as separate cards)
+  document.getElementById('countPlanned').textContent = grouped.planned.length
+  document.getElementById('countInProgress').textContent = grouped.in_progress.length
+  document.getElementById('countTesting').textContent = grouped.testing.length
+  document.getElementById('countWaiting').textContent = grouped.waiting.length
+  document.getElementById('countDone').textContent = grouped.done.length
+
+  const flatBoard = document.getElementById('kanbanBoard')
+  const swimlaneBoard = document.getElementById('kanbanSwimlaneBoard')
+
+  if (kanbanGroupBy === 'none') {
+    swimlaneBoard.hidden = true
+    flatBoard.hidden = false
+    for (const [status, cards] of Object.entries(grouped)) {
+      const col = document.querySelector(`#kanbanBoard .kanban-col-body[data-status="${status}"]`)
+      col.innerHTML = ''
+      cards.sort((a, b) => a.sort_order - b.sort_order)
+
+      for (const card of cards) {
+        const embeddedChildren = kanbanCards
+          .filter(c => c.parent_id === card.id && embeddedSubtaskIds.has(c.id))
+          .sort((a, b) => a.sort_order - b.sort_order)
+        col.appendChild(createCardEl(card, embeddedChildren))
+      }
+    }
+    // Hide/show flat-board columns based on visibility set
+    const allColsHidden = KANBAN_STATUS_DEFS.every(d => kanbanHiddenColumns.has(d.status))
+    for (const def of KANBAN_STATUS_DEFS) {
+      const colEl = flatBoard.querySelector(`.kanban-col[data-status="${def.status}"]`)
+      if (colEl) colEl.hidden = kanbanHiddenColumns.has(def.status)
+    }
+    // "All columns hidden" hint
+    let allHiddenMsg = document.getElementById('kanbanAllHiddenMsg')
+    if (allColsHidden) {
+      if (!allHiddenMsg) {
+        allHiddenMsg = document.createElement('p')
+        allHiddenMsg.id = 'kanbanAllHiddenMsg'
+        allHiddenMsg.style.cssText = 'color:var(--muted);font-size:13px;padding:24px 0;text-align:center;width:100%;'
+        flatBoard.appendChild(allHiddenMsg)
+      }
+      allHiddenMsg.textContent = t('kanban.filter.all_cols_hidden')
+    } else {
+      allHiddenMsg?.remove()
+    }
+    // Badge: only count subtasks that are in a different column (not embedded here)
+    updateSubtaskBadges(embeddedSubtaskIds)
+    // WIP limit badges (count/limit + colour) on the flat board too -- previously
+    // only the swimlane view updated these, so a configured limit never showed
+    // on the default flat board.
+    updateWipBadges(grouped)
+  } else {
+    flatBoard.hidden = true
+    swimlaneBoard.hidden = false
+    renderSwimlaneBoard(grouped, embeddedSubtaskIds)
+  }
+}
+
+const KANBAN_STATUS_DEFS = [
+  { status: 'planned', title: () => t('kanban.col.planned') },
+  { status: 'in_progress', title: () => t('kanban.col.in_progress') },
+  { status: 'waiting', title: () => t('kanban.col.waiting') },
+  { status: 'testing', title: () => t('kanban.col.testing') },
+  { status: 'done', title: () => t('kanban.col.done') },
+]
+const KANBAN_PRIORITY_LABELS = { urgent: () => t('kanban.priority.urgent'), high: () => t('kanban.priority.high'), normal: () => t('kanban.priority.normal'), low: () => t('kanban.priority.low') }
+const KANBAN_PRIORITY_ORDER = ['urgent', 'high', 'normal', 'low']
+
+// Which swimlane a card belongs to under the current grouping. Returns a
+// stable string key: the matched assignee's canonical name, '__unassigned__'
+// for cards with no/unmatched assignee, or the priority value.
+function kanbanSwimlaneKeyFor(card) {
+  if (kanbanGroupBy === 'priority') return card.priority || 'normal'
+  const raw = card.assignee ? String(card.assignee).trim() : ''
+  if (!raw) return '__unassigned__'
+  const match = kanbanAssignees.find(a => a.name.toLowerCase() === raw.toLowerCase())
+  return match ? match.name : raw
+}
+
+// Display metadata (label + avatar styling) for a swimlane key.
+function kanbanSwimlaneMeta(key) {
+  if (kanbanGroupBy === 'priority') {
+    const _rawPL = KANBAN_PRIORITY_LABELS[key]; const label = _rawPL ? (typeof _rawPL === 'function' ? _rawPL() : _rawPL) : key
+    return { label, avatarClass: `priority-${key}`, avatarChar: '' }
+  }
+  if (key === '__unassigned__') return { label: t('kanban.unassigned'), avatarClass: 'unknown', avatarChar: '?' }
+  const match = kanbanAssignees.find(a => a.name === key)
+  const label = match ? (match.displayName || match.name) : key
+  return { label, avatarClass: match ? match.type : 'unknown', avatarChar: (label[0] || '?').toUpperCase() }
+}
+
+function renderSwimlaneBoard(grouped, embeddedSubtaskIds) {
+  const board = document.getElementById('kanbanSwimlaneBoard')
+  board.innerHTML = ''
+
+  const presentKeys = new Set()
+  for (const cards of Object.values(grouped)) {
+    for (const c of cards) presentKeys.add(kanbanSwimlaneKeyFor(c))
+  }
+
+  const canonicalOrder = kanbanGroupBy === 'priority'
+    ? KANBAN_PRIORITY_ORDER
+    : [...kanbanAssignees.map(a => a.name), '__unassigned__']
+  const orderedKeys = canonicalOrder.filter(k => presentKeys.has(k))
+  const leftoverKeys = [...presentKeys].filter(k => !orderedKeys.includes(k)).sort((a, b) => a.localeCompare(b))
+  const keys = [...orderedKeys, ...leftoverKeys]
+
+  const separatorColor = window._wraith?.kanbanSwimlanes?.separatorColor
+
+  for (const key of keys) {
+    const meta = kanbanSwimlaneMeta(key)
+    const collapsed = kanbanCollapsedLanes.has(key)
+
+    const laneCardsByStatus = {}
+    let totalCount = 0
+    for (const def of KANBAN_STATUS_DEFS) {
+      const cards = grouped[def.status].filter(c => kanbanSwimlaneKeyFor(c) === key)
+      laneCardsByStatus[def.status] = cards
+      if (!kanbanHiddenColumns.has(def.status)) totalCount += cards.length
+    }
+
+    const lane = document.createElement('div')
+    lane.className = 'kanban-swimlane' + (collapsed ? ' collapsed' : '')
+    lane.dataset.group = key
+    if (separatorColor) lane.style.borderBottomColor = separatorColor
+
+    const header = document.createElement('div')
+    header.className = 'kanban-swimlane-header'
+    header.innerHTML = `
+      <span class="kanban-swimlane-avatar ${meta.avatarClass}">${escapeHtml(meta.avatarChar)}</span>
+      <span class="kanban-swimlane-name">${escapeHtml(meta.label)}</span>
+      <span class="kanban-swimlane-count">${totalCount}</span>
+      <button class="kanban-swimlane-toggle" type="button" aria-expanded="${!collapsed}" title="${collapsed ? t('kanban.swimlane.expand') : t('kanban.swimlane.collapse')}">${collapsed ? '▶' : '▼'}</button>
+    `
+    header.querySelector('.kanban-swimlane-toggle').addEventListener('click', (e) => {
+      e.stopPropagation()
+      if (kanbanCollapsedLanes.has(key)) kanbanCollapsedLanes.delete(key)
+      else kanbanCollapsedLanes.add(key)
+      renderKanban()
+    })
+    lane.appendChild(header)
+
+    const body = document.createElement('div')
+    body.className = 'kanban-swimlane-body'
+    for (const def of KANBAN_STATUS_DEFS) {
+      if (kanbanHiddenColumns.has(def.status)) continue
+      const col = document.createElement('div')
+      col.className = 'kanban-swimlane-col'
+
+      const colHeader = document.createElement('div')
+      colHeader.className = 'kanban-swimlane-col-header'
+      colHeader.textContent = typeof def.title === 'function' ? def.title() : def.title
+
+      const colBody = document.createElement('div')
+      colBody.className = 'kanban-col-body kanban-swimlane-col-body'
+      colBody.dataset.status = def.status
+
+      const cards = laneCardsByStatus[def.status].sort((a, b) => a.sort_order - b.sort_order)
+      for (const card of cards) {
+        const embeddedChildren = kanbanCards
+          .filter(c => c.parent_id === card.id && embeddedSubtaskIds.has(c.id))
+          .sort((a, b) => a.sort_order - b.sort_order)
+        colBody.appendChild(createCardEl(card, embeddedChildren))
+      }
+      wireKanbanColumnDnD(colBody)
+
+      col.appendChild(colHeader)
+      col.appendChild(colBody)
+      body.appendChild(col)
+    }
+    lane.appendChild(body)
+    board.appendChild(lane)
+  }
+
+  updateSubtaskBadges(embeddedSubtaskIds)
+
+  // WIP limit badges: update column-header count spans with "count/limit" when configured
+  updateWipBadges(grouped)
+}
+
+// Map column status keys to their count-span IDs
+const WIP_COUNT_IDS = {
+  planned: 'countPlanned',
+  in_progress: 'countInProgress',
+  testing: 'countTesting',
+  waiting: 'countWaiting',
+  done: 'countDone',
+}
+
+function updateWipBadges(grouped) {
+  const cfg = window._wraith?.kanbanWip
+  for (const [status, cards] of Object.entries(grouped)) {
+    const el = document.getElementById(WIP_COUNT_IDS[status])
+    if (!el) continue
+    const limit = cfg?.limits?.[status] || 0
+    if (!limit) {
+      // No limit configured: restore plain count and clear WIP styling
+      el.textContent = cards.length
+      delete el.dataset.wip
+      el.style.color = ''
+      el.style.borderColor = ''
+      continue
+    }
+    const count = cards.length
+    el.textContent = `${count}/${limit}`
+    let state, color
+    if (count > limit) {
+      state = 'over'; color = cfg.overColor
+    } else if (count === limit) {
+      state = 'full'; color = cfg.fullColor
+    } else if ((count / limit) * 100 >= cfg.warnPct) {
+      state = 'warn'; color = cfg.warnColor
+    } else {
+      state = 'ok'; color = cfg.okColor
+    }
+    el.dataset.wip = state
+    el.style.color = color
+    el.style.borderColor = color
+  }
+}
+
+function updateSubtaskBadges(embeddedSubtaskIds) {
+  for (const el of document.querySelectorAll('.kanban-card[data-id]')) {
+    const id = el.dataset.id
+    const badge = el.querySelector('.kanban-subtask-badge')
+    if (!badge) continue
+    const nonEmbedded = kanbanCards.filter(c => c.parent_id === id && !embeddedSubtaskIds.has(c.id))
+    if (nonEmbedded.length > 0) {
+      badge.textContent = `${nonEmbedded.length} subtask`
+      badge.style.display = ''
+      badge.onclick = (e) => {
+        e.stopPropagation()
+        const card = kanbanCards.find(c => c.id === id)
+        if (card) showCardDetail(card)
+      }
+    } else {
+      badge.style.display = 'none'
+    }
+  }
+}
+
+function createCardEl(card, embeddedChildren = []) {
+  const el = document.createElement('div')
+  el.className = 'kanban-card'
+  el.dataset.id = card.id
+  el.dataset.priority = card.priority
+  el.draggable = true
+
+  // Assignee chip. Match the card's assignee against the known list
+  // case-insensitively (a card stored as "gorcsevivan" must still match the
+  // list entry "GorcsevIvan"). When the assignee is set but not in the list
+  // at all, still render a fallback chip with the raw name + a neutral dot,
+  // so a card never silently loses its assignee chip on a name mismatch.
+  const rawAssignee = card.assignee ? String(card.assignee).trim() : ''
+  const assignee = rawAssignee
+    ? kanbanAssignees.find((a) => a.name.toLowerCase() === rawAssignee.toLowerCase())
+    : null
+  // Display the persona displayName (falling back to the id) per #216, while
+  // keeping the robust match above and the raw-name fallback chip below.
+  const assigneeLabel = assignee ? (assignee.displayName || assignee.name) : ''
+  const assigneeHtml = assignee
+    ? `<span class="kanban-card-assignee"><span class="assignee-dot ${assignee.type}">${escapeHtml(assigneeLabel[0])}</span>${escapeHtml(assigneeLabel)}</span>`
+    : rawAssignee
+      ? `<span class="kanban-card-assignee"><span class="assignee-dot unknown">${escapeHtml(rawAssignee[0])}</span>${escapeHtml(rawAssignee)}</span>`
+      : ''
+
+  let dueHtml = ''
+  if (card.due_date) {
+    const d = new Date(card.due_date * 1000)
+    const now = new Date()
+    const overdue = d < now && card.status !== 'done'
+    const label = d.toLocaleDateString('hu-HU', { month: 'short', day: 'numeric' })
+    dueHtml = `<span class="kanban-card-due ${overdue ? 'overdue' : ''}">${label}</span>`
+  }
+
+  const projectHtml = card.project
+    ? `<span class="kanban-card-project">${escapeHtml(card.project)}</span>`
+    : ''
+
+  // Label footer pills: at most 3 shown + a "+N" overflow indicator. Each pill
+  // (except the overflow one) toggles that label into the active label-filter
+  // when clicked, mirroring the priority quick-filter chips above the board.
+  let labelsHtml = ''
+  if (Array.isArray(card.labels) && card.labels.length > 0) {
+    const shown = card.labels.slice(0, 3)
+    const overflow = card.labels.length - shown.length
+    const pills = shown.map((l) =>
+      `<span class="kanban-card-label-pill" data-label-id="${escapeHtml(l.id)}" style="--label-color:${escapeHtml(l.color)}" title="${t('kanban.label.filter_tooltip', { name: escapeHtml(l.name) })}">#${escapeHtml(l.name)}</span>`
+    ).join('')
+    const overflowHtml = overflow > 0
+      ? `<span class="kanban-card-label-pill kanban-card-label-overflow" title="${t('kanban.label.overflow_tooltip', { n: overflow })}">+${overflow}</span>`
+      : ''
+    labelsHtml = `<div class="kanban-card-labels">${pills}${overflowHtml}</div>`
+  }
+
+  const seqHtml = card.seq != null
+    ? `<span class="kanban-card-seq" style="font-family:monospace;font-size:11px;color:var(--muted);margin-right:5px">#${card.seq}</span>`
+    : ''
+
+  // Card aging: left stripe + top-right badge based on hours since last update.
+  // Skipped for done cards. Config thresholds and colours come from window._wraith.kanbanAging.
+  let agingBadgeHtml = ''
+  const agingCfg = window._wraith?.kanbanAging
+  if (agingCfg && card.updated_at && card.status !== 'done') {
+    const hoursOld = (Date.now() / 1000 - card.updated_at) / 3600
+    let agingLevel = null
+    let agingColor = null
+    if (hoursOld >= agingCfg.criticalH) {
+      agingLevel = 'critical'; agingColor = agingCfg.criticalColor
+    } else if (hoursOld >= agingCfg.cautionH) {
+      agingLevel = 'caution'; agingColor = agingCfg.cautionColor
+    } else if (hoursOld >= agingCfg.warnH) {
+      agingLevel = 'warn'; agingColor = agingCfg.warnColor
+    }
+    if (agingLevel) {
+      const days = Math.floor(hoursOld / 24)
+      const ageLabel = days >= 1 ? `${days}d` : `${Math.floor(hoursOld)}h`
+      const exact = new Date(card.updated_at * 1000).toLocaleString('hu-HU')
+      agingBadgeHtml = `<span class="kanban-card-aging-badge kanban-card-aging-${agingLevel}" style="color:${agingColor}" title="${t('kanban.aging.tooltip', { exact })}">⏳ ${ageLabel}</span>`
+      el.dataset.aging = agingLevel
+      el.style.setProperty('--card-aging-color', agingColor)
+    }
+  }
+
+  // Embedded subtasks: rendered as mini-cards below a divider when the subtask
+  // shares the same column as this parent card.
+  let embeddedHtml = ''
+  if (embeddedChildren.length > 0) {
+    const items = embeddedChildren.map(c => {
+      const rawCa = c.assignee ? String(c.assignee).trim() : ''
+      const ca = rawCa ? kanbanAssignees.find(a => a.name.toLowerCase() === rawCa.toLowerCase()) : null
+      const caLabel = ca ? (ca.displayName || ca.name) : rawCa
+      const caHtml = caLabel ? `<span class="kanban-embedded-assignee">${escapeHtml(caLabel)}</span>` : ''
+      const cSeq = c.seq != null ? `<span class="kanban-embedded-seq">#${c.seq}</span> ` : ''
+      return `<div class="kanban-embedded-subtask" data-id="${escapeHtml(c.id)}">${cSeq}${escapeHtml(c.title)}${caHtml}</div>`
+    }).join('')
+    embeddedHtml = `<div class="kanban-embedded-subtasks">${items}</div>`
+  }
+
+  el.innerHTML = `
+    ${projectHtml}
+    <div class="kanban-card-title">${seqHtml}${escapeHtml(card.title)}</div>
+    <div class="kanban-card-footer">${assigneeHtml}${dueHtml}</div>
+    ${labelsHtml}
+    <div class="kanban-card-actions">
+      <button class="card-breakdown-btn" title="${t('kanban.btn.breakdown')}" aria-label="${t('kanban.btn.breakdown')}">⚡</button>
+    </div>
+    ${agingBadgeHtml}
+    <div class="kanban-subtask-badge" style="display:none"></div>
+    ${embeddedHtml}
+  `
+
+  // "AI szétbont" gomb – ne nyissa meg a detail modalt
+  el.querySelector('.card-breakdown-btn').addEventListener('click', (e) => {
+    e.stopPropagation()
+    triggerBreakdown(card)
+  })
+
+  // Label pills -> toggle that label into the active filter (don't open detail)
+  el.querySelectorAll('.kanban-card-label-pill[data-label-id]').forEach((pillEl) => {
+    pillEl.addEventListener('click', (e) => {
+      e.stopPropagation()
+      toggleKanbanLabelFilter(pillEl.dataset.labelId)
+    })
+  })
+
+  // Click on embedded subtask -> open that subtask's detail (don't bubble to parent)
+  el.querySelectorAll('.kanban-embedded-subtask').forEach(subEl => {
+    subEl.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const child = kanbanCards.find(c => c.id === subEl.dataset.id)
+      if (child) showCardDetail(child)
+    })
+  })
+
+  // Drag events
+  el.addEventListener('dragstart', (e) => {
+    el.classList.add('dragging')
+    e.dataTransfer.setData('text/plain', card.id)
+    e.dataTransfer.effectAllowed = 'move'
+  })
+  el.addEventListener('dragend', () => el.classList.remove('dragging'))
+
+  // Touch equivalent of the above -- see wireKanbanCardTouchDnD. Wired before
+  // the click listener so its capture-phase guard can swallow the tap that
+  // ends a drag.
+  wireKanbanCardTouchDnD(el, card)
+
+  // Click -> detail
+  el.addEventListener('click', () => showCardDetail(card))
+
+  return el
+}
+
+// === Drag & Drop ===
+// Wires the drag/drop handlers for one column-body element. Used for the
+// 4 static flat-board columns at load time, and again for every swimlane
+// column-body created dynamically in renderSwimlaneBoard (those elements
+// don't exist yet when this module first runs).
+function wireKanbanColumnDnD(col) {
+  col.addEventListener('dragover', (e) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    col.classList.add('drag-over')
+
+    // Insert indicator position
+    const afterEl = getDragAfterElement(col, e.clientY)
+    const dragging = document.querySelector('.kanban-card.dragging')
+    if (!dragging) return
+    if (afterEl) {
+      col.insertBefore(dragging, afterEl)
+    } else {
+      col.appendChild(dragging)
+    }
+  })
+
+  col.addEventListener('dragleave', (e) => {
+    if (!col.contains(e.relatedTarget)) col.classList.remove('drag-over')
+  })
+
+  col.addEventListener('drop', async (e) => {
+    e.preventDefault()
+    col.classList.remove('drag-over')
+    const cardId = e.dataTransfer.getData('text/plain')
+    const newStatus = col.dataset.status
+
+    // Calculate sort_order based on position
+    const cards = [...col.querySelectorAll('.kanban-card')]
+    const idx = cards.findIndex((c) => c.dataset.id === cardId)
+    let sortOrder = idx
+
+    try {
+      await fetch(`/api/kanban/${encodeURIComponent(cardId)}/move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus, sort_order: sortOrder }),
+      })
+      loadKanban()
+    } catch {
+      showToast(t('kanban.toast.move_error'))
+    }
+  })
+}
+columns.forEach(wireKanbanColumnDnD)
+
+// === Touch drag & drop (mobile) ===
+// HTML5 drag & drop above never fires on a touch screen -- no dragstart, no
+// drop -- so on a phone the board could only be read, never rearranged. This
+// is a parallel touch path over the same /move call.
+//
+// Why touch events and not Pointer Events + touch-action: a card fills most of
+// the column, so making it permanently untouchable for scrolling (touch-action:
+// none) would break scrolling the board. Instead the gesture stays ambiguous
+// until it resolves: a long press (250ms) means "drag", any earlier movement
+// means "scroll" and hands the gesture straight back to the browser. Only once
+// dragging is committed does touchmove call preventDefault() to hold the page
+// still -- which is why that listener MUST be non-passive.
+const TOUCH_DRAG_DELAY_MS = 250
+const TOUCH_DRAG_SLOP_PX = 10
+let touchDrag = null
+
+function kanbanColBodyAt(x, y) {
+  const el = document.elementFromPoint(x, y)
+  return el ? el.closest('.kanban-col-body') : null
+}
+
+// On a phone the columns stack vertically, so the next column starts ~2000px
+// below the fold -- dragging a card "one column over" would mean dragging it
+// at an invisible target while the page auto-scrolls for several seconds.
+// Instead, committing to a drag raises a fixed bar of status targets over the
+// bottom of the screen: the same gesture, with somewhere to drop. Column
+// hit-testing stays active for viewports where the target column IS visible.
+const KANBAN_TOUCH_STATUSES = ['planned', 'in_progress', 'waiting', 'testing', 'done']
+
+function buildTouchDropBar(currentStatus) {
+  const bar = document.createElement('div')
+  bar.className = 'kanban-touch-dropbar'
+  for (const s of KANBAN_TOUCH_STATUSES) {
+    const chip = document.createElement('div')
+    chip.className = 'kanban-drop-target'
+    chip.dataset.status = s
+    if (s === currentStatus) chip.classList.add('is-current')
+    chip.textContent = t(`kanban.status.${s}`)
+    bar.appendChild(chip)
+  }
+  document.body.appendChild(bar)
+  return bar
+}
+
+function kanbanDropTargetAt(x, y) {
+  const el = document.elementFromPoint(x, y)
+  return el ? el.closest('.kanban-drop-target') : null
+}
+
+function clearTouchDragHighlight() {
+  document.querySelectorAll('.kanban-col-body.drag-over, .kanban-drop-target.drag-over')
+    .forEach((c) => c.classList.remove('drag-over'))
+}
+
+function endTouchDrag() {
+  if (!touchDrag) return
+  clearTimeout(touchDrag.timer)
+  touchDrag.ghost?.remove()
+  touchDrag.dropBar?.remove()
+  touchDrag.el.classList.remove('dragging')
+  clearTouchDragHighlight()
+  document.removeEventListener('touchmove', kanbanTouchMove)
+  document.removeEventListener('touchend', kanbanTouchEnd)
+  document.removeEventListener('touchcancel', endTouchDrag)
+  touchDrag = null
+}
+
+// The ghost is deliberately NOT a full-size copy of the card: at full width it
+// covered three of the five drop targets, so the user could not see what they
+// were aiming at. It rides ABOVE the fingertip (see positionTouchGhost) for the
+// same reason -- the target under the finger has to stay visible.
+const TOUCH_GHOST_MAX_W = 200
+const TOUCH_GHOST_LIFT = 28
+
+function positionTouchGhost(x, y) {
+  const g = touchDrag.ghost
+  const gx = x - g.offsetWidth / 2
+  const gy = y - g.offsetHeight - TOUCH_GHOST_LIFT
+  g.style.transform = `translate(${Math.max(4, gx)}px, ${Math.max(4, gy)}px) rotate(2deg)`
+}
+
+function beginTouchDrag(x, y) {
+  if (!touchDrag) return
+  const el = touchDrag.el
+  const box = el.getBoundingClientRect()
+  const ghost = document.createElement('div')
+  ghost.className = 'kanban-card kanban-card-ghost'
+  ghost.textContent = touchDrag.card.title
+  ghost.style.cssText = `position:fixed; left:0; top:0; width:${Math.min(box.width, TOUCH_GHOST_MAX_W)}px; pointer-events:none; z-index:9999; opacity:.95; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; box-shadow:0 8px 24px rgba(0,0,0,.35)`
+  document.body.appendChild(ghost)
+  touchDrag.ghost = ghost
+  positionTouchGhost(x, y)
+  touchDrag.active = true
+  touchDrag.dropBar = buildTouchDropBar(touchDrag.card.status)
+  el.classList.add('dragging')
+  // Confirm the mode switch on devices that support it -- without a cursor,
+  // the only other signal that a long press "took" is the ghost appearing.
+  navigator.vibrate?.(10)
+}
+
+function kanbanTouchMove(e) {
+  if (!touchDrag || e.touches.length !== 1) return
+  const p = e.touches[0]
+  if (!touchDrag.active) {
+    // Still ambiguous: movement beyond the slop means the user is scrolling.
+    if (Math.abs(p.clientX - touchDrag.startX) > TOUCH_DRAG_SLOP_PX ||
+        Math.abs(p.clientY - touchDrag.startY) > TOUCH_DRAG_SLOP_PX) {
+      endTouchDrag()
+    }
+    return
+  }
+  e.preventDefault()
+  positionTouchGhost(p.clientX, p.clientY)
+  clearTouchDragHighlight()
+  // The drop bar sits above everything, so test it first -- a chip and a
+  // column body can overlap on screen.
+  const chip = kanbanDropTargetAt(p.clientX, p.clientY)
+  if (chip) { chip.classList.add('drag-over'); return }
+  const col = kanbanColBodyAt(p.clientX, p.clientY)
+  if (col) col.classList.add('drag-over')
+}
+
+async function kanbanTouchEnd(e) {
+  if (!touchDrag) return
+  if (!touchDrag.active) { endTouchDrag(); return }
+  const p = e.changedTouches[0]
+  const chip = kanbanDropTargetAt(p.clientX, p.clientY)
+  const col = chip ? null : kanbanColBodyAt(p.clientX, p.clientY)
+  const cardId = touchDrag.card.id
+  // The release that ends a drag would otherwise also register as a tap and
+  // open the detail modal on top of the board the user just rearranged.
+  touchDrag.el.dataset.suppressClick = '1'
+  // Read the drop position BEFORE endTouchDrag drops the .dragging class --
+  // getDragAfterElement excludes .dragging, which is what keeps the card from
+  // counting itself when it is dropped back into its own column.
+  let sortOrder = 0
+  let newStatus = null
+  if (chip) {
+    // Dropped on the status bar: no position information, so append.
+    newStatus = chip.dataset.status
+    sortOrder = document.querySelectorAll(`.kanban-col-body[data-status="${newStatus}"] .kanban-card`).length
+  } else if (col) {
+    newStatus = col.dataset.status
+    const after = getDragAfterElement(col, p.clientY)
+    const others = [...col.querySelectorAll('.kanban-card:not(.dragging)')]
+    sortOrder = after ? others.indexOf(after) : others.length
+  }
+  endTouchDrag()
+  // Released outside any target: treat as a cancelled drag, not a move.
+  // A drop inside a column always posts, even when the status is unchanged --
+  // that is a reorder within the column, which is just as valid a move.
+  if (!newStatus) return
+  try {
+    const r = await fetch(`/api/kanban/${encodeURIComponent(cardId)}/move`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus, sort_order: sortOrder }),
+    })
+    if (!r.ok) throw new Error('move failed')
+    loadKanban()
+  } catch {
+    showToast(t('kanban.toast.move_error'))
+  }
+}
+
+function wireKanbanCardTouchDnD(el, card) {
+  el.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return
+    const p = e.touches[0]
+    endTouchDrag()
+    touchDrag = {
+      card, el, ghost: null, active: false,
+      startX: p.clientX, startY: p.clientY,
+      timer: setTimeout(() => beginTouchDrag(p.clientX, p.clientY), TOUCH_DRAG_DELAY_MS),
+    }
+    document.addEventListener('touchmove', kanbanTouchMove, { passive: false })
+    document.addEventListener('touchend', kanbanTouchEnd)
+    document.addEventListener('touchcancel', endTouchDrag)
+  }, { passive: true })
+
+  // A long press that turned into a drag must not also open the detail modal
+  // on release. The click listener in createCardEl fires after touchend, so
+  // the guard flag is read there.
+  el.addEventListener('click', (e) => {
+    if (el.dataset.suppressClick === '1') {
+      delete el.dataset.suppressClick
+      e.stopImmediatePropagation()
+      e.preventDefault()
+    }
+  }, true)
+}
+
+function getDragAfterElement(col, y) {
+  const els = [...col.querySelectorAll('.kanban-card:not(.dragging)')]
+  let closest = null
+  let closestOffset = Number.NEGATIVE_INFINITY
+
+  for (const el of els) {
+    const box = el.getBoundingClientRect()
+    const offset = y - box.top - box.height / 2
+    if (offset < 0 && offset > closestOffset) {
+      closestOffset = offset
+      closest = el
+    }
+  }
+  return closest
+}
+
+// === New card modal ===
+function openNewCardModal(status) {
+  document.getElementById('cardModalTitle').textContent = t('kanban.modal.title_new')
+  document.getElementById('cardTitle').value = ''
+  document.getElementById('cardDesc').value = ''
+  document.getElementById('cardPriority').value = 'normal'
+  document.getElementById('cardProject').value = ''
+  document.getElementById('cardDue').value = ''
+  document.getElementById('cardEditId').value = ''
+  document.getElementById('cardEditStatus').value = status || 'planned'
+  populateAssigneeSelect('cardAssignee')
+  populateProjectSuggestions()
+  openModal(cardModalOverlay)
+  setTimeout(() => document.getElementById('cardTitle').focus(), 200)
+}
+
+function populateAssigneeSelect(selectId, selected) {
+  const sel = document.getElementById(selectId)
+  sel.innerHTML = '<option value="">-- Nincs --</option>'
+  for (const a of kanbanAssignees) {
+    const opt = document.createElement('option')
+    opt.value = a.name
+    opt.textContent = a.displayName || a.name
+    if (selected && a.name === selected) opt.selected = true
+    sel.appendChild(opt)
+  }
+}
+
+// Save card (create or update)
+document.getElementById('saveCardBtn').addEventListener('click', async () => {
+  const title = document.getElementById('cardTitle').value.trim()
+  if (!title) { document.getElementById('cardTitle').focus(); return }
+
+  const data = {
+    title,
+    description: document.getElementById('cardDesc').value.trim() || null,
+    assignee: document.getElementById('cardAssignee').value || null,
+    priority: document.getElementById('cardPriority').value,
+    project: document.getElementById('cardProject').value.trim() || null,
+    due_date: document.getElementById('cardDue').value
+      ? Math.floor(new Date(document.getElementById('cardDue').value).getTime() / 1000)
+      : null,
+  }
+
+  const editId = document.getElementById('cardEditId').value
+
+  try {
+    if (editId) {
+      const res = await fetch(`/api/kanban/${encodeURIComponent(editId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      })
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.status) }
+      showToast(t('kanban.toast.card_updated'))
+    } else {
+      data.status = document.getElementById('cardEditStatus').value
+      const res = await fetch('/api/kanban', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      })
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.status) }
+      showToast(t('kanban.toast.card_created'))
+    }
+    closeModal(cardModalOverlay)
+    loadKanban()
+  } catch (err) {
+    showToast(t('kanban.toast.save_error_msg', { msg: err.message }))
+  }
+})
+
+// === Card labels (in the detail modal) ===
+// Always re-fetches the card's own labels via the dedicated endpoint instead
+// of trusting card.labels -- callers that pass a card object sourced from
+// /api/kanban/:id/children (subtask list) don't have labels embedded, only
+// the bulk board listing (/api/kanban) does.
+async function renderCardLabelsSection(card) {
+  const listEl = document.getElementById('cardLabelList')
+  const addSelect = document.getElementById('cardLabelAdd')
+  const newBtn = document.getElementById('cardLabelNewBtn')
+  const newForm = document.getElementById('cardLabelNewForm')
+  const newNameInput = document.getElementById('cardLabelNewName')
+  const newColorsEl = document.getElementById('cardLabelNewColors')
+  const newSaveBtn = document.getElementById('cardLabelNewSaveBtn')
+
+  let attached = []
+  try {
+    attached = await (await fetch(`/api/kanban/${encodeURIComponent(card.id)}/labels`)).json()
+  } catch { /* leave empty -- pill list just stays blank */ }
+
+  listEl.innerHTML = ''
+  for (const label of attached) {
+    const pill = document.createElement('span')
+    pill.className = 'label-pill'
+    pill.style.setProperty('--label-color', label.color)
+    pill.innerHTML = `#${escapeHtml(label.name)} <button class="label-pill-remove" title="${t('kanban.label.remove_btn')}" aria-label="${t('kanban.label.remove_btn')}">&times;</button>`
+    pill.querySelector('.label-pill-remove').addEventListener('click', async () => {
+      try {
+        await fetch(`/api/kanban/${encodeURIComponent(card.id)}/labels/${encodeURIComponent(label.id)}`, { method: 'DELETE' })
+        renderCardLabelsSection(card)
+        loadKanban()
+      } catch { showToast(t('kanban.toast.label_remove_error')) }
+    })
+    listEl.appendChild(pill)
+  }
+
+  const attachedIds = new Set(attached.map((l) => l.id))
+  addSelect.innerHTML = `<option value="">-- ${t('kanban.label.add_placeholder')} --</option>`
+  for (const label of kanbanAllLabels) {
+    if (attachedIds.has(label.id)) continue
+    const opt = document.createElement('option')
+    opt.value = label.id
+    opt.textContent = label.name
+    addSelect.appendChild(opt)
+  }
+  addSelect.onchange = async () => {
+    const labelId = addSelect.value
+    if (!labelId) return
+    try {
+      await fetch(`/api/kanban/${encodeURIComponent(card.id)}/labels`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labelId }),
+      })
+      renderCardLabelsSection(card)
+      loadKanban()
+    } catch { showToast(t('kanban.toast.label_add_error')) }
+  }
+
+  newForm.style.display = 'none'
+  newBtn.onclick = () => {
+    newForm.style.display = newForm.style.display === 'none' ? '' : 'none'
+    newNameInput.value = ''
+  }
+
+  const palette = window._wraith?.kanbanLabels?.colors || ['#64748b']
+  newColorsEl.innerHTML = ''
+  let selectedColor = palette[0]
+  palette.forEach((color, i) => {
+    const sw = document.createElement('span')
+    sw.className = 'label-color-swatch' + (i === 0 ? ' selected' : '')
+    sw.style.background = color
+    sw.addEventListener('click', () => {
+      selectedColor = color
+      newColorsEl.querySelectorAll('.label-color-swatch').forEach((s) => s.classList.remove('selected'))
+      sw.classList.add('selected')
+    })
+    newColorsEl.appendChild(sw)
+  })
+
+  newSaveBtn.onclick = async () => {
+    const name = newNameInput.value.trim()
+    if (!name) { newNameInput.focus(); return }
+    try {
+      const r = await fetch('/api/kanban/labels', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, color: selectedColor }),
+      })
+      if (!r.ok) { showToast(t('kanban.toast.label_create_error')); return }
+      const newLabel = await r.json()
+      kanbanAllLabels.push(newLabel)
+      await fetch(`/api/kanban/${encodeURIComponent(card.id)}/labels`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labelId: newLabel.id }),
+      })
+      newForm.style.display = 'none'
+      renderCardLabelsSection(card)
+      loadKanban()
+    } catch { showToast(t('kanban.toast.label_create_error')) }
+  }
+}
+
+// === Card detail ===
+async function showCardDetail(card) {
+  // Running number (#N) in the title bar, plus the stable hex id in the meta.
+  const seqPrefix = card.seq != null ? `#${card.seq} ` : ''
+  document.getElementById('cardDetailTitle').textContent = `${seqPrefix}${card.title}`
+
+  // Case-insensitive match; fall back to the raw stored name so a casing
+  // mismatch (or an unregistered assignee) shows the actual name, not "nincs".
+  const rawDetailAssignee = card.assignee ? String(card.assignee).trim() : ''
+  const assignee = rawDetailAssignee
+    ? kanbanAssignees.find((a) => a.name.toLowerCase() === rawDetailAssignee.toLowerCase())
+    : null
+  const assigneeDisplay = assignee ? (assignee.displayName || assignee.name) : (rawDetailAssignee || '-- nincs --')
+  const priorityLabels = { low: t('kanban.priority.low'), normal: t('kanban.priority.normal'), high: t('kanban.priority.high'), urgent: t('kanban.priority.urgent') }
+  const statusLabels = { planned: t('kanban.status.planned'), in_progress: t('kanban.status.in_progress'), testing: t('kanban.status.testing'), waiting: t('kanban.status.waiting'), done: t('kanban.status.done') }
+
+  const meta = document.getElementById('cardDetailMeta')
+  const idLabel = (card.seq != null ? `#${card.seq} · ` : '') + card.id
+  meta.innerHTML = `
+    <div class="meta-item">
+      <span class="meta-label">${t('kanban.meta.id')}</span>
+      <span class="meta-value" style="font-family:monospace" title="${t('kanban.meta.id_tooltip')}">${escapeHtml(idLabel)}</span>
+    </div>
+    <div class="meta-item">
+      <span class="meta-label">${t('kanban.meta.status')}</span>
+      <span class="meta-value meta-value-editable" id="metaStatusValue" data-card-id="${card.id}" title="${t('kanban.meta.edit_tooltip')}">${statusLabels[card.status] || card.status}</span>
+    </div>
+    <div class="meta-item">
+      <span class="meta-label">${t('kanban.meta.assignee')}</span>
+      <span class="meta-value meta-value-editable" id="metaAssigneeValue" data-card-id="${card.id}" title="${t('kanban.meta.edit_tooltip')}">${escapeHtml(assigneeDisplay)}</span>
+    </div>
+    <div class="meta-item">
+      <span class="meta-label">${t('kanban.meta.priority')}</span>
+      <span class="meta-value">${priorityLabels[card.priority]}</span>
+    </div>
+    <div class="meta-item">
+      <span class="meta-label">${t('kanban.meta.project')}</span>
+      <span class="meta-value">${card.project ? escapeHtml(card.project) : t('kanban.meta.none')}</span>
+    </div>
+    <div class="meta-item">
+      <span class="meta-label">${t('kanban.meta.deadline')}</span>
+      <span class="meta-value">${card.due_date ? new Date(card.due_date * 1000).toLocaleDateString(_lang === 'en' ? 'en-US' : 'hu-HU') : t('kanban.meta.none')}</span>
+    </div>
+  `
+
+  // Inline edit for status on detail view. HTML5 drag & drop is the only way to
+  // change a card's column, and it is dead on touch devices (no dragstart is
+  // ever fired), so on a phone the board was effectively read-only. This is the
+  // pointer-independent path: tap the card, pick the new status. Mirrors the
+  // assignee editor below, but POSTs to /move rather than PUT -- /move is what
+  // recomputes sort_order AND fires the in_progress agent dispatch, which a
+  // plain PUT would silently skip.
+  const statusValueEl = document.getElementById('metaStatusValue')
+  statusValueEl.addEventListener('click', () => {
+    if (statusValueEl.querySelector('select')) return
+    const current = card.status
+    const sel = document.createElement('select')
+    sel.style.cssText = 'padding:2px 6px; border-radius:4px; border:1px solid var(--border); background:var(--bg-card); color:var(--text); font-size:inherit'
+    for (const s of ['planned', 'in_progress', 'waiting', 'testing', 'done']) {
+      const opt = document.createElement('option')
+      opt.value = s
+      opt.textContent = statusLabels[s] || s
+      if (s === current) opt.selected = true
+      sel.appendChild(opt)
+    }
+    statusValueEl.innerHTML = ''
+    statusValueEl.appendChild(sel)
+    sel.focus()
+    const restore = (status) => { statusValueEl.textContent = statusLabels[status] || status }
+    const save = async () => {
+      const newVal = sel.value
+      if (newVal === current) { restore(current); return }
+      try {
+        const r = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/move`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: newVal, sort_order: 0 }),
+        })
+        if (!r.ok) throw new Error('move failed')
+        card.status = newVal
+        restore(newVal)
+        showToast(t('kanban.toast.status_updated'))
+        loadKanban && loadKanban()
+      } catch {
+        restore(current)
+        showToast(t('kanban.toast.move_error'))
+      }
+    }
+    sel.addEventListener('change', save)
+    sel.addEventListener('blur', () => {
+      if (statusValueEl.querySelector('select')) restore(card.status)
+    })
+  })
+
+  // Inline edit for assignee on detail view
+  const assigneeValueEl = document.getElementById('metaAssigneeValue')
+  assigneeValueEl.addEventListener('click', () => {
+    if (assigneeValueEl.querySelector('select')) return
+    const current = card.assignee || ''
+    const sel = document.createElement('select')
+    sel.style.cssText = 'padding:2px 6px; border-radius:4px; border:1px solid var(--border); background:var(--bg-card); color:var(--text); font-size:inherit'
+    sel.innerHTML = '<option value="">-- Nincs --</option>'
+    for (const a of kanbanAssignees) {
+      const opt = document.createElement('option')
+      opt.value = a.name
+      opt.textContent = a.displayName || a.name
+      if (a.name === current) opt.selected = true
+      sel.appendChild(opt)
+    }
+    assigneeValueEl.innerHTML = ''
+    assigneeValueEl.appendChild(sel)
+    sel.focus()
+    const save = async () => {
+      const newVal = sel.value || null
+      if (newVal === current || (newVal === null && !current)) {
+        assigneeValueEl.textContent = current ? current : '-- nincs --'
+        return
+      }
+      try {
+        const r = await fetch(`/api/kanban/${encodeURIComponent(card.id)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...card, assignee: newVal }),
+        })
+        if (!r.ok) throw new Error('PUT failed')
+        card.assignee = newVal
+        assigneeValueEl.textContent = newVal ? newVal : '-- nincs --'
+        showToast(t('kanban.toast.assignee_updated'))
+        loadKanban && loadKanban()
+      } catch {
+        assigneeValueEl.textContent = current ? current : '-- nincs --'
+        showToast(t('kanban.toast.save_error'))
+      }
+    }
+    sel.addEventListener('change', save)
+    sel.addEventListener('blur', () => {
+      if (assigneeValueEl.querySelector('select')) {
+        assigneeValueEl.textContent = card.assignee ? card.assignee : '-- nincs --'
+      }
+    })
+  })
+
+  document.getElementById('cardDetailDesc').textContent = card.description || ''
+
+  renderCardLabelsSection(card)
+
+  // #115: Parent meta row — dropdown replaces the old read-only display; shown only when editable
+  const parentMetaItem = document.getElementById('parentMetaItem')
+  const parentSelect = document.getElementById('parentSelect')
+  const canModifyParent = card.status === 'planned' || card.status === 'waiting'
+  if (card.parent_id && canModifyParent) {
+    // Build the parent-select dropdown: null option + all top-level non-done tasks
+    parentSelect.innerHTML = `<option value="">${t('kanban.parent.empty')}</option>`
+    const availableParents = kanbanCards.filter(c =>
+      !c.parent_id && c.id !== card.id && !c.archived_at &&
+      (c.status === 'planned' || c.status === 'in_progress' || c.status === 'testing' || c.status === 'waiting')
+    )
+    for (const p of availableParents) {
+      const opt = document.createElement('option')
+      opt.value = p.id
+      const fullLabel = (p.seq != null ? `#${p.seq} ` : '') + p.title
+      opt.title = fullLabel
+      opt.textContent = fullLabel.length > 33 ? fullLabel.slice(0, 32) + '…' : fullLabel
+      if (p.id === card.parent_id) opt.selected = true
+      parentSelect.appendChild(opt)
+    }
+    parentSelect.onchange = async () => {
+      const newParentId = parentSelect.value || null
+      const label = newParentId ? t('kanban.toast.parent_updated') : t('kanban.toast.parent_unset')
+      const r = await fetch(`/api/kanban/${encodeURIComponent(card.id)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...card, parent_id: newParentId }),
+      })
+      if (r.ok) { card.parent_id = newParentId; showToast(label); loadKanban(); showCardDetail(card) }
+      else showToast(t('kanban.toast.save_error'))
+    }
+    parentMetaItem.style.display = ''
+  } else {
+    parentMetaItem.style.display = 'none'
+  }
+
+  // Load comments
+  try {
+    const res = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/comments`)
+    const comments = await res.json()
+    const list = document.getElementById('commentsList')
+    list.innerHTML = ''
+    for (const c of comments) {
+      const date = new Date(c.created_at * 1000).toLocaleString('hu-HU')
+      const div = document.createElement('div')
+      div.className = 'comment-item'
+      div.innerHTML = `
+        <div><span class="comment-author">${escapeHtml(c.author)}</span><span class="comment-date">${date}</span></div>
+        <div class="comment-body">${escapeHtml(c.content)}</div>
+      `
+      list.appendChild(div)
+    }
+  } catch { /* ignore */ }
+
+  // Author select for new comment. Default to the bot assignee resolved by
+  // type (never a hard-coded display name -- BOT_NAME differs per deployment),
+  // falling back to the first assignee. The old literal 'Wraith' never matched
+  // on non-Wraith installs, so the select stayed on "-- Nincs --" and the
+  // comment submit silently no-opped (addCommentBtn returns when !author).
+  // (Resolution of the #254/#241 overlap: keep #241's type-resolved default
+  // over #254's hard-coded "Gábor" -- same deployment-agnostic reasoning.)
+  const defaultCommentAuthor =
+    (kanbanAssignees.find((a) => a.type === 'owner') || kanbanAssignees[0] || {}).name || ''
+  populateAssigneeSelect('commentAuthor', defaultCommentAuthor)
+
+  // Add comment
+  document.getElementById('addCommentBtn').onclick = async () => {
+    const content = document.getElementById('commentContent').value.trim()
+    const author = document.getElementById('commentAuthor').value
+    if (!content) { document.getElementById('commentContent').focus(); return }
+    if (!author) { showToast(t('kanban.toast.comment_no_author')); return }
+    try {
+      const res = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ author, content }),
+      })
+      // Without this check an HTTP error (e.g. 400) still cleared the textarea
+      // and "refreshed", so the comment looked sent but was never saved.
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`
+        try { msg = (await res.json()).error || msg } catch {}
+        showToast(t('kanban.toast.comment_failed', { msg }))
+        return
+      }
+      document.getElementById('commentContent').value = ''
+      showCardDetail(card) // refresh
+    } catch {
+      showToast(t('kanban.toast.comment_error'))
+    }
+  }
+
+  // Edit button
+  document.getElementById('cardEditBtn').onclick = () => {
+    closeModal(cardDetailOverlay)
+    document.getElementById('cardModalTitle').textContent = t('kanban.modal.title_edit')
+    document.getElementById('cardTitle').value = card.title
+    document.getElementById('cardDesc').value = card.description || ''
+    document.getElementById('cardPriority').value = card.priority
+    document.getElementById('cardProject').value = card.project || ''
+    document.getElementById('cardDue').value = card.due_date
+      ? new Date(card.due_date * 1000).toISOString().split('T')[0]
+      : ''
+    document.getElementById('cardEditId').value = card.id
+    document.getElementById('cardEditStatus').value = card.status
+    populateAssigneeSelect('cardAssignee', card.assignee)
+    populateProjectSuggestions()
+    openModal(cardModalOverlay)
+  }
+
+  // Archive
+  document.getElementById('cardArchiveBtn').onclick = async () => {
+    try {
+      await fetch(`/api/kanban/${encodeURIComponent(card.id)}/archive`, { method: 'POST' })
+      closeModal(cardDetailOverlay)
+      showToast(t('kanban.toast.card_archived'))
+      loadKanban()
+    } catch {
+      showToast(t('kanban.toast.archive_error'))
+    }
+  }
+
+  // Delete
+  document.getElementById('cardDeleteBtn').onclick = async () => {
+    if (!confirm(t('kanban.confirm.delete'))) return
+    try {
+      await fetch(`/api/kanban/${encodeURIComponent(card.id)}`, { method: 'DELETE' })
+      closeModal(cardDetailOverlay)
+      showToast(t('kanban.toast.card_deleted'))
+      loadKanban()
+    } catch {
+      showToast(t('common.error_delete'))
+    }
+  }
+
+  // Load children (subtasks) — only top-level tasks have children (no subtask of subtask)
+  try {
+    const childRes = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/children`)
+    const children = await childRes.json()
+    const section = document.getElementById('cardChildrenSection')
+    const list = document.getElementById('cardChildrenList')
+    const addSubtaskSection = document.getElementById('cardAddSubtaskSection')
+    const isTask = !card.parent_id
+
+    // #113: Show add-subtask form only for top-level tasks that are not done
+    if (isTask && card.status !== 'done') {
+      addSubtaskSection.style.display = ''
+      const titleInput = document.getElementById('newSubtaskTitle')
+      titleInput.value = ''
+      document.getElementById('addSubtaskBtn').onclick = async () => {
+        const title = titleInput.value.trim()
+        if (!title) { titleInput.focus(); return }
+        try {
+          const r = await fetch('/api/kanban', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, parent_id: card.id, status: card.status, priority: card.priority, project: card.project || null, assignee: null }),
+          })
+          if (!r.ok) { showToast(t('kanban.toast.subtask_error')); return }
+          showToast(t('kanban.toast.subtask_created'))
+          loadKanban()
+          showCardDetail(card)
+        } catch { showToast(t('kanban.toast.subtask_error')) }
+      }
+    } else {
+      addSubtaskSection.style.display = 'none'
+    }
+
+    const statusLabelsShort = { planned: t('kanban.status.planned'), in_progress: t('kanban.status.in_progress'), testing: t('kanban.status.testing'), waiting: t('kanban.status.waiting_short'), done: t('kanban.status.done') }
+    if (children.length > 0 || isTask) {
+      section.style.display = ''
+      list.innerHTML = ''
+      // #114: Delete button per subtask — only shown when the parent card is not done
+      const canDeleteChild = card.status !== 'done'
+      for (const ch of children) {
+        const div = document.createElement('div')
+        div.className = 'comment-item'
+        div.style.cssText = 'cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:8px'
+        const info = document.createElement('div')
+        info.style.flex = '1'
+        info.innerHTML = `<div><strong>${escapeHtml(ch.title)}</strong> <span style="color:var(--text-muted)">[${statusLabelsShort[ch.status] || ch.status}]</span></div>
+          <div style="font-size:0.85em;color:var(--text-muted)">${ch.assignee ? escapeHtml(ch.assignee) : ''}${ch.description ? ' -- ' + escapeHtml(ch.description).slice(0, 80) : ''}</div>`
+        info.onclick = () => { closeModal(cardDetailOverlay); showCardDetail(ch) }
+        div.appendChild(info)
+        if (canDeleteChild) {
+          const delBtn = document.createElement('button')
+          delBtn.className = 'btn-danger btn-compact'
+          delBtn.style.flexShrink = '0'
+          delBtn.textContent = t('kanban.modal.delete_btn')
+          delBtn.onclick = async (e) => {
+            e.stopPropagation()
+            if (!confirm(t('kanban.confirm.delete_subtask', { title: ch.title }))) return
+            try {
+              const r = await fetch(`/api/kanban/${encodeURIComponent(ch.id)}`, { method: 'DELETE' })
+              if (!r.ok) { showToast(t('common.error_delete')); return }
+              showToast(t('kanban.toast.subtask_deleted'))
+              loadKanban()
+              showCardDetail(card)
+            } catch { showToast(t('common.error_delete')) }
+          }
+          div.appendChild(delBtn)
+        }
+        list.appendChild(div)
+      }
+    } else {
+      section.style.display = 'none'
+    }
+  } catch {
+    document.getElementById('cardChildrenSection').style.display = 'none'
+    document.getElementById('cardAddSubtaskSection').style.display = 'none'
+  }
+
+  // Breakdown button
+  document.getElementById('cardBreakdownBtn').onclick = async () => {
+    const btn = document.getElementById('cardBreakdownBtn')
+    btn.disabled = true
+    btn.textContent = t('kanban.breakdown.generating')
+    try {
+      const res = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/breakdown`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) { showToast(data.error || 'Hiba'); btn.disabled = false; btn.textContent = 'Breakdown'; return }
+      breakdownMode = 'kanban'
+      breakdownCardId = card.id
+      breakdownSubtasks = data.subtasks
+      showBreakdownModal(data.subtasks, card)
+      const dodSec = document.getElementById('breakdownDoDSection')
+      if (dodSec) dodSec.style.display = 'none'
+    } catch (err) {
+      showToast('Breakdown hiba')
+    } finally {
+      btn.disabled = false
+      btn.textContent = 'Breakdown'
+    }
+  }
+
+  openModal(cardDetailOverlay)
+}
+
+async function triggerBreakdown(card) {
+  const btn = document.querySelector(`.kanban-card[data-id="${card.id}"] .card-breakdown-btn`)
+  if (btn) { btn.disabled = true; btn.textContent = '...' }
+  try {
+    const res = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/breakdown`, { method: 'POST' })
+    const data = await res.json()
+    if (!res.ok) { showToast(data.error || 'Breakdown hiba'); return }
+    breakdownMode = 'kanban'
+    breakdownCardId = card.id
+    breakdownSubtasks = data.subtasks
+    showBreakdownModal(data.subtasks, card)
+  } catch {
+    showToast('Breakdown hiba')
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⚡' }
+  }
+}
+
+function showBreakdownModal(subtasks, parentCard) {
+  document.getElementById('breakdownProvider').textContent = t('kanban.breakdown.parent_label', { title: escapeHtml(parentCard.title) })
+  const list = document.getElementById('breakdownList')
+  list.innerHTML = ''
+
+  const priorityLabels = { low: t('kanban.priority.low'), normal: t('kanban.priority.normal'), high: t('kanban.priority.high'), urgent: t('kanban.priority.urgent') }
+  const assigneeOptions = kanbanAssignees
+    .map((a) => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.displayName || a.name)}</option>`)
+    .join('')
+
+  subtasks.forEach((st, i) => {
+    const div = document.createElement('div')
+    div.className = 'comment-item breakdown-subtask-item'
+    div.dataset.idx = i
+    div.style.borderLeft = '3px solid var(--accent)'
+    div.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px">
+        <label style="font-size:0.8em; color:var(--text-muted); white-space:nowrap">${i + 1}.</label>
+        <input type="text" class="breakdown-title-input" value="${escapeHtml(st.title)}"
+          style="flex:1; padding:5px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-card); color:var(--text); font-size:0.9em">
+        <label style="font-size:0.8em; white-space:nowrap">
+          <input type="checkbox" class="breakdown-check" data-idx="${i}" checked> Bele
+        </label>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <select class="breakdown-assignee-select" style="padding:4px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-card); color:var(--text); font-size:0.85em">
+          <option value="">-- nincs --</option>
+          ${assigneeOptions}
+        </select>
+        <span class="priority-badge priority-${st.priority}">${priorityLabels[st.priority] || st.priority}</span>
+      </div>
+    `
+    // Set assignee select value after insert
+    const sel = div.querySelector('.breakdown-assignee-select')
+    if (st.assignee) sel.value = st.assignee
+    list.appendChild(div)
+  })
+  openModal(breakdownOverlay)
+}
+
+document.getElementById('breakdownAcceptBtn').addEventListener('click', async () => {
+  const items = document.querySelectorAll('.breakdown-subtask-item')
+  const accepted = []
+  items.forEach((item) => {
+    const idx = parseInt(item.dataset.idx, 10)
+    const checked = item.querySelector('.breakdown-check')?.checked
+    if (!checked) return
+    const title = item.querySelector('.breakdown-title-input')?.value.trim() || breakdownSubtasks[idx]?.title
+    const assignee = item.querySelector('.breakdown-assignee-select')?.value || breakdownSubtasks[idx]?.assignee
+    const priority = breakdownSubtasks[idx]?.priority || 'normal'
+    const description = breakdownSubtasks[idx]?.description || ''
+    accepted.push({ title, assignee, priority, description })
+  })
+  if (accepted.length === 0) { showToast(t('kanban.breakdown.select_one')); return }
+  try {
+    if (breakdownMode === 'idea') {
+      const successCriteria = document.getElementById('breakdownSuccessCriteria')?.value.trim() || undefined
+      const res = await fetch(`/api/ideas/${encodeURIComponent(breakdownIdeaId)}/promote-breakdown`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subtasks: accepted, success_criteria: successCriteria }),
+      })
+      const data = await res.json()
+      if (!res.ok) { showToast(data.error || 'Hiba'); return }
+      closeModal(breakdownOverlay)
+      showToast(t('kanban.breakdown.promoted', { count: data.child_count }))
+      loadIdeasPage()
+      return
+    }
+    const res = await fetch(`/api/kanban/${encodeURIComponent(breakdownCardId)}/breakdown/accept`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subtasks: accepted }),
+    })
+    const data = await res.json()
+    if (!res.ok) { showToast(data.error || 'Hiba'); return }
+    closeModal(breakdownOverlay)
+    closeModal(cardDetailOverlay)
+    showToast(t('kanban.breakdown.created_count', { count: data.created.length }))
+    loadKanban()
+  } catch {
+    showToast(t('common.error_save'))
+  }
+})
+
+document.getElementById('breakdownRejectBtn').addEventListener('click', () => {
+  closeModal(breakdownOverlay)
+  showToast(t('kanban.toast.breakdown_rejected'))
+})
+
+document.getElementById('breakdownClose').addEventListener('click', () => closeModal(breakdownOverlay))
+
+// === Elements: Agents ===
+const agentsGrid = document.getElementById('agentsGrid')
+const addBtn = document.getElementById('addAgentBtn')
+const agentWizardOverlay = document.getElementById('agentWizardOverlay')
+const agentDetailOverlay = document.getElementById('agentDetailOverlay')
+const skillModalOverlay = document.getElementById('skillModalOverlay')
+const agentName = document.getElementById('agentName')
+const agentDesc = document.getElementById('agentDesc')
+const agentModel = document.getElementById('agentModel')
+const toast = document.getElementById('toast')
+
+const AVATARS = [
+  '01_robot.png', '02_wizard_girl.png', '03_knight.png', '04_ninja.png',
+  '05_pirate.png', '06_scientist_girl.png', '07_astronaut.png', '08_viking.png',
+  '09_cowgirl.png', '10_detective.png', '11_chef.png', '12_witch.png',
+  '13_samurai.png', '14_fairy_girl.png', '15_firefighter.png', '16_punk_girl.png',
+  '17_explorer.png', '18_dj.png', '19_princess.png', '20_alien.png'
+]
+
+let selectedAvatar = null
+let selectedAvatarFile = null // custom upload chosen in the create wizard (deferred until the agent exists)
+let agents = []
+let currentAgent = null
+// API-safe agent id for the currently open detail modal. Sub-agents key off
+// their name; the main agent's detail object carries name:'wraith' for legacy
+// UI checks but its real agent-dir id is agentId (MAIN_AGENT_ID, e.g.
+// 'gorcsevivan') -- the /api/agents/<id>/skills endpoints need that real id.
+function agentApiName() {
+  return currentAgent ? (currentAgent.agentId || currentAgent.name) : ''
+}
+let wizardStep = 1
+let generatedClaudeMd = ''
+let generatedSoulMd = ''
+let wizardCreatedName = ''
+// Set from the POST /api/agents response when the backend fell back to a template
+// because personality generation failed. It answers 200 in that case (the agent
+// EXISTS and works), so `res.ok` alone cannot tell the operator anything -- without
+// reading this field the wizard would look exactly like a full success.
+let wizardPersonalityPending = null
+
+// === Modal helpers ===
+function openModal(overlay) {
+  overlay.classList.add('active')
+  document.body.style.overflow = 'hidden'
+}
+function closeModal(overlay) {
+  overlay.classList.remove('active')
+  document.body.style.overflow = ''
+  // Skill modal is used by two distinct callers (Agent detail + Skills
+  // page). Reset the scope on every close path -- explicit button,
+  // click-outside, Esc, programmatic -- so the next opener cannot
+  // inherit a stale 'global' flag from an earlier Skills-page open.
+  if (overlay && overlay.id === 'skillModalOverlay') skillModalScope = null
+}
+
+// Wizard open
+addBtn.addEventListener('click', () => {
+  resetWizard()
+  openModal(agentWizardOverlay)
+  setTimeout(() => agentName.focus(), 200)
+})
+
+// Close buttons
+document.getElementById('wizardClose').addEventListener('click', () => closeModal(agentWizardOverlay))
+document.getElementById('agentDetailClose').addEventListener('click', () => closeModal(agentDetailOverlay))
+document.getElementById('skillModalClose').addEventListener('click', () => closeModal(skillModalOverlay))
+
+// Click-outside-to-close
+agentWizardOverlay.addEventListener('click', (e) => { if (e.target === agentWizardOverlay) closeModal(agentWizardOverlay) })
+agentDetailOverlay.addEventListener('click', (e) => { if (e.target === agentDetailOverlay) closeModal(agentDetailOverlay) })
+skillModalOverlay.addEventListener('click', (e) => { if (e.target === skillModalOverlay) closeModal(skillModalOverlay) })
+
+// Close all modals on Escape
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.modal-overlay.active').forEach((o) => closeModal(o))
+  }
+})
+
+// === Avatar Gallery ===
+function populateAvatarGrid() {
+  const grid = document.getElementById('avatarGrid')
+  grid.innerHTML = ''
+  for (const avatar of AVATARS) {
+    const item = document.createElement('div')
+    item.className = 'avatar-grid-item'
+    item.dataset.avatar = avatar
+    item.innerHTML = `<img src="/avatars/${avatar}" alt="${avatar.replace(/^\d+_/, '').replace('.png', '')}">`
+    item.addEventListener('click', () => {
+      grid.querySelectorAll('.avatar-grid-item').forEach(i => i.classList.remove('selected'))
+      item.classList.add('selected')
+      selectedAvatar = avatar
+      // Gallery pick and custom upload are mutually exclusive.
+      selectedAvatarFile = null
+      resetCreateAvatarUpload()
+    })
+    grid.appendChild(item)
+  }
+}
+
+// === Wizard logic ===
+let cachedProfiles = null
+async function loadProfiles() {
+  if (cachedProfiles) return cachedProfiles
+  try {
+    const res = await fetch('/api/profiles')
+    if (res.ok) cachedProfiles = await res.json()
+  } catch {}
+  return cachedProfiles || []
+}
+
+function populateProfileSelect(selectEl, descEl, selected) {
+  loadProfiles().then((profiles) => {
+    selectEl.innerHTML = ''
+    for (const p of profiles) {
+      const opt = document.createElement('option')
+      opt.value = p.id
+      const tag = p.permissionMode === 'strict' ? ` (${t('agents.strict_mode')})` : ''
+      opt.textContent = `${p.label}${tag}`
+      if (p.id === selected) opt.selected = true
+      selectEl.appendChild(opt)
+    }
+    const updateDesc = () => {
+      const p = profiles.find(x => x.id === selectEl.value)
+      descEl.textContent = p ? p.description : ''
+    }
+    selectEl.onchange = updateDesc
+    updateDesc()
+  })
+}
+
+// Populate the per-agent Claude subscription plan dropdown from the named
+// registry (/api/claude-plans). The empty value means "no named plan" -> the
+// agent keeps its raw config-dir / host default. The description line shows the
+// plan type + config dir and flags a Channels-forbidden plan so the operator
+// sees the guardrail context before saving.
+function populatePlanSelect(selectEl, descEl, selected) {
+  if (!selectEl) return
+  fetch('/api/claude-plans')
+    .then(res => (res.ok ? res.json() : []))
+    .catch(() => [])
+    .then((plans) => {
+      const known = plans.some(p => p.id === selected)
+      const opts = [`<option value="">${escapeHtml(t('agents.settings.plan_default'))}</option>`]
+      for (const p of plans) {
+        opts.push(`<option value="${escapeHtml(p.id)}">${escapeHtml(p.label)}</option>`)
+      }
+      // Preserve an already-assigned plan id that is NOT in the loaded registry
+      // (registry edited/renamed, OR /api/claude-plans transiently failed and
+      // returned []). Without this the dropdown would resolve to '' and a save
+      // would silently wipe the real assignment.
+      if (selected && !known) {
+        opts.push(`<option value="${escapeHtml(selected)}">${escapeHtml(selected)}${escapeHtml(t('agents.settings.plan_not_found_suffix'))}</option>`)
+      }
+      selectEl.innerHTML = opts.join('')
+      selectEl.value = selected || ''
+      const updateDesc = () => {
+        if (!descEl) return
+        const val = selectEl.value
+        if (!val) {
+          descEl.textContent = t('agents.settings.plan_default_desc')
+          return
+        }
+        const p = plans.find(x => x.id === val)
+        if (!p) {
+          descEl.textContent = t('agents.settings.plan_unresolved_desc', { id: val })
+          return
+        }
+        const warn = p.channelsAllowed ? '' : t('agents.settings.plan_no_channels')
+        descEl.textContent = `${p.planType} · ${p.configDir}${warn}`
+      }
+      selectEl.onchange = updateDesc
+      updateDesc()
+    })
+}
+
+// Paints (or clears) the step-3 notice from wizardPersonalityPending. Called from
+// resetWizard() too, so a later successful run can never inherit a stale banner.
+function renderWizardPendingBanner() {
+  const banner = document.getElementById('wizardPendingBanner')
+  if (!banner) return
+  if (!wizardPersonalityPending) {
+    banner.hidden = true
+    return
+  }
+  document.getElementById('wizardPendingTitle').textContent = t('agents.wizard.pending_title')
+  document.getElementById('wizardPendingBody').textContent = t('agents.wizard.pending_body')
+  const detailEl = document.getElementById('wizardPendingDetail')
+  const detail = wizardPersonalityPending.detail
+  // The cause is shown, but only when the server actually sent one: an empty
+  // string here would render "A hiba oka: " with nothing after it, which reads
+  // like the UI lost something.
+  if (detail) {
+    detailEl.textContent = t('agents.wizard.pending_detail', { detail })
+    detailEl.hidden = false
+  } else {
+    detailEl.textContent = ''
+    detailEl.hidden = true
+  }
+  banner.hidden = false
+}
+
+function resetWizard() {
+  wizardStep = 1
+  agentName.value = ''
+  agentDesc.value = ''
+  agentModel.value = 'inherit'
+  loadAvailableModels()
+  selectedAvatar = null
+  selectedAvatarFile = null
+  document.querySelectorAll('#avatarGrid .avatar-grid-item').forEach(i => i.classList.remove('selected'))
+  resetCreateAvatarUpload()
+  generatedClaudeMd = ''
+  generatedSoulMd = ''
+  wizardCreatedName = ''
+  wizardPersonalityPending = null
+  renderWizardPendingBanner()
+  document.getElementById('wizardClaudeMd').value = ''
+  document.getElementById('wizardSoulMd').value = ''
+  populateProfileSelect(
+    document.getElementById('agentProfile'),
+    document.getElementById('agentProfileDesc'),
+    'default',
+  )
+  updateWizardUI()
+}
+
+function updateWizardUI() {
+  // Steps indicator
+  document.querySelectorAll('#wizardSteps .wizard-step').forEach((s) => {
+    const step = parseInt(s.dataset.step)
+    s.classList.toggle('active', step === wizardStep)
+    s.classList.toggle('done', step < wizardStep)
+  })
+  // Panels
+  document.getElementById('wizardStep1').hidden = wizardStep !== 1
+  document.getElementById('wizardStep2').hidden = wizardStep !== 2
+  document.getElementById('wizardStep3').hidden = wizardStep !== 3
+}
+
+// Step 1 -> Step 2 (generate)
+document.getElementById('wizardNextBtn').addEventListener('click', async () => {
+  const name = agentName.value.trim()
+  const desc = agentDesc.value.trim()
+  if (!name) { agentName.focus(); return }
+  if (!desc) { agentDesc.focus(); return }
+
+  wizardStep = 2
+  updateWizardUI()
+
+  const statusEl = document.getElementById('wizardGenStatus')
+  statusEl.textContent = t('agents.claude_md_generating')
+
+  try {
+    // Create agent via API (returns generated content)
+    const res = await fetch('/api/agents', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        description: desc,
+        model: agentModel.value,
+        profile: document.getElementById('agentProfile').value,
+      }),
+    })
+
+    if (!res.ok) {
+      const err = await res.json()
+      throw new Error(err.error || 'Ismeretlen hiba')
+    }
+
+    const result = await res.json()
+    // Backend sanitizes the name (lowercase ASCII, NFD-stripped accents).
+    // Use the sanitized form for every follow-up request so accented input
+    // like "étrendíró" still resolves to the real agent dir "etrendiro".
+    const createdName = result.name || name
+    wizardCreatedName = createdName
+    // 200 + personalityPending means the agent was created but its personality
+    // came from a template. Captured here and painted when step 3 opens, where
+    // the operator both sees the placeholder text and can rewrite it.
+    wizardPersonalityPending = result.personalityPending
+      ? { detail: result.detail || '', warning: result.warning || '' }
+      : null
+    statusEl.textContent = t('agents.soul_md_generating')
+
+    // Fetch full agent details to get generated content
+    const detailRes = await fetch(`/api/agents/${encodeURIComponent(createdName)}`)
+    if (detailRes.ok) {
+      const detail = await detailRes.json()
+      generatedClaudeMd = detail.claudeMd || detail.content || ''
+      generatedSoulMd = detail.soulMd || ''
+    }
+
+    statusEl.textContent = t('kanban.breakdown.running')
+
+    // Apply the chosen avatar. Custom upload wins over a gallery pick; both go
+    // to the same endpoint (FormData for a file, JSON for a gallery name).
+    if (selectedAvatarFile) {
+      const form = new FormData()
+      form.append('avatar', selectedAvatarFile, selectedAvatarFile.name)
+      await fetch(`/api/agents/${encodeURIComponent(createdName)}/avatar`, {
+        method: 'POST',
+        body: form,
+      })
+    } else if (selectedAvatar) {
+      await fetch(`/api/agents/${encodeURIComponent(createdName)}/avatar`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ galleryAvatar: selectedAvatar }),
+      })
+    }
+
+    // Auto-advance to step 3
+    setTimeout(() => {
+      wizardStep = 3
+      document.getElementById('wizardClaudeMd').value = generatedClaudeMd
+      document.getElementById('wizardSoulMd').value = generatedSoulMd
+      renderWizardPendingBanner()
+      updateWizardUI()
+    }, 600)
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+    wizardStep = 1
+    updateWizardUI()
+  }
+})
+
+// Step 3 -> back to step 1
+document.getElementById('wizardBackBtn').addEventListener('click', () => {
+  wizardStep = 1
+  updateWizardUI()
+})
+
+// Step 3 -> Create (finalize with edits)
+document.getElementById('wizardCreateBtn').addEventListener('click', async () => {
+  // Use the backend-sanitized name stored in wizardCreatedName, not the raw
+  // input field -- accents in the input would miss the real agent dir.
+  const name = wizardCreatedName || agentName.value.trim()
+  const claudeMd = document.getElementById('wizardClaudeMd').value
+  const soulMd = document.getElementById('wizardSoulMd').value
+  const createBtn = document.getElementById('wizardCreateBtn')
+
+  createBtn.disabled = true
+  createBtn.querySelector('.btn-text').hidden = true
+  createBtn.querySelector('.btn-loading').hidden = false
+
+  try {
+    // Update with edited content
+    const res = await fetch(`/api/agents/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ claudeMd, soulMd }),
+    })
+
+    if (!res.ok) {
+      const err = await res.json()
+      throw new Error(err.error || 'Ismeretlen hiba')
+    }
+
+    closeModal(agentWizardOverlay)
+    showToast('Ugynok letrehozva. Kosd be a csatornat a parosatashoz.')
+    await loadAgents()
+    // Drop the operator straight into the Telegram tab of the new agent so
+    // the pairing step is in front of them -- easy to miss otherwise.
+    try {
+      await openAgentDetail(name)
+      switchAgentTab('channel')
+    } catch { /* detail open failed, list refresh already happened */ }
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    createBtn.disabled = false
+    createBtn.querySelector('.btn-text').hidden = false
+    createBtn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+// === Toast ===
+function showToast(msg, duration = 3000) {
+  toast.textContent = msg
+  toast.classList.add('visible')
+  setTimeout(() => toast.classList.remove('visible'), duration)
+}
+
+// === Agents API ===
+async function loadAgents() {
+  try {
+    // The federation status fetch is deliberately failure-proof (.catch ->
+    // null): it must NEVER take down the Agents page -- including on an
+    // older backend where the route 404s.
+    const [agentsRes, wraithRes, fedStatus] = await Promise.all([
+      fetch('/api/agents'),
+      fetch('/api/wraith'),
+      fetch('/api/federation/status').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ])
+    agents = await agentsRes.json()
+    if (fedStatus && Array.isArray(fedStatus.peers)) federatedPeerStatus = fedStatus.peers
+    if (wraithRes.ok) {
+      window._wraith = await wraithRes.json()
+      // A backend CHANNEL_PROVIDER-éhez igazitsuk a kliens-default-ot,
+      // hogy ne 'telegram' jelenjen meg amikor a backend discord-on van.
+      if (window._wraith?.channelProvider) {
+        currentChannelProvider = window._wraith.channelProvider
+        const sel = document.getElementById('chProviderSelect')
+        if (sel) sel.value = currentChannelProvider
+        if (typeof updateProviderUI === 'function') updateProviderUI()
+      }
+    }
+    renderAgents()
+  } catch (err) {
+    console.error('Betöltés hiba:', err)
+  }
+}
+
+// Format a context-token count for display (e.g. 699884 -> "≈700k token").
+function formatContextTokens(n) {
+  if (typeof n !== 'number' || !isFinite(n) || n <= 0) return '-'
+  if (n < 1000) return `${n} token`
+  const k = n / 1000
+  return `≈${k < 10 ? k.toFixed(1) : Math.round(k)}k token`
+}
+
+// Populate the auto-restart controls + context display from an agent payload.
+// Works for sub-agents (agent.name) and the main session (agent.autoRestartId).
+function setupAutoRestartUI(agent) {
+  const ctxEl = document.getElementById('agentDetailContext')
+  if (ctxEl) ctxEl.textContent = formatContextTokens(agent && agent.contextTokens)
+
+  const ar = (agent && agent.autoRestart) || { enabled: false, mode: 'continue', dailyTime: null, intervalHours: null }
+  const enabled = document.getElementById('arEnabled')
+  const mode = document.getElementById('arMode')
+  const schedKind = document.getElementById('arSchedKind')
+  const dailyWrap = document.getElementById('arDailyWrap')
+  const dailyTime = document.getElementById('arDailyTime')
+  const intervalWrap = document.getElementById('arIntervalWrap')
+  const intervalHours = document.getElementById('arIntervalHours')
+  if (!enabled || !mode || !schedKind) return
+
+  enabled.checked = ar.enabled === true
+  mode.value = ar.mode === 'fresh' ? 'fresh' : 'continue'
+  if (ar.intervalHours) {
+    schedKind.value = 'interval'
+    intervalHours.value = ar.intervalHours
+  } else {
+    schedKind.value = 'daily'
+    if (ar.dailyTime) dailyTime.value = ar.dailyTime
+  }
+  const syncSched = () => {
+    const isInterval = schedKind.value === 'interval'
+    intervalWrap.hidden = !isInterval
+    dailyWrap.hidden = isInterval
+  }
+  syncSched()
+  // Attach the show/hide listener once.
+  if (schedKind.dataset.wired !== '1') {
+    schedKind.addEventListener('change', syncSched)
+    schedKind.dataset.wired = '1'
+  }
+}
+
+async function openWraithDetail() {
+  const m = window._wraith
+  if (!m) return
+
+  // Reuse the agent detail modal for Wraith
+  currentAgent = { ...m, name: mainAgentId(), claudeMd: '', soulMd: '', mcpJson: '', skills: [] }
+  setupAutoRestartUI(currentAgent)
+
+  const displayName = m.name || 'Wraith'
+  document.getElementById('agentDetailTitle').textContent = displayName
+  const avatar = document.getElementById('agentDetailAvatar')
+  avatar.className = 'detail-avatar gradient-1'
+  avatar.innerHTML = `<img src="/api/wraith/avatar${avatarBust()}" alt="${escapeHtml(displayName)}">`
+  document.getElementById('agentDetailName').textContent = displayName
+  document.getElementById('agentDetailDesc').textContent = m.description || ''
+  document.getElementById('agentDetailModel').textContent = m.model || '-'
+  document.getElementById('agentDetailChStatus').innerHTML = `<span class="tg-status"><span class="tg-dot connected"></span>${t('agents.channel.connected')}</span>`
+  // Populate the Skills tab for the main agent too: the endpoint returns the
+  // global ~/.claude/skills under its real id (agentId), which every agent
+  // inherits. Previously this was hard-set to '-' and loadSkills was never
+  // called, so the main agent's Skills tab always looked empty.
+  loadSkills(agentApiName())
+
+  // Process control for Wraith - always running, no start/stop
+  document.getElementById('processDot').className = 'process-dot running'
+  document.getElementById('processLabel').textContent = t('agents.status.running')
+  document.getElementById('processUptime').textContent = `tmux: ${m.tmuxSession || '-'}`
+  document.getElementById('agentStartBtn').hidden = true
+  document.getElementById('agentStopBtn').hidden = true
+  // Sync the settings tab model select with Wraith's actual model so it
+  // doesn't carry over the previously opened sub-agent's selection.
+  const wraithModelSelect = document.getElementById('editAgentModel')
+  if (wraithModelSelect) {
+    // The main agent's real model (e.g. 'claude-opus-4-8') may not match any
+    // static option verbatim (the option is 'claude-opus-4-8[1m]'), so a plain
+    // .value assignment finds no match and the select silently displays the
+    // first option (Fable 5), misrepresenting what the agent actually runs.
+    // Inject the real id as an option so the (read-only) select shows the truth
+    // -- same trick as the sub-agent panel's dynamic-model-opt.
+    const mv = m.activeModel || m.model || ''
+    Array.from(wraithModelSelect.querySelectorAll('option.dynamic-model-opt')).forEach(o => o.remove())
+    if (mv && !Array.from(wraithModelSelect.options).some(o => o.value === mv)) {
+      const opt = document.createElement('option')
+      opt.value = mv
+      opt.className = 'dynamic-model-opt'
+      opt.textContent = mv
+      wraithModelSelect.appendChild(opt)
+    }
+    wraithModelSelect.value = mv
+  }
+  // Populate the model dropdown groups (auto/manual) AND surface the OpenRouter
+  // curation button -- this is the main agent, the only place curation lives.
+  loadAvailableModels()
+  // Surface the "channels restart" button -- destructive, but mobile-safe
+  // when the Telegram plugin wedges and you're away from a terminal.
+  document.getElementById('wraithRestartBtn').hidden = false
+
+  // Settings tab - load real CLAUDE.md / SOUL.md / .mcp.json (read-only).
+  // Editing the main agent's identity files via the dashboard is intentionally
+  // not allowed: a leaked dashboard token would otherwise let a remote user
+  // rewrite the live agent's instructions. Edit via filesystem or by asking
+  // Wraith on Telegram instead.
+  let mFull = m
+  try {
+    const claudeRes = await fetch('/api/wraith')
+    if (claudeRes.ok) {
+      mFull = await claudeRes.json()
+      document.getElementById('editClaudeMd').value = mFull.claudeMd || ''
+      document.getElementById('editSoulMd').value = mFull.soulMd || ''
+      document.getElementById('editMcpJson').value = mFull.mcpJson || ''
+    }
+  } catch {}
+  applyWraithReadonlyMode(true)
+
+  // Telegram tab -- without this the tab stays in the default "not connected"
+  // view even though the bot is running and receiving messages.
+  updateChannelTab({
+    name: mainAgentId(),
+    hasTelegram: mFull.hasTelegram !== undefined ? mFull.hasTelegram : true,
+    hasDiscord: mFull.hasDiscord,
+    hasSlack: mFull.hasSlack,
+    telegramBotUsername: mFull.telegramBotUsername,
+    running: true,
+  })
+
+  // Delete button - hide for Wraith
+  document.getElementById('deleteAgentBtn').style.display = 'none'
+
+  document.getElementById('detailAvatarGallery').hidden = true
+  switchAgentTab('overview')
+  openModal(agentDetailOverlay)
+}
+
+// `readOnly` is really "this modal is showing the MAIN agent" -- it is called
+// with true from openWraithDetail and false from openAgentDetail, which makes
+// it the one hook both open-paths share. Anything that must differ for the main
+// agent belongs here; putting it in openAgentDetail alone silently no-ops for
+// the main agent, whose panel never runs that function.
+function applyWraithReadonlyMode(readOnly) {
+  // The Team tab describes a SUB-agent's place in the hierarchy: role
+  // (leader | member), who it reports to, who it delegates to. None of it
+  // applies to the main agent, which has no team record and cannot have one.
+  // Its role is 'main', a tier ABOVE leader, and it is an implicit trusted peer
+  // of every agent (see isTrustedPeer), so there is nothing to configure. Shown
+  // anyway, the tab printed the literal fallback "member" and invited the
+  // operator to promote the main agent to 'leader' -- a demotion, and one that
+  // cannot be saved either way: the PUT targets /api/agents/<main>/team, which
+  // 404s because no agents/<main>/ directory exists. Hide the whole tab, same
+  // reasoning as claudePlanGroup.
+  const teamTabBtn = document.querySelector('#agentTabNav .tab-btn[data-tab="team"]')
+  if (teamTabBtn) teamTabBtn.hidden = readOnly
+  const textareaIds = ['editClaudeMd', 'editSoulMd', 'editMcpJson']
+  // saveModelBtn stays VISIBLE but disabled for Wraith, so the settings tab
+  // doesn't look like the row is missing -- the other save buttons (tied to
+  // readonly textareas) are hidden because the textareas are also hidden by
+  // the readonly note flow.
+  const hideButtonIds = ['saveClaudeMdBtn', 'saveSoulMdBtn', 'saveMcpJsonBtn', 'saveAuthModeBtn']
+  const disableButtonIds = ['saveModelBtn']
+  for (const id of textareaIds) {
+    const el = document.getElementById(id)
+    if (!el) continue
+    if (readOnly) el.setAttribute('readonly', 'readonly')
+    else el.removeAttribute('readonly')
+  }
+  const modelSelect = document.getElementById('editAgentModel')
+  if (modelSelect) modelSelect.disabled = readOnly
+  for (const id of hideButtonIds) {
+    const btn = document.getElementById(id)
+    if (btn) btn.hidden = readOnly
+  }
+  for (const id of disableButtonIds) {
+    const btn = document.getElementById(id)
+    if (btn) { btn.hidden = false; btn.disabled = readOnly }
+  }
+  const authModeGroup = document.getElementById('authModeGroup')
+  if (authModeGroup) authModeGroup.hidden = readOnly
+  const memoryIsolationGroup = document.getElementById('memoryIsolationGroup')
+  if (memoryIsolationGroup) memoryIsolationGroup.hidden = readOnly
+  const note = document.getElementById('wraithReadonlyNote')
+  if (note) note.hidden = !readOnly
+}
+
+
+function getAvatarGradient(name) {
+  const hash = name.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
+  return 'gradient-' + ((hash % 3) + 1)
+}
+
+// Tooltip text for the "Fut" / "Leállva" footer indicator (process state).
+function processTip(isRunning) {
+  return isRunning
+    ? t('agents.running_tip')
+    : t('agents.stopped_tip')
+}
+
+// Tooltip text for the "Online" / "Offline" footer indicator (channel state).
+function channelTip(isConnected) {
+  return isConnected
+    ? t('agents.online_tip')
+    : t('agents.offline_tip')
+}
+
+// Build the copy-paste tmux attach command for an agent live session. A local
+// agent session runs on the orchestrator host (a direct `tmux attach`); a remote
+// agent session runs on its configured remoteHost, reached over ssh. Only
+// meaningful for running agents.
+function tmuxAttachCommand(agent) {
+  const session = agent.session || ('agent-' + agent.name)
+  const direct = 'tmux attach -t ' + session
+  const remoteHost = agent.remoteHost || null
+  return remoteHost ? 'ssh ' + remoteHost + " -t '" + direct + "'" : direct
+}
+
+// Append a single "copy tmux attach command" button to a running agent card.
+// Clicks copy to clipboard and never bubble to the card open-detail handler.
+function attachTmuxCopyButtons(card, agent) {
+  const cmd = tmuxAttachCommand(agent)
+  const row = document.createElement('div')
+  row.className = 'agent-tmux-cmds'
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = 'tmux-copy-btn'
+  btn.setAttribute('aria-label', t('agents.tmux_copy_aria'))
+  btn.title = cmd
+  btn.innerHTML = '<span class="tmux-copy-ico">⧉</span>tmux'
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    navigator.clipboard.writeText(cmd).then(() => {
+      const orig = btn.innerHTML
+      btn.classList.add('copied')
+      btn.innerHTML = '<span class="tmux-copy-ico">✓</span>' + t('agents.tmux_copied')
+      setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('copied') }, 1400)
+    }).catch(() => showToast(t('agents.tmux_copy_failed')))
+  })
+  row.appendChild(btn)
+  card.appendChild(row)
+}
+
+function renderAgents() {
+  agentsGrid.querySelectorAll('.agent-card:not(.add-card)').forEach((el) => el.remove())
+
+  // Wraith card (always first)
+  if (window._wraith) {
+    const m = window._wraith
+    const displayName = m.name || 'Wraith'
+    // The model is no longer hardcoded: /api/wraith reports the configured
+    // model (readActiveModelFromProjectDir). Mirror the sub-agent card, which
+    // uses the model value as both the badge label and class. Fall back to
+    // 'opus' only before /api/wraith has resolved (or on a legacy backend).
+    const mainModelLabel = m.model || 'opus'
+    const mainModelClass = m.model || 'opus'
+    const mCard = document.createElement('div')
+    mCard.className = 'agent-card wraith-card'
+    mCard.innerHTML = `
+      <div class="agent-card-top">
+        <div class="agent-avatar gradient-1"><img src="/api/wraith/avatar${avatarBust()}" alt="${escapeHtml(displayName)}"></div>
+        <div class="agent-card-info">
+          <div class="agent-name">${escapeHtml(displayName)} <span class="wraith-badge">${t('agents.main_badge')}</span></div>
+          <div class="agent-desc">${escapeHtml(m.description || '')}</div>
+        </div>
+      </div>
+      <div class="agent-card-footer">
+        <span class="agent-model-badge ${escapeHtml(mainModelClass)}">${escapeHtml(mainModelLabel)}</span>
+        <span class="process-indicator" title="${t('agents.wraith_process_tip')}"><span class="process-dot running"></span>${t('agents.status.running')}</span>
+        <span class="tg-status" title="${t('agents.wraith_channel_tip')}"><span class="tg-dot connected"></span>${t('agents.status.online')}</span>
+      </div>
+      <div class="agent-card-actions">
+        <button class="btn-secondary btn-compact agent-conversation-btn" title="${t('agents.btn.conversation')}">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          ${t('agents.btn.conversation')}
+        </button>
+        <button class="btn-secondary btn-compact agent-terminal-btn" title="Terminal">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          Terminal
+        </button>
+      </div>
+    `
+    mCard.querySelector('.agent-terminal-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation(); openTerminalModal(mainAgentId())
+    })
+    mCard.querySelector('.agent-conversation-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation(); openConversationModal(mainAgentId(), t('agents.wraith_boss'))
+    })
+    mCard.addEventListener('click', () => openWraithDetail())
+    agentsGrid.insertBefore(mCard, addBtn)
+  }
+
+  for (const agent of agents) {
+    // agent.name is the sanitized id (API/filesystem); displayName keeps the
+    // original accented/cased input the user typed.
+    const label = agent.displayName || agent.name
+    const card = document.createElement('div')
+    card.className = 'agent-card'
+    card.dataset.name = agent.name
+    const initial = label.charAt(0).toUpperCase()
+    const gradientClass = getAvatarGradient(agent.name)
+    const avatarHtml = (agent.hasImage || agent.hasAvatar)
+      ? `<img src="/api/agents/${encodeURIComponent(agent.name)}/avatar${avatarBust()}" alt="${escapeHtml(label)}">`
+      : initial
+
+    const modelClass = agent.model && agent.model !== 'inherit' ? agent.model : ''
+    const modelLabel = agent.model || 'inherit'
+    const chConnected = agentIsConnected(agent)
+    const chDotClass = chConnected ? 'connected' : 'disconnected'
+    const chLabel = chConnected ? t('agents.status.online') : t('agents.status.offline')
+    const isRunning = agent.running || false
+    const runDotClass = isRunning ? 'running' : 'stopped'
+    const runLabel = isRunning ? t('agents.status.running') : t('agents.status.stopped')
+
+    card.innerHTML = `
+      <div class="agent-card-top">
+        <div class="agent-avatar ${gradientClass}">${avatarHtml}</div>
+        <div class="agent-card-info">
+          <div class="agent-name">${escapeHtml(label)}</div>
+          <div class="agent-desc">${escapeHtml(agent.description || '')}</div>
+        </div>
+      </div>
+      <div class="agent-card-footer">
+        <span class="agent-model-badge ${escapeHtml(modelClass)}">${escapeHtml(modelLabel)}</span>
+        <span class="process-indicator" title="${escapeHtml(processTip(isRunning))}"><span class="process-dot ${runDotClass}"></span>${runLabel}</span>
+        <span class="tg-status" title="${escapeHtml(channelTip(chConnected))}"><span class="tg-dot ${chDotClass}"></span>${chLabel}</span>
+      </div>
+      ${agent.needsReauth ? `
+        <div class="agent-reauth-banner">
+          <span class="agent-reauth-reason">${escapeHtml(agent.reauthReason || t('agents.reauth.reason'))}</span>
+          <button class="btn-danger btn-compact agent-login-btn" data-phase="start">${t('agents.btn.login')}</button>
+        </div>` : ''}
+      <div class="agent-card-actions">
+        <button class="btn-secondary btn-compact agent-conversation-btn" title="${t('agents.btn.conversation')}">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          ${t('agents.btn.conversation')}
+        </button>
+        <button class="btn-secondary btn-compact agent-terminal-btn" title="Terminal">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          Terminal
+        </button>
+      </div>
+    `
+    // Login button handler (start → confirm flow)
+    card.querySelectorAll('.agent-login-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => { e.stopPropagation(); handleAgentLogin(agent.name, btn) })
+    })
+    // Terminal button
+    card.querySelector('.agent-terminal-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation(); openTerminalModal(agent.name)
+    })
+    // Conversation (readable transcript) button
+    card.querySelector('.agent-conversation-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation(); openConversationModal(agent.name, label)
+    })
+    card.addEventListener('click', () => openAgentDetail(agent.name))
+    // Only running agents have a live session to look at, so only they get the
+    // copy-the-tmux-command buttons.
+    if (isRunning) attachTmuxCopyButtons(card, agent)
+    agentsGrid.insertBefore(card, addBtn)
+  }
+  renderFederatedAgentCards(agentsGrid, addBtn)
+  // Re-apply the live busy tint right after a re-render (renderAgents rebuilds
+  // the cards from scratch, dropping the class), so it never blinks off while
+  // the page is open.
+  if (agentsBusyTimer) refreshAgentTerminalBusy()
+}
+
+// === Agents: live "working" tint on Terminal buttons ===
+// Reuse the Activity page's data source (/api/agents/activity, same 3s poll,
+// same working/idle state derived from the tmux pane) to turn an agent card's
+// Terminal button green while that agent is actively working, and clear it when
+// it goes idle or stops. No new backend -- just a second consumer of the same
+// endpoint. The main (Wraith) card matches on mainAgentId(); sub-agent cards
+// match on their data-name.
+let agentsBusyTimer = null
+function startAgentsBusyPoll() {
+  refreshAgentTerminalBusy()
+  if (agentsBusyTimer) clearInterval(agentsBusyTimer)
+  agentsBusyTimer = setInterval(refreshAgentTerminalBusy, 3000)
+}
+function stopAgentsBusyPoll() {
+  if (agentsBusyTimer) { clearInterval(agentsBusyTimer); agentsBusyTimer = null }
+}
+async function refreshAgentTerminalBusy() {
+  if (!agentsGrid) return
+  let entries
+  try {
+    const res = await fetch('/api/agents/activity')
+    if (!res.ok) return
+    entries = await res.json()
+  } catch { return }
+  if (!Array.isArray(entries)) return
+  const stateByName = new Map(entries.map((e) => [e.name, e.state]))
+  const mainId = mainAgentId()
+  agentsGrid.querySelectorAll('.agent-card:not(.add-card)').forEach((card) => {
+    const btn = card.querySelector('.agent-terminal-btn')
+    if (!btn) return
+    const id = card.classList.contains('wraith-card') ? mainId : card.dataset.name
+    const working = !!id && stateByName.get(id) === 'working'
+    btn.classList.toggle('agent-terminal-btn--busy', working)
+  })
+}
+
+// Federated (remote-system) agents from the manifest-poller cache. Kept in a
+// SEPARATE array from `agents`: that global feeds the team editor and the
+// create-wizard, where qualified ids would be selectable-and-invalid.
+// "remote" already means SSH agents in this codebase -- these are FEDERATED.
+let federatedPeerStatus = []
+
+// System/plumbing agent names never shown as message targets.
+const FEDERATED_HIDDEN_AGENTS = new Set(['heartbeat', 'telegram-coordinator', 'channel-coordinator'])
+
+function federatedAgentEntries() {
+  const out = []
+  for (const peer of federatedPeerStatus) {
+    const manifest = peer && peer.manifest
+    if (!manifest || !Array.isArray(manifest.agents)) continue
+    for (const a of manifest.agents) {
+      if (!a || typeof a.id !== 'string' || FEDERATED_HIDDEN_AGENTS.has(a.id.split('/').pop())) continue
+      out.push({ peer: peer.id, peerState: peer.state, qualified: `${peer.id}/${a.id}`, displayName: a.displayName || a.id, model: a.model || '' })
+    }
+  }
+  return out
+}
+
+function renderFederatedAgentCards(agentsGrid, addBtn) {
+  for (const fa of federatedAgentEntries()) {
+    const card = document.createElement('div')
+    card.className = 'agent-card federated-agent-card'
+    const reachable = fa.peerState === 'ok'
+    // SECURITY: every manifest-derived string is peer-controlled. Text nodes
+    // go through escapeHtml; NOTHING peer-controlled may land in an attribute
+    // (escapeHtml does not encode quotes). The model badge is a plain text
+    // span WITHOUT a model-derived class.
+    const gradientClass = 'gradient-' + ((fa.qualified.charCodeAt(0) % 3) + 1)
+    card.innerHTML = `
+      <div class="agent-card-top">
+        <div class="agent-avatar ${gradientClass}">${escapeHtml(fa.displayName.charAt(0).toUpperCase())}</div>
+        <div class="agent-card-info">
+          <div class="agent-name">${escapeHtml(fa.displayName)} <span class="federated-badge">${t('federation.badge', { peer: fa.peer })}</span></div>
+          <div class="agent-desc">${escapeHtml(fa.qualified)}</div>
+        </div>
+      </div>
+      <div class="agent-card-footer">
+        <span class="agent-model-badge">${escapeHtml(fa.model)}</span>
+        <span class="tg-status"><span class="tg-dot ${reachable ? 'connected' : 'disconnected'}"></span> ${reachable ? t('federation.peer_state.ok') : t('federation.peer_state.' + (fa.peerState || 'unknown'))}</span>
+      </div>
+      <div class="agent-card-actions">
+        <button class="btn-secondary btn-compact federated-message-btn">${t('federation.btn.message')}</button>
+      </div>`
+    card.querySelector('.federated-message-btn').addEventListener('click', (e) => {
+      e.stopPropagation()
+      openFederatedThread(fa.qualified)
+    })
+    agentsGrid.insertBefore(card, addBtn)
+  }
+}
+
+function openFederatedThread(qualifiedId) {
+  chatSelectedAgent = qualifiedId
+  if (location.hash === '#messages') switchPage('messages')
+  else location.hash = 'messages'
+}
+
+// === Agent Detail ===
+async function openAgentDetail(agentName) {
+  if (agentName === mainAgentId()) {
+    return openWraithDetail()
+  }
+
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}`)
+    if (!res.ok) throw new Error('Not found')
+    currentAgent = await res.json()
+  } catch (err) {
+    showToast(t('agents.toast.load_failed'))
+    return
+  }
+
+  const detailLabel = currentAgent.displayName || currentAgent.name
+
+  // Title
+  document.getElementById('agentDetailTitle').textContent = detailLabel
+
+  // Overview tab
+  const initial = detailLabel.charAt(0).toUpperCase()
+  const gradientClass = getAvatarGradient(currentAgent.name)
+  const avatar = document.getElementById('agentDetailAvatar')
+  avatar.className = 'detail-avatar ' + gradientClass
+  avatar.innerHTML = (currentAgent.hasImage || currentAgent.hasAvatar)
+    ? `<img src="/api/agents/${encodeURIComponent(currentAgent.name)}/avatar" alt="${escapeHtml(detailLabel)}">`
+    : initial
+  document.getElementById('agentDetailName').textContent = detailLabel
+  document.getElementById('agentDetailDesc').textContent = currentAgent.description || ''
+  document.getElementById('agentDetailModel').textContent = currentAgent.activeModel || currentAgent.model || 'inherit'
+  document.getElementById('agentDetailModelRestarting').hidden = true
+
+  const chConnected = agentIsConnected(currentAgent)
+  document.getElementById('agentDetailChStatus').innerHTML = `<span class="tg-status"><span class="tg-dot ${chConnected ? 'connected' : 'disconnected'}"></span>${chConnected ? t('agents.channel.connected') : t('agents.channel.disconnected')}</span>`
+
+  // Settings tab - load Ollama + DeepSeek models then set value
+  loadAvailableModels()
+  loadOllamaModels().then(() => {
+    const sel = document.getElementById('editAgentModel')
+    const mv = currentAgent.activeModel || currentAgent.model || 'claude-opus-4-8[1m]'
+    // The model <select> is one shared element reused per agent. A manual
+    // OpenRouter id (or openrouter-auto:tier) may not be among the static/auto
+    // options, so setting .value would silently show nothing. Inject THIS
+    // agent's model as a selectable option (cleaning any stale injected ones
+    // first) so every agent always displays its own model, per-agent.
+    Array.from(sel.querySelectorAll('option.dynamic-model-opt')).forEach(o => o.remove())
+    if (!Array.from(sel.options).some(o => o.value === mv)) {
+      const opt = document.createElement('option')
+      opt.value = mv
+      opt.className = 'dynamic-model-opt'
+      opt.textContent = mv.startsWith('openrouter-auto:') ? `🔀 ${mv}` : `🔀 ${mv}`
+      sel.appendChild(opt)
+    }
+    sel.value = mv
+  })
+  populateProfileSelect(
+    document.getElementById('editAgentProfile'),
+    document.getElementById('editAgentProfileDesc'),
+    currentAgent.securityProfile || 'default',
+  )
+  // The main agent's Claude login is managed via channels.sh, not the per-agent
+  // config path, so plan selection does not apply to it. Hide the whole group.
+  const planGroup = document.getElementById('claudePlanGroup')
+  if (planGroup) planGroup.hidden = currentAgent.role === 'main'
+  populatePlanSelect(
+    document.getElementById('editAgentPlan'),
+    document.getElementById('editAgentPlanDesc'),
+    currentAgent.claudePlan || '',
+  )
+  renderTeamEditor(currentAgent, agents)
+  updateAuthModeUI(currentAgent.authMode || 'shared', currentAgent.hasApiKey || false)
+  const memIsoToggle = document.getElementById('memoryIsolationToggle')
+  if (memIsoToggle) memIsoToggle.checked = currentAgent.memoryIsolation === true
+  loadVoiceConfig(currentAgent.name)
+  document.getElementById('editClaudeMd').value = currentAgent.claudeMd || currentAgent.content || ''
+  document.getElementById('editSoulMd').value = currentAgent.soulMd || ''
+  document.getElementById('editMcpJson').value = currentAgent.mcpJson || ''
+
+  // Auto-restart settings + live context size
+  setupAutoRestartUI(currentAgent)
+
+  // Telegram tab
+  updateChannelTab(currentAgent)
+
+  // Skills tab
+  await loadSkills(currentAgent.name)
+
+  // Process control
+  updateProcessControl(currentAgent)
+
+  // Channels restart button is Wraith-only -- hide on normal agents.
+  document.getElementById('wraithRestartBtn').hidden = true
+
+  // Restore editable Settings (Wraith detail flips this to read-only).
+  applyWraithReadonlyMode(false)
+
+  // Delete button (restore visibility for normal agents)
+  document.getElementById('deleteAgentBtn').style.display = ''
+  document.getElementById('deleteAgentBtn').onclick = async () => {
+    if (!confirm(t('agents.confirm.delete', { name: currentAgent.name }))) return
+    try {
+      await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`, { method: 'DELETE' })
+      closeModal(agentDetailOverlay)
+      showToast(t('agents.toast.deleted'))
+      loadAgents()
+    } catch (err) {
+      showToast(t('common.error_delete'))
+    }
+  }
+
+  // Export button: download a portable .tar.gz bundle of this agent. Offers to
+  // include channel tokens (off by default -- the safe-to-share variant).
+  // The download goes through the auth-wrapped fetch (the global fetch shim
+  // injects the Bearer header) and is turned into a Blob download, rather than
+  // a plain navigation -- a window.location download cannot carry the
+  // Authorization header and the API would 401 it.
+  document.getElementById('exportAgentBtn').onclick = async () => {
+    if (!currentAgent) return
+    const withSecrets = confirm(
+      'Belevegyük a titkokat (channel bot token, párosítási állapot)?\n\n' +
+      'OK = igen, csak saját gépek közötti átvitelhez.\n' +
+      'Mégse = nem, biztonságosan megosztható (csak identitás + viselkedés).'
+    )
+    const name = currentAgent.name
+    const url = `/api/agents/${encodeURIComponent(name)}/export${withSecrets ? '?secrets=1' : ''}`
+    try {
+      const res = await fetch(url)
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        showToast(data.error || 'Hiba az exportálás során')
+        return
+      }
+      const blob = await res.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = objectUrl
+      a.download = `wraith-agent-${name}.tar.gz`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(objectUrl)
+      showToast(`Ügynök exportálva${withSecrets ? ' (titkokkal)' : ''}`)
+    } catch {
+      showToast('Hiba az exportálás során')
+    }
+  }
+
+  // Reset to first tab, hide avatar gallery
+  document.getElementById('detailAvatarGallery').hidden = true
+  switchAgentTab('overview')
+  openModal(agentDetailOverlay)
+}
+
+// === Detail avatar gallery ===
+function populateDetailAvatarGrid() {
+  const grid = document.getElementById('detailAvatarGrid')
+  grid.innerHTML = ''
+  for (const avatar of AVATARS) {
+    const item = document.createElement('div')
+    item.className = 'avatar-grid-item'
+    item.dataset.avatar = avatar
+    item.innerHTML = `<img src="/avatars/${avatar}" alt="${avatar.replace(/^\d+_/, '').replace('.png', '')}">`
+    item.addEventListener('click', async () => {
+      if (!currentAgent) return
+      grid.querySelectorAll('.avatar-grid-item').forEach(i => i.classList.remove('selected'))
+      item.classList.add('selected')
+      try {
+        const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/avatar`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ galleryAvatar: avatar }),
+        })
+        if (!res.ok) throw new Error()
+        showToast(t('agents.toast.avatar_updated'))
+        bumpAvatarEpoch()
+        // Update the detail avatar display
+        document.getElementById('agentDetailAvatar').innerHTML = `<img src="/api/agents/${encodeURIComponent(currentAgent.name)}/avatar${avatarBust()}" alt="">`
+        document.getElementById('detailAvatarGallery').hidden = true
+        loadAgents()
+      } catch {
+        showToast(t('agents.toast.avatar_error'))
+      }
+    })
+    grid.appendChild(item)
+  }
+}
+
+document.getElementById('avatarChangeBtn').addEventListener('click', () => {
+  const gallery = document.getElementById('detailAvatarGallery')
+  gallery.hidden = !gallery.hidden
+  if (!gallery.hidden) {
+    const isWraith = currentAgent && currentAgent.role === 'main'
+    const avatarEndpoint = isWraith ? '/api/wraith/avatar' : `/api/agents/${encodeURIComponent(currentAgent.name)}/avatar`
+
+    const grid = document.getElementById('detailAvatarGrid')
+    grid.innerHTML = ''
+    for (const avatar of AVATARS) {
+      const item = document.createElement('div')
+      item.className = 'avatar-grid-item'
+      item.innerHTML = `<img src="/avatars/${avatar}" alt="${avatar.replace(/^\d+_/, '').replace('.png', '')}">`
+      item.addEventListener('click', async () => {
+        try {
+          const res = await fetch(avatarEndpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ galleryAvatar: avatar }),
+          })
+          if (!res.ok) throw new Error()
+          showToast(t('agents.toast.avatar_updated'))
+          bumpAvatarEpoch()
+          const imgUrl = isWraith ? `/api/wraith/avatar${avatarBust()}` : `/api/agents/${encodeURIComponent(currentAgent.name)}/avatar${avatarBust()}`
+          document.getElementById('agentDetailAvatar').innerHTML = `<img src="${imgUrl}" alt="">`
+          gallery.hidden = true
+          loadAgents()
+        } catch {
+          showToast(t('agents.toast.avatar_error'))
+        }
+      })
+      grid.appendChild(item)
+    }
+  }
+})
+
+// === Avatar file upload ===
+;(() => {
+  const zone = document.getElementById('avatarUploadZone')
+  const fileInput = document.getElementById('avatarFileInput')
+  const content = document.getElementById('avatarUploadContent')
+  const preview = document.getElementById('avatarUploadPreview')
+  const previewImg = document.getElementById('avatarPreviewImg')
+  const clearBtn = document.getElementById('avatarPreviewClear')
+  const MAX_SIZE = 1024 * 1024
+
+  zone.addEventListener('click', (e) => {
+    if (e.target === clearBtn || clearBtn.contains(e.target)) return
+    fileInput.click()
+  })
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drag-over') })
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'))
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault()
+    zone.classList.remove('drag-over')
+    const file = e.dataTransfer.files[0]
+    if (file) handleAvatarFile(file)
+  })
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) handleAvatarFile(fileInput.files[0])
+  })
+  clearBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    resetAvatarUpload()
+  })
+
+  function resetAvatarUpload() {
+    fileInput.value = ''
+    content.hidden = false
+    preview.hidden = true
+  }
+
+  async function handleAvatarFile(file) {
+    if (!file.type.match(/^image\/(png|jpe?g|webp)$/)) {
+      showToast(t('agents.toast.avatar_format'))
+      return
+    }
+    if (file.size > MAX_SIZE) {
+      showToast(t('agents.toast.avatar_size'))
+      return
+    }
+    previewImg.src = URL.createObjectURL(file)
+    content.hidden = true
+    preview.hidden = false
+    await uploadAvatarFile(file)
+  }
+
+  async function uploadAvatarFile(file) {
+    if (!currentAgent) return
+    const isWraith = currentAgent.role === 'main'
+    const endpoint = isWraith ? '/api/wraith/avatar' : `/api/agents/${encodeURIComponent(currentAgent.name)}/avatar`
+    const form = new FormData()
+    form.append('avatar', file, file.name)
+    try {
+      const res = await fetch(endpoint, { method: 'POST', body: form })
+      if (!res.ok) throw new Error()
+      showToast(t('agents.toast.avatar_uploaded'))
+      bumpAvatarEpoch()
+      const imgUrl = isWraith ? `/api/wraith/avatar${avatarBust()}` : `/api/agents/${encodeURIComponent(currentAgent.name)}/avatar${avatarBust()}`
+      document.getElementById('agentDetailAvatar').innerHTML = `<img src="${imgUrl}" alt="">`
+      document.getElementById('detailAvatarGallery').hidden = true
+      resetAvatarUpload()
+      loadAgents()
+    } catch {
+      showToast(t('common.error_save'))
+      resetAvatarUpload()
+    }
+  }
+})()
+
+// === Create-wizard avatar upload ===
+// Mirrors the detail-modal uploader, but the agent does not exist yet, so the
+// file is held in `selectedAvatarFile` and POSTed after creation (see the
+// wizard create flow). Hoisted so populateAvatarGrid()/resetWizard() can reset.
+function resetCreateAvatarUpload() {
+  const fileInput = document.getElementById('createAvatarFileInput')
+  const content = document.getElementById('createAvatarUploadContent')
+  const preview = document.getElementById('createAvatarUploadPreview')
+  if (!fileInput || !content || !preview) return
+  fileInput.value = ''
+  content.hidden = false
+  preview.hidden = true
+}
+;(() => {
+  const zone = document.getElementById('createAvatarUploadZone')
+  if (!zone) return
+  const fileInput = document.getElementById('createAvatarFileInput')
+  const content = document.getElementById('createAvatarUploadContent')
+  const preview = document.getElementById('createAvatarUploadPreview')
+  const previewImg = document.getElementById('createAvatarPreviewImg')
+  const clearBtn = document.getElementById('createAvatarPreviewClear')
+  const MAX_SIZE = 1024 * 1024
+
+  zone.addEventListener('click', (e) => {
+    if (e.target === clearBtn || clearBtn.contains(e.target)) return
+    fileInput.click()
+  })
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drag-over') })
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'))
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault()
+    zone.classList.remove('drag-over')
+    const file = e.dataTransfer.files[0]
+    if (file) handleCreateAvatarFile(file)
+  })
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) handleCreateAvatarFile(fileInput.files[0])
+  })
+  clearBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    selectedAvatarFile = null
+    resetCreateAvatarUpload()
+  })
+
+  function handleCreateAvatarFile(file) {
+    if (!file.type.match(/^image\/(png|jpe?g|webp)$/)) {
+      showToast(t('agents.toast.avatar_format'))
+      return
+    }
+    if (file.size > MAX_SIZE) {
+      showToast(t('agents.toast.avatar_size'))
+      return
+    }
+    // Custom upload and gallery pick are mutually exclusive.
+    selectedAvatar = null
+    document.querySelectorAll('#avatarGrid .avatar-grid-item').forEach(i => i.classList.remove('selected'))
+    selectedAvatarFile = file
+    previewImg.src = URL.createObjectURL(file)
+    content.hidden = true
+    preview.hidden = false
+  }
+})()
+
+// === Process control ===
+function updateProcessControl(agent) {
+  const running = agent.running || false
+  const dot = document.getElementById('processDot')
+  const label = document.getElementById('processLabel')
+  const uptime = document.getElementById('processUptime')
+  const startBtn = document.getElementById('agentStartBtn')
+  const stopBtn = document.getElementById('agentStopBtn')
+
+  dot.className = 'process-dot ' + (running ? 'running' : 'stopped')
+  label.textContent = running ? t('agents.status.running') : t('agents.status.stopped')
+  startBtn.hidden = running
+  stopBtn.hidden = !running
+
+  if (running && agent.session) {
+    uptime.textContent = `tmux: ${agent.session}`
+  } else {
+    uptime.textContent = ''
+  }
+}
+
+document.getElementById('wraithRestartBtn').addEventListener('click', async () => {
+  if (!confirm(t('agents.confirm.hard_restart'))) return
+  const btn = document.getElementById('wraithRestartBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch('/api/wraith/restart', { method: 'POST' })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || t('agents.toast.restart_failed'))
+    }
+    showToast(t('agents.toast.wraith_restarted'))
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    btn.disabled = false
+  }
+})
+
+document.getElementById('agentStartBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const btn = document.getElementById('agentStartBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/start`, { method: 'POST' })
+    if (!res.ok) {
+      const err = await res.json()
+      throw new Error(err.error || t('agents.toast.start_failed'))
+    }
+    showToast(t('agents.toast.started'))
+    // Refresh
+    const detailRes = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`)
+    if (detailRes.ok) {
+      currentAgent = await detailRes.json()
+      updateProcessControl(currentAgent)
+    }
+    loadAgents()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+document.getElementById('agentStopBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  if (!confirm(t('agents.confirm.stop'))) return
+
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/stop`, { method: 'POST' })
+    if (!res.ok) {
+      const err = await res.json()
+      throw new Error(err.error || t('agents.toast.stop_failed'))
+    }
+    showToast(t('agents.toast.stopped'))
+    const detailRes = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`)
+    if (detailRes.ok) {
+      currentAgent = await detailRes.json()
+      updateProcessControl(currentAgent)
+    }
+    loadAgents()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  }
+})
+
+// === Tab switching ===
+document.getElementById('agentTabNav').addEventListener('click', (e) => {
+  const btn = e.target.closest('.tab-btn')
+  if (!btn) return
+  switchAgentTab(btn.dataset.tab)
+})
+
+let currentChannelProvider = 'telegram'
+// Az induláskor a backend CHANNEL_PROVIDER-jét lekérjük, és a dropdown +
+// state default-ot ahhoz igazitjuk -- igy ha a backend discord-on van,
+// a UI nem hardcode-olt 'telegram'-mal indul barmelyik oldalra is navigal a user.
+;(async function initChannelProviderDefault() {
+  try {
+    const res = await fetch('/api/wraith')
+    if (!res.ok) return
+    const data = await res.json()
+    if (!data.channelProvider || data.channelProvider === currentChannelProvider) return
+    currentChannelProvider = data.channelProvider
+    const sel = document.getElementById('chProviderSelect')
+    if (sel) sel.value = currentChannelProvider
+    if (typeof updateProviderUI === 'function') updateProviderUI()
+  } catch { /* ignore -- a kepernyo default-on marad */ }
+})()
+let channelAutoPollTimer = null
+function startChannelAutoPoll() {
+  if (channelAutoPollTimer) return
+  channelAutoPollTimer = setInterval(() => {
+    if (!currentAgent) return
+    if (document.getElementById('tabChannel').hidden) return
+    refreshPendingPairings()
+    refreshAllowedList()
+    refreshInvites()
+    refreshChannelRequests()
+  }, 4000)
+}
+function stopChannelAutoPoll() {
+  if (channelAutoPollTimer) { clearInterval(channelAutoPollTimer); channelAutoPollTimer = null }
+}
+
+function channelApiBase() {
+  return `/api/agents/${encodeURIComponent(currentAgent.name)}/channels/${currentChannelProvider}`
+}
+
+function switchAgentTab(tab) {
+  document.querySelectorAll('#agentTabNav .tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab))
+  document.getElementById('tabOverview').hidden = tab !== 'overview'
+  document.getElementById('tabSettings').hidden = tab !== 'settings'
+  document.getElementById('tabChannel').hidden = tab !== 'channel'
+  document.getElementById('tabSkills').hidden = tab !== 'skills'
+  document.getElementById('tabTeam').hidden = tab !== 'team'
+  if (tab === 'channel') startChannelAutoPoll()
+  else stopChannelAutoPoll()
+}
+
+// === Settings save buttons ===
+async function loadOllamaModels() {
+  const group = document.getElementById('ollamaModelGroup')
+  if (!group) return
+  group.innerHTML = ''
+  try {
+    const res = await fetch('/api/ollama/models')
+    const models = await res.json()
+    for (const m of models) {
+      const opt = document.createElement('option')
+      opt.value = m.name
+      opt.textContent = `${m.name} (${m.size})`
+      group.appendChild(opt)
+    }
+  } catch { /* Ollama not available */ }
+}
+
+// Populates the DeepSeek optgroups in both the wizard and the agent edit
+// panel. Backend gates the list behind a vault entry, so an empty array
+// here means the operator has not configured an API key yet -- in that
+// case we hide the optgroup and surface a hint pointing to the Vault page.
+async function loadAvailableModels() {
+  try {
+    const res = await fetch('/api/models/available')
+    if (!res.ok) return
+    const data = await res.json()
+    const deepseekModels = Array.isArray(data.deepseek) ? data.deepseek : []
+    const editGroup = document.getElementById('deepseekModelGroup')
+    const wizardGroup = document.getElementById('agentModelDeepseekGroup')
+    const hint = document.getElementById('deepseekHint')
+    for (const group of [editGroup, wizardGroup]) {
+      if (!group) continue
+      group.innerHTML = ''
+      if (deepseekModels.length === 0) {
+        group.style.display = 'none'
+        continue
+      }
+      group.style.display = ''
+      for (const m of deepseekModels) {
+        const opt = document.createElement('option')
+        opt.value = m.id
+        opt.textContent = m.label
+        group.appendChild(opt)
+      }
+    }
+    if (hint) hint.style.display = deepseekModels.length === 0 ? 'block' : 'none'
+
+    // OpenRouter: two optgroups per select (Auto = weekly-fresh tier
+    // recommendation, value `openrouter-auto:<tier>`; Manual = the 2 concrete
+    // ids per tier). Backend gates the whole block behind the vault key, so a
+    // null payload means OpenRouter is not connected -> keep the groups hidden.
+    const or = data.openrouter
+    const orTiers = or && Array.isArray(or.tiers) ? or.tiers : []
+    // Auto = one entry per tier in the dropdown (weekly-fresh recommendation).
+    const autoGroups = [document.getElementById('openrouterAutoGroup'), document.getElementById('agentModelOpenrouterAutoGroup')]
+    for (const g of autoGroups) {
+      if (!g) continue
+      g.innerHTML = ''
+      if (orTiers.length === 0) { g.style.display = 'none'; continue }
+      g.style.display = ''
+      for (const t of orTiers) {
+        const opt = document.createElement('option')
+        opt.value = t.autoId
+        opt.textContent = `${t.label} - auto (${t.auto})`
+        g.appendChild(opt)
+      }
+    }
+    // Manual = the user-curated list -> "OpenRouter - kézi" optgroup in every
+    // select. Curated once (main agent's browse popup, checkboxes); assignable
+    // per agent here. Empty list -> group hidden.
+    const orManual = Array.isArray(data.openrouterManual) ? data.openrouterManual : []
+    openrouterCurated = new Set(orManual.map(m => m.id))
+    const manualGroups = [document.getElementById('openrouterManualGroup'), document.getElementById('agentModelOpenrouterManualGroup')]
+    for (const g of manualGroups) {
+      if (!g) continue
+      g.innerHTML = ''
+      if (orManual.length === 0) { g.style.display = 'none'; continue }
+      g.style.display = ''
+      for (const m of orManual) {
+        const opt = document.createElement('option')
+        opt.value = m.id
+        opt.textContent = `🔀 ${m.name || m.id}`
+        g.appendChild(opt)
+      }
+    }
+    // Browse popup = the curation UI (tick/untick which manual models exist).
+    // MAIN AGENT ONLY -- sub-agents just pick from the curated dropdown above.
+    // Keep the name checks for compatibility with legacy /api/wraith payloads
+    // that predate the explicit role field.
+    const mid = (typeof mainAgentId === 'function') ? mainAgentId() : ''
+    const isMainAgent = !!currentAgent && (
+      currentAgent.role === 'main' ||
+      currentAgent.name === mid ||
+      currentAgent.agentId === mid
+    )
+    const orBtn = document.getElementById('openrouterBrowseBtn')
+    if (orBtn) orBtn.style.display = (data.openrouterConfigured && isMainAgent) ? '' : 'none'
+  } catch { /* dashboard not available */ }
+}
+
+// --- OpenRouter manual-list curation (tick models into the shared dropdown) ---
+let openrouterAllModels = null
+let openrouterCurated = new Set()  // ids currently in the curated manual list
+
+async function openOpenrouterModal() {
+  const modal = document.getElementById('openrouterModal')
+  const listEl = document.getElementById('openrouterModalList')
+  const agentEl = document.getElementById('openrouterModalAgent')
+  const searchEl = document.getElementById('openrouterModalSearch')
+  const freeEl = document.getElementById('openrouterModalFreeOnly')
+  if (!modal || !listEl) return
+  // The modal markup lives inside the (hidden) connectors page; reparent it to
+  // <body> so it renders full-viewport regardless of which tab is active.
+  if (modal.parentElement !== document.body) document.body.appendChild(modal)
+  if (agentEl) agentEl.textContent = (currentAgent && (currentAgent.displayName || currentAgent.name)) || 'ágens'
+  // Two competing .modal-overlay CSS rules: one hides via [hidden], the other
+  // via opacity/visibility (toggled by .active). Set both so the modal shows
+  // regardless of which rule wins the cascade.
+  modal.hidden = false
+  modal.classList.add('active')
+  listEl.innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:13px">Modellek betöltése…</div>'
+  if (searchEl) searchEl.value = ''
+  if (freeEl) freeEl.checked = false
+  try {
+    // Load the full model list (cached) and the current curated set in parallel
+    // so the checkboxes render already ticked for the manual models in the list.
+    const [allRes, curRes] = await Promise.all([
+      openrouterAllModels ? Promise.resolve(null) : fetch('/api/openrouter/models'),
+      fetch('/api/openrouter/manual'),
+    ])
+    if (allRes) {
+      if (!allRes.ok) throw new Error('fetch failed')
+      const data = await allRes.json()
+      openrouterAllModels = Array.isArray(data.models) ? data.models : []
+    }
+    if (curRes && curRes.ok) {
+      const cur = await curRes.json()
+      openrouterCurated = new Set((Array.isArray(cur.models) ? cur.models : []).map(m => m.id))
+    }
+    renderOpenrouterList()
+  } catch {
+    listEl.innerHTML = '<div style="padding:14px;color:var(--danger,#dc2626);font-size:13px">Nem sikerült betölteni az OpenRouter modelleket.</div>'
+  }
+}
+
+function renderOpenrouterList() {
+  const listEl = document.getElementById('openrouterModalList')
+  const countEl = document.getElementById('openrouterModalCount')
+  const q = (document.getElementById('openrouterModalSearch')?.value || '').toLowerCase().trim()
+  const freeOnly = !!document.getElementById('openrouterModalFreeOnly')?.checked
+  if (!listEl || !openrouterAllModels) return
+  const rows = openrouterAllModels.filter(m => {
+    if (freeOnly && !m.free) return false
+    if (!q) return true
+    return (m.id + ' ' + m.name).toLowerCase().includes(q)
+  })
+  // Ticked (curated) models float to the top so the current selection is visible.
+  rows.sort((a, b) => {
+    const ca = openrouterCurated.has(a.id), cb = openrouterCurated.has(b.id)
+    if (ca !== cb) return ca ? -1 : 1
+    return a.id.localeCompare(b.id)
+  })
+  if (countEl) countEl.textContent = `${rows.length} modell · ${openrouterCurated.size} kézi listán`
+  listEl.innerHTML = ''
+  for (const m of rows.slice(0, 400)) {
+    const checked = openrouterCurated.has(m.id)
+    const row = document.createElement('label')
+    row.className = 'openrouter-model-row'
+    row.style.cssText = 'display:flex;align-items:flex-start;gap:10px;padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px'
+    const price = m.free ? '<span style="color:var(--success,#16a34a);font-weight:600">ingyenes</span>'
+      : `$${m.promptPrice.toFixed(2)}/$${m.completionPrice.toFixed(2)} /M`
+    const ctx = m.contextLength ? ` · ${Math.round(m.contextLength / 1000)}k ctx` : ''
+    const cb = document.createElement('input')
+    cb.type = 'checkbox'
+    cb.checked = checked
+    cb.style.cssText = 'margin-top:3px;flex:0 0 auto'
+    cb.addEventListener('change', () => toggleCuratedModel(m.id, m.name, cb.checked))
+    const info = document.createElement('div')
+    info.style.cssText = 'flex:1 1 auto;min-width:0'
+    info.innerHTML = `<div style="font-weight:600">${escapeHtml(m.name)}</div>`
+      + `<div style="color:var(--text-muted);font-size:11.5px"><code>${escapeHtml(m.id)}</code> · ${price}${ctx}</div>`
+    row.appendChild(cb)
+    row.appendChild(info)
+    row.addEventListener('mouseenter', () => { row.style.background = 'var(--surface-hover, #f1f5f9)' })
+    row.addEventListener('mouseleave', () => { row.style.background = '' })
+    listEl.appendChild(row)
+  }
+  if (rows.length === 0) listEl.innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:13px">Nincs találat.</div>'
+}
+
+// Tick/untick a model into the curated manual list. Persists server-side, then
+// refreshes the shared dropdown so the "kézi" optgroup reflects the change.
+async function toggleCuratedModel(id, name, checked) {
+  // Optimistic local update so the checkbox + counter feel instant.
+  if (checked) openrouterCurated.add(id); else openrouterCurated.delete(id)
+  const countEl = document.getElementById('openrouterModalCount')
+  if (countEl) {
+    const total = countEl.textContent.split('·')[0].trim()
+    countEl.textContent = `${total} · ${openrouterCurated.size} kézi listán`
+  }
+  try {
+    const res = await fetch('/api/openrouter/manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, name, checked }),
+    })
+    if (!res.ok) throw new Error('save failed')
+    const data = await res.json()
+    openrouterCurated = new Set((Array.isArray(data.models) ? data.models : []).map(m => m.id))
+    // Repopulate the dropdown "kézi" optgroups without disturbing selections.
+    loadAvailableModels()
+  } catch {
+    // Roll back the optimistic change on failure.
+    if (checked) openrouterCurated.delete(id); else openrouterCurated.add(id)
+    renderOpenrouterList()
+  }
+}
+
+function closeOpenrouterModal() {
+  const modal = document.getElementById('openrouterModal')
+  if (modal) { modal.hidden = true; modal.classList.remove('active') }
+}
+
+document.getElementById('openrouterBrowseBtn')?.addEventListener('click', openOpenrouterModal)
+document.getElementById('openrouterModalClose')?.addEventListener('click', closeOpenrouterModal)
+document.getElementById('openrouterModalCancel')?.addEventListener('click', closeOpenrouterModal)
+document.getElementById('openrouterModalSearch')?.addEventListener('input', renderOpenrouterList)
+document.getElementById('openrouterModalFreeOnly')?.addEventListener('change', renderOpenrouterList)
+
+let modelRestartPollTimer = null
+let modelRestartPollName = null
+
+function stopModelRestartPolling() {
+  if (modelRestartPollTimer) { clearInterval(modelRestartPollTimer); modelRestartPollTimer = null }
+  modelRestartPollName = null
+}
+
+function startModelRestartPolling(name, expectedModel, triggeredAt) {
+  stopModelRestartPolling()
+  modelRestartPollName = name
+  const badge = document.getElementById('agentDetailModelRestarting')
+  const display = document.getElementById('agentDetailModel')
+  const processLabel = document.getElementById('processLabel')
+  const processDot = document.getElementById('processDot')
+  const deadline = Date.now() + 60000
+  modelRestartPollTimer = setInterval(async () => {
+    if (modelRestartPollName !== name || !currentAgent || currentAgent.name !== name) {
+      stopModelRestartPolling(); return
+    }
+    if (Date.now() > deadline) {
+      stopModelRestartPolling()
+      badge.hidden = true
+      if (currentAgent) updateProcessControl(currentAgent)
+      showToast(t('agents.toast.restart_state_error'))
+      return
+    }
+    try {
+      const r = await fetch(`/api/agents/${encodeURIComponent(name)}`)
+      if (!r.ok) return
+      const data = await r.json()
+      // The new tmux session's creation timestamp is the reliable "restart
+      // complete" signal. Claude Code writes the "model" field into the
+      // session jsonl only when it answers a message, so activeModel may
+      // stay null/old until the agent receives its first prompt -- waiting
+      // for that match would time out on idle agents. The configured model
+      // is what the agent was just started with via --model.
+      const restarted = data.runningSince && data.runningSince >= triggeredAt
+      if (restarted) {
+        const displayModel = data.activeModel || data.model
+        if (currentAgent && currentAgent.name === name) {
+          currentAgent.activeModel = data.activeModel
+          currentAgent.runningSince = data.runningSince
+          currentAgent.model = data.model
+          currentAgent.running = !!data.running
+          currentAgent.session = data.session
+          display.textContent = displayModel
+        }
+        badge.hidden = true
+        processDot.className = 'process-dot running'
+        processLabel.textContent = t('agents.status.running')
+        stopModelRestartPolling()
+        const liveMatched = data.activeModel === expectedModel
+        showToast(liveMatched
+          ? t('agents.model.toast_active', { model: displayModel })
+          : t('agents.model.toast_restarted', { model: displayModel }))
+      }
+    } catch { /* network blip, keep polling */ }
+  }, 2000)
+}
+
+document.getElementById('saveModelBtn').addEventListener('click', async () => {
+  if (!currentAgent || currentAgent.role === 'main') return
+  const newModel = document.getElementById('editAgentModel').value
+  const name = currentAgent.name
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: newModel }),
+    })
+    if (!res.ok) throw new Error()
+    currentAgent.model = newModel
+    const triggeredAt = Math.floor(Date.now() / 1000)
+    document.getElementById('agentDetailModelRestarting').hidden = false
+    document.getElementById('processLabel').textContent = t('agents.process_label')
+    document.getElementById('processDot').className = 'process-dot restarting'
+    showToast(t('agents.toast.model_save_restart'))
+    loadAgents()
+    const restartRes = await fetch(`/api/agents/${encodeURIComponent(name)}/restart`, { method: 'POST' })
+    if (!restartRes.ok) {
+      document.getElementById('agentDetailModelRestarting').hidden = true
+      if (currentAgent) updateProcessControl(currentAgent)
+      showToast(t('agents.restart_failed'))
+      return
+    }
+    startModelRestartPolling(name, newModel, triggeredAt)
+  } catch { showToast(t('common.error_save')) }
+})
+
+document.getElementById('modelSuggestBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const resultDiv = document.getElementById('modelSuggestionResult')
+  resultDiv.style.display = 'block'
+  resultDiv.textContent = t('agents.model.analyzing')
+  try {
+    const res = await fetch('/api/agents/model-suggest', { method: 'POST' })
+    if (!res.ok) throw new Error()
+    const { results } = await res.json()
+    const entry = results.find(r => r.agent === currentAgent.name)
+    if (!entry) {
+      resultDiv.textContent = t('agents.model.no_data')
+      return
+    }
+    resultDiv.style.color = entry.changeAdvised ? 'var(--warning, #e6a817)' : 'var(--success)'
+    resultDiv.style.whiteSpace = 'pre-wrap'
+    resultDiv.style.fontFamily = 'monospace'
+    resultDiv.style.fontSize = '12px'
+    resultDiv.textContent = entry.reason
+  } catch { resultDiv.textContent = t('agents.model.error') }
+})
+
+document.getElementById('analyzeAllModelsBtn').addEventListener('click', async () => {
+  const panel = document.getElementById('agentsModelAnalysis')
+  panel.style.display = 'block'
+  panel.innerHTML = '<p style="color:var(--text-muted);font-size:13px">' + t('agents.model.analyzing_all') + '</p>'
+  try {
+    const res = await fetch('/api/agents/model-suggest', { method: 'POST' })
+    if (!res.ok) throw new Error()
+    const { results } = await res.json()
+    const changes = results.filter(r => r.changeAdvised)
+    const ok = results.filter(r => !r.changeAdvised)
+    let html = '<div style="font-size:13px;padding:12px 14px;background:var(--surface-hover);border-radius:8px;border:1px solid var(--border)">'
+    html += `<p style="margin:0 0 8px;font-weight:600">${t('agents.model.title', { n: results.length })}</p>`
+    if (changes.length === 0) {
+      html += '<p style="color:var(--success);margin:0">' + t('agents.model.all_ok') + '</p>'
+    } else {
+      html += `<p style="color:var(--warning, #e6a817);margin:0 0 8px">${t('agents.model.changes_n', { n: changes.length })}</p>`
+      html += '<ul style="margin:0 0 10px;padding-left:18px">'
+      for (const r of changes) {
+        const safeReason = r.reason.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        html += `<li style="margin-bottom:6px"><strong>${r.agent}</strong>: ${r.currentModel} &rarr; ${r.suggestedModel}`
+        html += ` <details style="display:inline-block;vertical-align:top;margin-left:4px"><summary style="cursor:pointer;font-size:11px;color:var(--text-muted)">${t('agents.model.details')}</summary>`
+        html += `<pre style="white-space:pre-wrap;font-size:11px;margin:4px 0 0;background:var(--surface);padding:6px 8px;border-radius:4px;color:var(--text-muted)">${safeReason}</pre></details></li>`
+      }
+      html += '</ul>'
+      if (ok.length > 0) {
+        html += `<p style="color:var(--text-muted);margin:0;font-size:12px">${t('agents.model.ok_agents', { list: ok.map(r => r.agent).join(', ') })}</p>`
+      }
+      html += `<button class="btn-secondary btn-compact" id="createModelChangeCardsBtn" style="margin-top:10px">${t('agents.model.create_cards_btn')}</button>`
+    }
+    html += '</div>'
+    panel.innerHTML = html
+    const createBtn = document.getElementById('createModelChangeCardsBtn')
+    if (createBtn) {
+      createBtn.addEventListener('click', async () => {
+        if (!confirm(t('agents.model.cards_confirm', { n: changes.length }))) return
+        createBtn.disabled = true
+        createBtn.textContent = t('agents.model.creating_cards')
+        let created = 0
+        for (const r of changes) {
+          try {
+            await fetch('/api/kanban', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                title: t('agents.model.card_title', { agent: r.agent }),
+                description: t('agents.model.card_desc', { current: r.currentModel, suggested: r.suggestedModel, reason: r.reason }),
+                assignee: 'wraith',
+                priority: 'normal',
+                status: 'planned',
+              }),
+            })
+            created++
+          } catch { /* skip failed card */ }
+        }
+        showToast(t('agents.model.cards_created', { n: created }))
+        createBtn.textContent = t('agents.model.cards_created', { n: created })
+      })
+    }
+  } catch { panel.innerHTML = '<p style="color:var(--error);font-size:13px">' + t('agents.model.error') + '</p>' }
+})
+
+// === Export ALL agents (whole fleet) into one .tar.gz bundle ===
+const exportAllAgentsBtn = document.getElementById('exportAllAgentsBtn')
+if (exportAllAgentsBtn) {
+  exportAllAgentsBtn.addEventListener('click', async () => {
+    const withSecrets = confirm(
+      'Belevegyük a titkokat (channel bot tokenek, párosítási állapot) MINDEN ügynöknél?\n\n' +
+      'OK = igen, csak saját gépek közötti átvitelhez.\n' +
+      'Mégse = nem, biztonságosan megosztható (csak identitás + viselkedés).'
+    )
+    const url = `/api/agents/export-all${withSecrets ? '?secrets=1' : ''}`
+    try {
+      const res = await fetch(url)
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        showToast(data.error || 'Hiba az exportálás során')
+        return
+      }
+      const blob = await res.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = objectUrl
+      a.download = 'wraith-fleet.tar.gz'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(objectUrl)
+      showToast(`Flotta exportálva${withSecrets ? ' (titkokkal)' : ''}`)
+    } catch {
+      showToast('Hiba az exportálás során')
+    }
+  })
+}
+
+// === Agent import (upload a .tar.gz bundle exported from another machine) ===
+// Accepts both a single-agent bundle and a whole-fleet bundle -- the backend
+// auto-detects the format from the manifest.
+const importAgentBtn = document.getElementById('importAgentBtn')
+const importAgentFile = document.getElementById('importAgentFile')
+if (importAgentBtn && importAgentFile) {
+  importAgentBtn.addEventListener('click', () => importAgentFile.click())
+  importAgentFile.addEventListener('change', async () => {
+    const file = importAgentFile.files && importAgentFile.files[0]
+    if (!file) return
+    // Reset the input so picking the same file again re-fires change.
+    const upload = async (overwrite) => {
+      const form = new FormData()
+      form.append('file', file)
+      if (overwrite) form.append('overwrite', '1')
+      const res = await fetch('/api/agents/import', { method: 'POST', body: form })
+      const data = await res.json().catch(() => ({}))
+      return { res, data }
+    }
+    try {
+      let { res, data } = await upload(false)
+      if (res.status === 409) {
+        const prompt = data.kind === 'fleet'
+          ? 'Néhány ügynök már létezik ezen a gépen. Felülírjuk az ütközőket?'
+          : `Már létezik "${data.name || ''}" nevű ügynök. Felülírjuk?`
+        if (confirm(prompt)) {
+          ;({ res, data } = await upload(true))
+        } else {
+          return
+        }
+      }
+      if (!res.ok) { showToast(data.error || 'Hiba az importálás során'); return }
+      const note = data.includedSecrets ? ' (titkokkal)' : ''
+      if (data.kind === 'fleet') {
+        const n = (data.imported || []).length
+        const skipped = (data.skipped || []).length
+        showToast(`Flotta importálva: ${n} ügynök${note}${skipped ? ` (${skipped} kihagyva)` : ''}`)
+      } else {
+        showToast(`Ügynök importálva: ${data.name}${note}${data.overwritten ? ' (felülírva)' : ''}`)
+      }
+      loadAgents()
+    } catch {
+      showToast('Hiba az importálás során')
+    } finally {
+      importAgentFile.value = ''
+    }
+  })
+}
+
+document.getElementById('saveAutoRestartBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  // Auto-restart applies to the main session too, so (unlike model/profile) we
+  // do NOT skip role === 'main'. The store key is autoRestartId for the main
+  // session, the sanitized name for sub-agents.
+  const id = currentAgent.autoRestartId || currentAgent.name
+  const schedKind = document.getElementById('arSchedKind').value
+  const cfg = {
+    enabled: document.getElementById('arEnabled').checked,
+    mode: document.getElementById('arMode').value === 'fresh' ? 'fresh' : 'continue',
+    dailyTime: schedKind === 'daily' ? document.getElementById('arDailyTime').value : null,
+    intervalHours: schedKind === 'interval' ? Number(document.getElementById('arIntervalHours').value) : null,
+    handoff: false,
+  }
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(id)}/auto-restart`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    })
+    if (!res.ok) throw new Error()
+    const body = await res.json()
+    if (currentAgent) currentAgent.autoRestart = body.autoRestart
+    showToast(t('agents.toast.auto_restart_saved'))
+  } catch { showToast(t('common.error_save')) }
+})
+
+// ---- voice config UI -------------------------------------------------------
+
+async function loadVoiceConfig(agentName) {
+  const voiceModelSel = document.getElementById('editAgentVoiceModel')
+  if (!voiceModelSel) return
+  const banner = document.getElementById('voiceNotInstalledBanner')
+  const controls = document.getElementById('voiceInstalledControls')
+  try {
+    // Check toolkit installation first
+    const statusR = await fetch('/api/voice/status')
+    if (!statusR.ok) return
+    const status = await statusR.json()
+
+    if (!status.installed) {
+      if (banner) banner.hidden = false
+      if (controls) controls.hidden = true
+      return
+    }
+    if (banner) banner.hidden = true
+    if (controls) controls.hidden = false
+
+    const r = await fetch(`/api/agents/${encodeURIComponent(agentName)}/voice-config`)
+    if (!r.ok) return
+    const cfg = await r.json()
+    voiceModelSel.innerHTML = (cfg.availableVoices || []).map(v =>
+      `<option value="${v}"${v === cfg.voiceModel ? ' selected' : ''}>${v}</option>`
+    ).join('')
+    const modeInput = document.querySelector(`input[name="voiceResponseMode"][value="${cfg.responseMode || 'text'}"]`)
+    if (modeInput) modeInput.checked = true
+  } catch { /* silent */ }
+}
+
+let _voiceInstallPollTimer = null
+
+document.getElementById('voiceInstallBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('voiceInstallBtn')
+  const sudoHint = document.getElementById('voiceInstallSudoHint')
+  const progress = document.getElementById('voiceInstallProgress')
+
+  if (sudoHint) sudoHint.hidden = true
+  btn.disabled = true
+  btn.textContent = 'Indítás...'
+
+  try {
+    const r = await fetch('/api/voice/install', { method: 'POST' })
+    if (!r.ok) throw new Error(await r.text())
+    const data = await r.json()
+
+    if (data.needsSudo) {
+      // Show sudo command -- user must run it then click again
+      if (sudoHint) {
+        sudoHint.hidden = false
+        sudoHint.innerHTML = 'A rendszercsomagok telepítéséhez futtasd terminálon:<br><code style="display:block;margin-top:4px;word-break:break-all">' + escapeHtml(data.sudoCommand) + '</code><br>Ezután kattints újra a Telepítés gombra.'
+      }
+      btn.disabled = false
+      btn.textContent = 'Telepítés'
+      return
+    }
+
+    if (data.alreadyInstalled) {
+      if (currentAgent) loadVoiceConfig(currentAgent.name)
+      return
+    }
+
+    // Install started -- poll /api/voice/status until installed=true.
+    // Max 4 minutes (80 × 3s); on timeout show a hint and re-enable the button
+    // so the user can retry (the only failure signal from a fire-and-forget spawn).
+    if (progress) progress.hidden = false
+    btn.textContent = 'Telepítés...'
+    clearInterval(_voiceInstallPollTimer)
+    let _voiceInstallPollCount = 0
+    const VOICE_INSTALL_MAX_POLLS = 80 // 80 × 3s = 4 min
+    _voiceInstallPollTimer = setInterval(async () => {
+      _voiceInstallPollCount++
+      try {
+        const sr = await fetch('/api/voice/status')
+        const s = await sr.json()
+        if (s.installed) {
+          clearInterval(_voiceInstallPollTimer)
+          _voiceInstallPollTimer = null
+          if (progress) progress.hidden = true
+          if (currentAgent) loadVoiceConfig(currentAgent.name)
+          return
+        }
+      } catch { /* keep polling */ }
+      if (_voiceInstallPollCount >= VOICE_INSTALL_MAX_POLLS) {
+        clearInterval(_voiceInstallPollTimer)
+        _voiceInstallPollTimer = null
+        if (progress) progress.hidden = true
+        if (sudoHint) {
+          sudoHint.hidden = false
+          sudoHint.textContent = 'A telepítés tovább tart vagy elakadt. Ellenőrizd a dashboard logjait, majd próbáld újra.'
+        }
+        btn.disabled = false
+        btn.textContent = 'Újrapróbálás'
+      }
+    }, 3000)
+  } catch {
+    btn.disabled = false
+    btn.textContent = 'Telepítés'
+    showToast('Hiba a telepítés során')
+  }
+})
+
+document.getElementById('saveVoiceConfigBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const modeEl = document.querySelector('input[name="voiceResponseMode"]:checked')
+  const modelEl = document.getElementById('editAgentVoiceModel')
+  if (!modeEl || !modelEl) return
+  try {
+    const r = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/voice-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ responseMode: modeEl.value, voiceModel: modelEl.value }),
+    })
+    if (!r.ok) throw new Error()
+    showToast('Hangbeállítás mentve')
+  } catch { showToast('Hiba a mentés során') }
+})
+
+document.getElementById('saveProfileBtn').addEventListener('click', async () => {
+  if (!currentAgent || currentAgent.role === 'main') return
+  const profile = document.getElementById('editAgentProfile').value
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/security`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile }),
+    })
+    if (!res.ok) throw new Error()
+    const body = await res.json()
+    showToast(body.requiresRestart ? t('agents.toast.profile_saved_restart') : t('agents.toast.profile_saved'))
+    loadAgents()
+  } catch { showToast(t('agents.toast.profile_error')) }
+})
+
+document.getElementById('savePlanBtn').addEventListener('click', async () => {
+  // The main agent's login comes up via channels.sh, not this path, so its
+  // plan is not settable here (the selector is hidden for it anyway).
+  if (!currentAgent || currentAgent.role === 'main') return
+  const claudePlan = document.getElementById('editAgentPlan').value
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ claudePlan }),
+    })
+    if (!res.ok) throw new Error()
+    currentAgent.claudePlan = claudePlan || null
+    showToast(t('agents.toast.plan_saved'))
+    loadAgents()
+  } catch { showToast(t('agents.toast.plan_error')) }
+})
+
+// === Auth Mode ===
+function selectAuthModeCard(mode) {
+  document.querySelectorAll('.auth-mode-card').forEach(c => {
+    const isSelected = c.dataset.mode === mode
+    c.classList.toggle('selected', isSelected)
+    c.querySelector('input[type="radio"]').checked = isSelected
+  })
+  document.getElementById('authModeSharedSection').hidden = mode !== 'shared'
+  document.getElementById('authModeApiKeySection').hidden = mode !== 'api'
+  document.getElementById('authModeOwnTeamSection').hidden = mode !== 'own_team'
+  document.getElementById('authFlowResult').hidden = true
+  document.getElementById('authFlowError').hidden = true
+  document.getElementById('authSharedError').hidden = true
+}
+
+function updateAuthModeUI(mode, hasApiKey) {
+  selectAuthModeCard(mode)
+  const keyInput = document.getElementById('editAgentApiKey')
+  keyInput.value = ''
+  if (mode === 'api') {
+    const statusEl = document.getElementById('authModeApiKeyStatus')
+    statusEl.textContent = hasApiKey ? t('agents.api_key.ok') : t('agents.api_key.missing')
+    statusEl.style.color = hasApiKey ? 'var(--success)' : 'var(--warning)'
+  }
+}
+
+document.querySelectorAll('.auth-mode-card').forEach(card => {
+  card.addEventListener('click', () => {
+    selectAuthModeCard(card.dataset.mode)
+  })
+})
+
+document.getElementById('authSharedApplyBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const btn = document.getElementById('authSharedApplyBtn')
+  const btnText = btn.querySelector('.btn-text')
+  const btnLoading = btn.querySelector('.btn-loading')
+  const errorDiv = document.getElementById('authSharedError')
+  errorDiv.hidden = true
+  btnText.hidden = true
+  btnLoading.hidden = false
+  btn.disabled = true
+  try {
+    const base = `/api/agents/${encodeURIComponent(currentAgent.name)}`
+    const saveRes = await fetch(base, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ authMode: 'shared' }),
+    })
+    if (!saveRes.ok) throw new Error('Save failed')
+    if (currentAgent.running) {
+      await fetch(`${base}/stop`, { method: 'POST' })
+      await new Promise(r => setTimeout(r, 2000))
+      const startRes = await fetch(`${base}/start`, { method: 'POST' })
+      const startData = await startRes.json()
+      if (!startRes.ok) {
+        errorDiv.textContent = startData.error || t('agents.error.restart')
+        errorDiv.hidden = false
+        return
+      }
+    }
+    showToast(t('agents.toast.host_oauth_restart'))
+    loadAgents()
+    const detailRes = await fetch(base)
+    if (detailRes.ok) {
+      currentAgent = await detailRes.json()
+      updateAuthModeUI(currentAgent.authMode || 'shared', currentAgent.hasApiKey || false)
+      updateProcessControl(currentAgent)
+    }
+  } catch {
+    errorDiv.textContent = t('agents.error.apply')
+    errorDiv.hidden = false
+  } finally {
+    btnText.hidden = false
+    btnLoading.hidden = true
+    btn.disabled = false
+  }
+})
+
+document.getElementById('authFlowInitBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const btn = document.getElementById('authFlowInitBtn')
+  const btnText = btn.querySelector('.btn-text')
+  const btnLoading = btn.querySelector('.btn-loading')
+  const resultDiv = document.getElementById('authFlowResult')
+  const errorDiv = document.getElementById('authFlowError')
+  resultDiv.hidden = true
+  errorDiv.hidden = true
+  btnText.hidden = true
+  btnLoading.hidden = false
+  btn.disabled = true
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/auth/init`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    const data = await res.json()
+    if (data.ok && data.authUrl) {
+      const urlEl = document.getElementById('authFlowUrl')
+      urlEl.href = data.authUrl
+      urlEl.textContent = data.authUrl
+      resultDiv.hidden = false
+    } else {
+      errorDiv.textContent = data.error || 'Auth URL nem talalhato'
+      errorDiv.hidden = false
+    }
+  } catch {
+    errorDiv.textContent = t('agents.error.auth_network')
+    errorDiv.hidden = false
+  } finally {
+    btnText.hidden = false
+    btnLoading.hidden = true
+    btn.disabled = false
+  }
+})
+
+document.getElementById('authFlowCopyBtn').addEventListener('click', () => {
+  const url = document.getElementById('authFlowUrl').textContent
+  navigator.clipboard.writeText(url).then(() => showToast('URL masolva'))
+})
+
+document.getElementById('memoryIsolationToggle').addEventListener('change', async (e) => {
+  if (!currentAgent || currentAgent.role === 'main') return
+  const enabled = e.target.checked
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ memoryIsolation: enabled }),
+    })
+    if (!res.ok) throw new Error()
+    currentAgent.memoryIsolation = enabled
+    showToast(t(enabled ? 'agents.toast.memory_isolation_on' : 'agents.toast.memory_isolation_off'))
+  } catch {
+    e.target.checked = !enabled
+    showToast(t('common.error_save'))
+  }
+})
+
+document.getElementById('saveAuthModeBtn').addEventListener('click', async () => {
+  if (!currentAgent || currentAgent.role === 'main') return
+  const mode = document.querySelector('input[name="authMode"]:checked')?.value || 'shared'
+  const payload = { authMode: mode }
+  if (mode === 'api') {
+    const key = document.getElementById('editAgentApiKey').value.trim()
+    if (key) payload.apiKey = key
+  }
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) throw new Error()
+    showToast(t('agents.toast.auth_mode_saved'))
+    loadAgents()
+    const detailRes = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`)
+    if (detailRes.ok) {
+      const updated = await detailRes.json()
+      currentAgent = updated
+      updateAuthModeUI(updated.authMode || 'shared', updated.hasApiKey || false)
+    }
+  } catch { showToast(t('common.error_save')) }
+})
+
+document.getElementById('saveClaudeMdBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ claudeMd: document.getElementById('editClaudeMd').value }),
+    })
+    if (!res.ok) throw new Error()
+    showToast(t('agents.claude_md_saved'))
+  } catch { showToast(t('common.error_save')) }
+})
+
+document.getElementById('saveSoulMdBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ soulMd: document.getElementById('editSoulMd').value }),
+    })
+    if (!res.ok) throw new Error()
+    showToast(t('agents.soul_md_saved'))
+  } catch { showToast(t('common.error_save')) }
+})
+
+document.getElementById('saveMcpJsonBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mcpJson: document.getElementById('editMcpJson').value }),
+    })
+    if (!res.ok) throw new Error()
+    showToast('.mcp.json mentve')
+  } catch { showToast(t('common.error_save')) }
+})
+
+// === Channel tab ===
+// Provider-aware "connected" check: a sub-agent record carries hasTelegram /
+// hasDiscord / hasSlack flags from the backend, Wraith carries the same
+// shape from /api/wraith. Falls back to hasTelegram for legacy callers.
+function agentIsConnected(agent) {
+  if (!agent) return false
+  if (currentChannelProvider === 'discord') return !!agent.hasDiscord
+  if (currentChannelProvider === 'slack') return !!agent.hasSlack
+  if (currentChannelProvider === 'teams') return !!agent.hasTeams
+  return !!agent.hasTelegram
+}
+
+function getProviderLabel() {
+  if (currentChannelProvider === 'discord') return 'Discord'
+  if (currentChannelProvider === 'slack') return 'Slack'
+  if (currentChannelProvider === 'teams') return 'Microsoft Teams'
+  return 'Telegram'
+}
+
+// Connected-view help text per provider. Returns innerHTML for the
+// #chHowtoContent <div> -- swapped on every updateProviderUI() call so the
+// "Hogyan adj hozzá több embert vagy csoportot?" panel matches the active
+// channel provider.
+function buildHowtoHtml() {
+  if (currentChannelProvider === 'discord') return t('channel.howto.discord')
+  if (currentChannelProvider === 'slack') return t('channel.howto.slack')
+  if (currentChannelProvider === 'teams') return t('channel.howto.teams')
+  return t('channel.howto.telegram')
+}
+
+function updateProviderUI() {
+  const isTg = currentChannelProvider === 'telegram'
+  const title = document.getElementById('chSetupTitle')
+  const steps = document.getElementById('chSetupSteps')
+  const label = document.getElementById('chTokenLabel')
+  const input = document.getElementById('chTokenInput')
+  const slackGroup = document.getElementById('chSlackAppTokenGroup')
+  const manifestBtnGroup = document.getElementById('chSlackManifestBtnGroup')
+  const smokeTestBtn = document.getElementById('chSmokeTestBtn')
+  const reconnectBtn = document.getElementById('chReconnectBtn')
+  const howto = document.getElementById('chHowtoContent')
+  const pairingInfo = document.getElementById('chPairingInfo')
+  const discordChannelGroup = document.getElementById('chDiscordChannelIdGroup')
+  const tokenGroup = document.getElementById('chTokenGroup')
+  // Teams config is terminal-driven (creds land in the .env via setup-azure-bot.sh),
+  // not a dashboard token paste -- default the token field visible, hide it for teams.
+  if (tokenGroup) tokenGroup.hidden = false
+
+  if (isTg) {
+    if (title) title.textContent = t('channel.setup.tg_title')
+    if (steps) steps.innerHTML = t('channel.setup.tg_steps')
+    if (label) label.textContent = 'Bot API Token'
+    if (input) input.placeholder = '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11'
+    if (slackGroup) slackGroup.hidden = true
+    if (manifestBtnGroup) manifestBtnGroup.hidden = true
+    if (smokeTestBtn) smokeTestBtn.hidden = true
+    if (discordChannelGroup) discordChannelGroup.hidden = true
+    if (pairingInfo) pairingInfo.textContent = t('channel.setup.tg_pairing')
+  } else if (currentChannelProvider === 'discord') {
+    if (title) title.textContent = t('channel.setup.discord_title')
+    if (steps) steps.innerHTML = t('channel.setup.discord_steps')
+    if (label) label.textContent = 'Bot Token'
+    if (input) input.placeholder = 'MTIzNDU2Nzg5MDEyMzQ1Njc4OQ...'
+    if (slackGroup) slackGroup.hidden = true
+    if (manifestBtnGroup) manifestBtnGroup.hidden = true
+    if (smokeTestBtn) smokeTestBtn.hidden = true
+    if (discordChannelGroup) discordChannelGroup.hidden = false
+    if (pairingInfo) pairingInfo.textContent = t('channel.setup.discord_pairing')
+  } else if (currentChannelProvider === 'teams') {
+    if (title) title.textContent = t('channel.setup.teams_title')
+    if (steps) steps.innerHTML = t('channel.setup.teams_steps')
+    if (slackGroup) slackGroup.hidden = true
+    if (manifestBtnGroup) manifestBtnGroup.hidden = true
+    if (smokeTestBtn) smokeTestBtn.hidden = true
+    if (discordChannelGroup) discordChannelGroup.hidden = true
+    // No dashboard token entry for Teams -- creds come from the terminal setup.
+    if (tokenGroup) tokenGroup.hidden = true
+    if (pairingInfo) pairingInfo.textContent = t('channel.setup.teams_pairing')
+  } else {
+    if (title) title.textContent = t('channel.setup.slack_title')
+    if (steps) steps.innerHTML = t('channel.setup.slack_steps')
+    if (label) label.textContent = 'Bot Token (xoxb-...)'
+    if (input) input.placeholder = 'xoxb-...'
+    if (slackGroup) slackGroup.hidden = false
+    if (manifestBtnGroup) manifestBtnGroup.hidden = false
+    if (smokeTestBtn) smokeTestBtn.hidden = false
+    if (discordChannelGroup) discordChannelGroup.hidden = true
+    if (pairingInfo) pairingInfo.textContent = t('channel.setup.slack_pairing')
+  }
+  if (howto) howto.innerHTML = buildHowtoHtml()
+  if (reconnectBtn) {
+    reconnectBtn.hidden = !(currentAgent && currentAgent.running && agentIsConnected(currentAgent))
+  }
+}
+
+function updateChannelTab(agent) {
+  const connected = agentIsConnected(agent)
+  const running = agent.running || false
+  document.getElementById('chNotConnected').hidden = connected
+  document.getElementById('chConnected').hidden = !connected
+  if (connected) {
+    document.getElementById('chBotUsername').textContent = agent.telegramBotUsername || '@bot'
+    document.getElementById('chRunNotice').hidden = running
+    document.getElementById('chRunningNotice').hidden = !running
+  }
+  document.getElementById('chTokenInput').value = ''
+  const slackInput = document.getElementById('chSlackAppToken')
+  if (slackInput) slackInput.value = ''
+  const discordChanInput = document.getElementById('chDiscordChannelId')
+  if (discordChanInput) discordChanInput.value = ''
+  updateProviderUI()
+  if (connected && running) {
+    refreshChannelHealth()
+  } else {
+    document.getElementById('chDisconnectedNotice').hidden = true
+    document.getElementById('chReconnectBtn').hidden = true
+  }
+  if (connected) {
+    refreshPendingPairings()
+    refreshAllowedList()
+    refreshInvites()
+    refreshChannelRequests()
+  }
+}
+
+async function refreshChannelHealth() {
+  if (!currentAgent) return
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/channel/health`)
+    if (!res.ok) return
+    const data = await res.json()
+    const notice = document.getElementById('chDisconnectedNotice')
+    const btn = document.getElementById('chReconnectBtn')
+    if (!data.healthy) {
+      if (notice) notice.hidden = false
+      if (btn) btn.hidden = false
+    } else {
+      if (notice) notice.hidden = true
+      if (btn) btn.hidden = false
+    }
+  } catch { /* ignore */ }
+}
+
+document.getElementById('chProviderSelect').addEventListener('change', (e) => {
+  currentChannelProvider = e.target.value
+  updateProviderUI()
+  if (currentAgent) {
+    updateChannelTab(currentAgent)
+  }
+})
+
+document.getElementById('chConnectBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const token = document.getElementById('chTokenInput').value.trim()
+  if (!token) {
+    document.getElementById('chTokenInput').focus()
+    return
+  }
+
+  const payload = { botToken: token }
+  if (currentChannelProvider === 'slack') {
+    const appToken = document.getElementById('chSlackAppToken').value.trim()
+    if (appToken) payload.appToken = appToken
+  } else if (currentChannelProvider === 'discord') {
+    const channelId = document.getElementById('chDiscordChannelId').value.trim()
+    if (channelId) payload.channelId = channelId
+  }
+
+  const btn = document.getElementById('chConnectBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  try {
+    const res = await fetch(`${channelApiBase()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (res.status === 409) {
+      const err = await res.json()
+      if (err.error === 'managed-settings-missing') {
+        showSudoModal(err.sudoCommand)
+        return
+      }
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || 'Kapcsolodasi hiba')
+    }
+    const result = await res.json()
+    showToast(`${getProviderLabel()} sikeresen csatlakoztatva!`)
+    // Refresh detail
+    await openAgentDetail(currentAgent.name)
+    loadAgents()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+document.getElementById('chTestBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  try {
+    const res = await fetch(`${channelApiBase()}/test`, { method: 'POST' })
+    if (!res.ok) throw new Error()
+    showToast('Kapcsolat rendben!')
+  } catch {
+    showToast(t('channel.toast.smoke_failed'))
+  }
+})
+
+document.getElementById('chReconnectBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const btn = document.getElementById('chReconnectBtn')
+  const origText = btn.textContent
+  btn.disabled = true
+  btn.textContent = t('agents.btn.reconnect')
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/channel/reconnect`, { method: 'POST' })
+    const data = await res.json()
+    if (data.ok) {
+      showToast('Channel-MCP reconnect sikeres')
+      document.getElementById('chDisconnectedNotice').hidden = true
+    } else {
+      showToast(data.message || 'Reconnect sikertelen', true)
+    }
+  } catch {
+    showToast('Reconnect hiba', true)
+  } finally {
+    btn.disabled = false
+    btn.textContent = origText
+  }
+})
+
+document.getElementById('chSmokeTestBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const btn = document.getElementById('chSmokeTestBtn')
+  const origText = btn.textContent
+  btn.disabled = true
+  btn.textContent = t('agents.btn.running')
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent)}/channels/slack/smoke-test`, { method: 'POST' })
+    const data = await res.json()
+    if (!res.ok) {
+      showToast(data.error || 'Smoke-test sikertelen', true)
+      return
+    }
+    showSmokeTestResult(data.output || 'OK')
+  } catch {
+    showToast('Smoke-test hiba', true)
+  } finally {
+    btn.disabled = false
+    btn.textContent = origText
+  }
+})
+
+function showSmokeTestResult(output) {
+  const overlay = document.createElement('div')
+  overlay.className = 'modal-overlay'
+  overlay.innerHTML = `
+    <div class="modal-content" style="max-width:600px">
+      <h3>${t('channel.smoke_test.title')}</h3>
+      <pre style="background:#1a1a2e;color:#e0e0e0;padding:12px;border-radius:6px;overflow-x:auto;font-size:13px;max-height:400px;white-space:pre-wrap">${output.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre>
+      <div style="text-align:right;margin-top:12px">
+        <button class="btn-secondary" id="smokeTestCloseBtn">${t('common.btn.close')}</button>
+      </div>
+    </div>`
+  document.body.appendChild(overlay)
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove() })
+  document.getElementById('smokeTestCloseBtn').addEventListener('click', () => overlay.remove())
+}
+
+// Pairing: refresh pending list
+async function refreshPendingPairings() {
+  if (!currentAgent) return
+  const listEl = document.getElementById('chPendingList')
+  try {
+    const res = await fetch(`${channelApiBase()}/pending`)
+    if (!res.ok) return
+    const pending = await res.json()
+    listEl.innerHTML = ''
+    if (pending.length === 0) {
+      listEl.innerHTML = `<div style="font-size:12px; color:var(--text-muted); padding:6px 0;">${t('channel.pending.empty')}</div>`
+      return
+    }
+    for (const p of pending) {
+      const item = document.createElement('div')
+      item.className = 'tg-pending-item'
+      const created = new Date(p.createdAt).toLocaleString('hu-HU')
+      item.innerHTML = `
+        <div>
+          <span class="tg-pending-code">${escapeHtml(p.code)}</span>
+          <span class="tg-pending-sender">Sender: ${escapeHtml(p.senderId)}</span>
+        </div>
+        <button class="btn-primary btn-compact" style="padding:5px 12px; font-size:12px; margin:0" data-code="${escapeHtml(p.code)}">${t('common.btn.approve')}</button>
+      `
+      item.querySelector('button').addEventListener('click', async () => {
+        await approvePairing(p.code)
+      })
+      listEl.appendChild(item)
+    }
+  } catch { /* ignore */ }
+}
+
+async function approvePairing(code) {
+  if (!currentAgent) return
+  try {
+    const res = await fetch(`${channelApiBase()}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    })
+    if (!res.ok) {
+      const err = await res.json()
+      throw new Error(err.error || t('channel.toast.approve_error'))
+    }
+    showToast(t('channel.toast.pairing_approved'))
+    refreshPendingPairings()
+    refreshAllowedList()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  }
+}
+
+document.getElementById('chRefreshPendingBtn').addEventListener('click', refreshPendingPairings)
+
+async function refreshAllowedList() {
+  if (!currentAgent) return
+  const listEl = document.getElementById('chAllowedList')
+  try {
+    const res = await fetch(`${channelApiBase()}/allowed`)
+    if (!res.ok) return
+    const data = await res.json()
+    const users = data.users || []
+    const groups = data.groups || []
+    if (users.length === 0 && groups.length === 0) {
+      listEl.innerHTML = `<div class="tg-allowed-empty">${t('channel.allowed.empty')}</div>`
+      return
+    }
+    listEl.innerHTML = ''
+    for (const id of users) {
+      const item = document.createElement('div')
+      item.className = 'tg-allowed-item'
+      item.innerHTML = `
+        <div class="tg-allowed-meta">
+          <span class="tg-allowed-kind">DM</span>
+          <span class="tg-allowed-id">${escapeHtml(id)}</span>
+        </div>
+        <button class="btn-icon-danger" title="${t('common.btn.remove')}" data-kind="user" data-id="${escapeHtml(id)}">&times;</button>
+      `
+      item.querySelector('button').addEventListener('click', () => removeAllowed('user', id))
+      listEl.appendChild(item)
+    }
+    for (const g of groups) {
+      const item = document.createElement('div')
+      item.className = 'tg-allowed-item'
+      item.innerHTML = `
+        <div class="tg-allowed-meta">
+          <span class="tg-allowed-kind tg-allowed-kind-group">${t('channel.badge.group')}</span>
+          <span class="tg-allowed-id">${escapeHtml(g.id)}</span>
+        </div>
+        <button class="btn-icon-danger" title="${t('common.btn.remove')}" data-kind="group" data-id="${escapeHtml(g.id)}">&times;</button>
+      `
+      item.querySelector('button').addEventListener('click', () => removeAllowed('group', g.id))
+      listEl.appendChild(item)
+    }
+  } catch { /* ignore */ }
+}
+
+async function removeAllowed(kind, id) {
+  if (!currentAgent) return
+  const label = kind === 'user' ? t('channel.kind.user') : t('channel.kind.group')
+  if (!confirm(t('channel.confirm.remove', { label, id }))) return
+  try {
+    const res = await fetch(`${channelApiBase()}/allowed/${kind}/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || t('channel.toast.remove_error'))
+    }
+    showToast(t('common.toast.removed'))
+    refreshAllowedList()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  }
+}
+
+document.getElementById('chRefreshAllowedBtn').addEventListener('click', refreshAllowedList)
+
+async function refreshInvites() {
+  if (!currentAgent) return
+  const listEl = document.getElementById('chInviteList')
+  try {
+    const res = await fetch(`${channelApiBase()}/invites`)
+    if (!res.ok) return
+    const items = await res.json()
+    if (!items.length) {
+      listEl.innerHTML = `<div class="tg-allowed-empty">${t('channel.invite.empty')}</div>`
+      return
+    }
+    listEl.innerHTML = ''
+    for (const inv of items) {
+      const item = document.createElement('div')
+      item.className = 'tg-allowed-item'
+      const expiresIn = Math.max(0, Math.floor((inv.expiresAt - Date.now()) / 60000))
+      const status = inv.used
+        ? `<span class="tg-allowed-kind" style="background:rgba(180,180,180,0.15); color:var(--text-muted);">${t('channel.invite.used_badge')}</span>`
+        : `<span class="tg-allowed-kind tg-allowed-kind-group">${t('channel.invite.active_badge', { min: expiresIn })}</span>`
+      const linkHtml = inv.deepLink
+        ? `<a href="${escapeHtml(inv.deepLink)}" target="_blank" class="tg-allowed-id" style="text-decoration:underline;">${escapeHtml(inv.deepLink)}</a>`
+        : `<span class="tg-allowed-id">${t('channel.invite.no_username')}</span>`
+      item.innerHTML = `
+        <div class="tg-allowed-meta" style="flex-wrap:wrap; gap:6px;">
+          ${status}
+          ${linkHtml}
+        </div>
+        <div style="display:flex; gap:6px;">
+          ${inv.deepLink && !inv.used ? `<button class="btn-secondary btn-compact" data-link="${escapeHtml(inv.deepLink)}" style="padding:4px 10px; font-size:11px; margin:0;">${t('common.btn.copy_btn')}</button>` : ''}
+          <button class="btn-icon-danger" title="${t('channel.btn.revoke')}" data-token="${escapeHtml(inv.token)}">&times;</button>
+        </div>
+      `
+      const copyBtn = item.querySelector('button[data-link]')
+      if (copyBtn) {
+        copyBtn.addEventListener('click', async (e) => {
+          const link = e.currentTarget.getAttribute('data-link')
+          try { await navigator.clipboard.writeText(link); showToast(t('common.toast.copied')) }
+          catch { showToast(t('common.toast.copy_failed')) }
+        })
+      }
+      const revokeBtn = item.querySelector('button[data-token]')
+      if (revokeBtn) {
+        revokeBtn.addEventListener('click', () => revokeInviteToken(inv.token))
+      }
+      listEl.appendChild(item)
+    }
+  } catch { /* ignore */ }
+}
+
+async function generateInvite() {
+  if (!currentAgent) return
+  const btn = document.getElementById('chGenerateInviteBtn')
+  btn.disabled = true
+  btn.textContent = t('channel.btn.invite_gen')
+  try {
+    const res = await fetch(`${channelApiBase()}/invites`, { method: 'POST' })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || 'Sikertelen')
+    }
+    const data = await res.json()
+    if (data.deepLink) {
+      try { await navigator.clipboard.writeText(data.deepLink); showToast(t('channel.toast.invite_copied')) }
+      catch { showToast(t('channel.toast.invite_created')) }
+    } else {
+      showToast(t('channel.toast.invite_pending'))
+    }
+    refreshInvites()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.textContent = t('channel.btn.invite_new')
+  }
+}
+
+async function revokeInviteToken(token) {
+  if (!currentAgent) return
+  if (!confirm(t('channel.confirm.revoke'))) return
+  try {
+    const res = await fetch(`${channelApiBase()}/invites/${encodeURIComponent(token)}`, { method: 'DELETE' })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || 'Sikertelen')
+    }
+    showToast(t('channel.toast.invite_revoked'))
+    refreshInvites()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  }
+}
+
+document.getElementById('chGenerateInviteBtn').addEventListener('click', generateInvite)
+document.getElementById('chRefreshInvitesBtn').addEventListener('click', refreshInvites)
+
+// --- Channel Requests (Slack channel opt-in) ---
+async function refreshChannelRequests() {
+  if (!currentAgent) return
+  const section = document.getElementById('chRequestSection')
+  const listEl = document.getElementById('chRequestList')
+  const badge = document.getElementById('chRequestBadge')
+  if (currentChannelProvider !== 'slack') {
+    section.hidden = true
+    return
+  }
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/channel-requests`)
+    if (!res.ok) { section.hidden = true; return }
+    const items = await res.json()
+    if (!items.length) {
+      section.hidden = true
+      badge.hidden = true
+      return
+    }
+    section.hidden = false
+    badge.hidden = false
+    badge.textContent = items.length
+    listEl.innerHTML = ''
+    for (const req of items) {
+      const item = document.createElement('div')
+      item.className = 'tg-allowed-item'
+      const name = req.channel_name ? escapeHtml(req.channel_name) : req.channel_id
+      const ts = new Date(req.requested_at * 1000).toLocaleString('hu-HU')
+      const userId = req.user_id ? `<span class="tg-allowed-id">user: ${escapeHtml(req.user_id)}</span>` : ''
+      item.innerHTML = `
+        <div class="tg-allowed-meta">
+          <span class="tg-allowed-kind tg-allowed-kind-group">#${name}</span>
+          ${userId}
+          <span class="tg-allowed-id" style="font-size:11px;color:var(--text-muted)">${ts}</span>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn-primary btn-compact" data-approve="${req.id}" style="padding:4px 10px;font-size:11px;margin:0">${t('common.btn.approve')}</button>
+          <button class="btn-icon-danger" data-deny="${req.id}" title="${t('channel.btn.deny')}">&times;</button>
+        </div>
+      `
+      item.dataset.reqId = req.id
+      item.querySelector('[data-approve]').addEventListener('click', () => openApproveModal(req.id, req.channel_name || req.channel_id, req.user_id))
+      item.querySelector('[data-deny]').addEventListener('click', () => denyChannelRequest(req.id, item))
+      listEl.appendChild(item)
+    }
+  } catch { section.hidden = true }
+}
+
+let _approveReqId = null
+
+function openApproveModal(id, channelName, userId) {
+  _approveReqId = id
+  const desc = document.getElementById('chApproveModalDesc')
+  const userNote = userId ? t('channel.approve.requester', { user: escapeHtml(userId) }) : ''
+  desc.textContent = t('channel.approve.desc', { channel: escapeHtml(channelName), requester: userNote })
+  document.getElementById('chApproveRequireMention').checked = true
+  document.getElementById('chApproveAllowFromAll').checked = false
+  document.getElementById('chApproveModalOverlay').hidden = false
+}
+
+async function submitApproveModal() {
+  const id = _approveReqId
+  if (!id) return
+  const requireMention = document.getElementById('chApproveRequireMention').checked
+  const allowFromAll = document.getElementById('chApproveAllowFromAll').checked
+  const confirmBtn = document.getElementById('chApproveModalConfirm')
+  confirmBtn.querySelector('.btn-text').hidden = true
+  confirmBtn.querySelector('.btn-loading').hidden = false
+  confirmBtn.disabled = true
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/channel-requests/${id}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requireMention, allowFromAll }),
+    })
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Hiba')
+    document.getElementById('chApproveModalOverlay').hidden = true
+    const item = document.querySelector(`[data-req-id="${id}"]`)
+    if (item) item.remove()
+    showToast(t('channel.toast.approved'))
+    refreshChannelRequests()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    confirmBtn.querySelector('.btn-text').hidden = false
+    confirmBtn.querySelector('.btn-loading').hidden = true
+    confirmBtn.disabled = false
+  }
+}
+
+async function denyChannelRequest(id, itemEl) {
+  if (itemEl?.dataset.denying) return
+  if (itemEl) itemEl.dataset.denying = '1'
+  if (itemEl) itemEl.remove()
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/channel-requests/${id}/deny`, { method: 'POST' })
+    if (!res.ok) throw new Error('Hiba')
+    showToast(t('channel.toast.denied'))
+    refreshChannelRequests()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+    refreshChannelRequests()
+  }
+}
+
+;(function initApproveModal() {
+  function closeApproveModal() { document.getElementById('chApproveModalOverlay').hidden = true }
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('chApproveModalConfirm').addEventListener('click', submitApproveModal)
+    document.getElementById('chApproveModalClose').addEventListener('click', closeApproveModal)
+    document.getElementById('chApproveModalCancel').addEventListener('click', closeApproveModal)
+    document.getElementById('chApproveModalOverlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeApproveModal() })
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !document.getElementById('chApproveModalOverlay').hidden) closeApproveModal()
+    })
+  })
+})()
+
+document.getElementById('chApproveBtn').addEventListener('click', async () => {
+  const code = document.getElementById('chPairCode').value.trim()
+  if (!code) { document.getElementById('chPairCode').focus(); return }
+  await approvePairing(code)
+  document.getElementById('chPairCode').value = ''
+  refreshAllowedList()
+})
+
+document.getElementById('chDisconnectBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const provLabel = getProviderLabel()
+  if (!confirm(`Biztosan levalasztod a ${provLabel} csatornat?`)) return
+  try {
+    await fetch(`${channelApiBase()}`, { method: 'DELETE' })
+    showToast(`${provLabel} levalasztva`)
+    await openAgentDetail(currentAgent.name)
+    loadAgents()
+  } catch {
+    showToast(t('channel.toast.disconnect_error'))
+  }
+})
+
+// === Skills ===
+async function loadSkills(agentName) {
+  const listEl = document.getElementById('skillList')
+  const emptyEl = document.getElementById('skillEmpty')
+  listEl.innerHTML = ''
+
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/skills`)
+    if (!res.ok) throw new Error()
+    const skills = await res.json()
+
+    emptyEl.hidden = skills.length > 0
+    document.getElementById('agentDetailSkillCount').textContent = skills.length
+
+    for (const skill of skills) {
+      const item = document.createElement('div')
+      item.className = 'skill-item'
+      // Inherited global skills (~/.claude/skills) are shared across every
+      // agent, so they get a badge and no per-agent delete button -- only the
+      // agent's own local skills are deletable from this view.
+      const isGlobal = skill.source === 'global'
+      const badge = isGlobal
+        ? `<span class="skill-item-badge" title="${t('skills.badge.global')}">${t('skills.badge.global')}</span>`
+        : ''
+      const deletable = skill.deletable !== false
+      item.innerHTML = `
+        <div class="skill-item-info">
+          <div class="skill-item-name">${escapeHtml(skill.name)}${badge}</div>
+          ${skill.description ? `<div class="skill-item-desc">${escapeHtml(skill.description)}</div>` : ''}
+        </div>
+        <div class="skill-item-actions">
+          ${deletable ? `<button class="btn-icon btn-icon-danger" title="${t('skills.btn.delete')}">${trashIcon()}</button>` : ''}
+        </div>
+      `
+      const delBtn = item.querySelector('.btn-icon-danger')
+      if (delBtn) {
+        delBtn.addEventListener('click', async () => {
+          if (!confirm(t('skills.confirm.delete', { name: skill.name }))) return
+          try {
+            await fetch(`/api/agents/${encodeURIComponent(agentName)}/skills/${encodeURIComponent(skill.name)}`, { method: 'DELETE' })
+            showToast(t('skills.toast.deleted'))
+            loadSkills(agentName)
+          } catch {
+            showToast(t('common.error_delete'))
+          }
+        })
+      }
+      listEl.appendChild(item)
+    }
+  } catch {
+    emptyEl.hidden = false
+    document.getElementById('agentDetailSkillCount').textContent = '0'
+  }
+}
+
+// Add skill button
+document.getElementById('addSkillBtn').addEventListener('click', () => {
+  skillModalScope = null  // per-agent flow keyed off currentAgent
+  document.getElementById('skillName').value = ''
+  document.getElementById('skillDescription').value = ''
+  skillFile = null
+  document.getElementById('skillFileName').textContent = ''
+  // Reset to create tab
+  document.querySelectorAll('.skill-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.skillTab === 'create'))
+  document.getElementById('skillTabCreate').hidden = false
+  document.getElementById('skillTabImport').hidden = true
+  openModal(skillModalOverlay)
+  setTimeout(() => document.getElementById('skillName').focus(), 200)
+})
+
+// Skill modal tab switching
+document.querySelectorAll('.skill-tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.skill-tab-btn').forEach(b => b.classList.toggle('active', b === btn))
+    document.getElementById('skillTabCreate').hidden = btn.dataset.skillTab !== 'create'
+    document.getElementById('skillTabImport').hidden = btn.dataset.skillTab !== 'import'
+  })
+})
+
+// File upload area
+const skillFileArea = document.getElementById('skillFileArea')
+const skillFileInput = document.getElementById('skillFileInput')
+let skillFile = null
+
+skillFileArea.addEventListener('click', () => skillFileInput.click())
+skillFileArea.addEventListener('dragover', (e) => { e.preventDefault(); skillFileArea.style.borderColor = 'var(--accent)' })
+skillFileArea.addEventListener('dragleave', () => { skillFileArea.style.borderColor = '' })
+skillFileArea.addEventListener('drop', (e) => {
+  e.preventDefault()
+  skillFileArea.style.borderColor = ''
+  const file = e.dataTransfer.files[0]
+  if (file) { skillFile = file; document.getElementById('skillFileName').textContent = file.name }
+})
+skillFileInput.addEventListener('change', () => {
+  const file = skillFileInput.files[0]
+  if (file) { skillFile = file; document.getElementById('skillFileName').textContent = file.name }
+})
+
+// Create skill
+document.getElementById('saveSkillBtn').addEventListener('click', async () => {
+  const isGlobal = skillModalScope === 'global'
+  if (!isGlobal && !currentAgent) return
+  const name = document.getElementById('skillName').value.trim()
+  if (!name) { document.getElementById('skillName').focus(); return }
+
+  const btn = document.getElementById('saveSkillBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  try {
+    const url = isGlobal
+      ? '/api/skills'
+      : `/api/agents/${encodeURIComponent(agentApiName())}/skills`
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        description: document.getElementById('skillDescription').value.trim(),
+      }),
+    })
+    if (!res.ok) {
+      const err = await res.json()
+      throw new Error(err.error || 'Hiba')
+    }
+    closeModal(skillModalOverlay)
+    showToast(t('skills.toast.added'))
+    if (isGlobal) {
+      loadGlobalSkills()
+    } else {
+      loadSkills(agentApiName())
+    }
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+// Import skill
+document.getElementById('importSkillBtn').addEventListener('click', async () => {
+  const isGlobal = skillModalScope === 'global'
+  if (!skillFile) { showToast(t('skills.toast.select_file')); return }
+  if (!isGlobal && !currentAgent) { showToast(t('skills.toast.select_file')); return }
+
+  const btn = document.getElementById('importSkillBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  try {
+    const formData = new FormData()
+    formData.append('file', skillFile)
+    const url = isGlobal
+      ? '/api/skills/import'
+      : `/api/agents/${encodeURIComponent(agentApiName())}/skills/import`
+    const res = await fetch(url, {
+      method: 'POST',
+      body: formData,
+    })
+    if (!res.ok) {
+      const err = await res.json()
+      throw new Error(err.error || 'Import hiba')
+    }
+    const result = await res.json()
+    closeModal(skillModalOverlay)
+    const importedList = Array.isArray(result.imported) ? result.imported : []
+    showToast(t('skills.toast.imported', { list: importedList.join(', ') }))
+    skillFile = null
+    document.getElementById('skillFileName').textContent = ''
+    if (isGlobal) {
+      loadGlobalSkills()
+    } else {
+      loadSkills(agentApiName())
+    }
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+// ============================================================
+// === Schedules ===
+// ============================================================
+
+const scheduleList = document.getElementById('scheduleList')
+const scheduleEmpty = document.getElementById('scheduleEmpty')
+const scheduleModalOverlay = document.getElementById('scheduleModalOverlay')
+const scheduleFrequency = document.getElementById('scheduleFrequency')
+const scheduleTimeGroup = document.getElementById('scheduleTimeGroup')
+const customScheduleGroup = document.getElementById('customScheduleGroup')
+const saveScheduleBtn = document.getElementById('saveScheduleBtn')
+
+let schedules = []
+let scheduleAgents = []
+let currentScheduleView = 'list'
+
+// Modal wiring
+document.getElementById('addScheduleBtn').addEventListener('click', () => {
+  resetScheduleForm()
+  document.getElementById('scheduleModalTitle').textContent = t('tasks.modal.new_title')
+  document.getElementById('scheduleName').disabled = false
+  openModal(scheduleModalOverlay)
+  loadScheduleAgents().then(() => {
+    setTimeout(() => document.getElementById('scheduleName').focus(), 200)
+  })
+})
+document.getElementById('scheduleModalClose').addEventListener('click', () => closeModal(scheduleModalOverlay))
+scheduleModalOverlay.addEventListener('click', (e) => { if (e.target === scheduleModalOverlay) closeModal(scheduleModalOverlay) })
+
+// Frequency change handler
+// Type toggle (task vs heartbeat)
+document.getElementById('scheduleType').addEventListener('change', () => {
+  const isHeartbeat = document.getElementById('scheduleType').value === 'heartbeat'
+  document.getElementById('heartbeatTemplateGroup').hidden = !isHeartbeat
+  if (isHeartbeat && !document.getElementById('schedulePrompt').value.trim()) {
+    // Set default heartbeat schedule to every 15 min
+    scheduleFrequency.value = 'custom'
+    document.getElementById('scheduleCustomCron').value = '*/15 * * * *'
+    customScheduleGroup.hidden = false
+    scheduleTimeGroup.hidden = true
+  }
+})
+
+// Resolved once at page load: the server's actual bind port (WEB_PORT), not
+// window.location.port which reflects the browser-side URL (e.g. 8443 for a
+// tailscale-serve HTTPS PWA) and would be wrong in agent curl prompts.
+let __serverPort = 3420
+fetch('/api/network-info').then(r => r.ok ? r.json() : {}).then(info => {
+  if (info.port) __serverPort = info.port
+}).catch(() => {})
+
+// Heartbeat templates
+const HEARTBEAT_TEMPLATES = {
+  calendar: {
+    desc: () => t('tasks.heartbeat.tpl.calendar'),
+    prompt: 'Ellenorizd a naptaramat (list-events a mai napra). Ha van meeting 1 oran belul, szolj Telegramon es 10 perccel a meeting elott is emlekeztetess. Ha nincs kozelgo esemeny, ne irj semmit.',
+    schedule: '*/15 * * * *',
+  },
+  email: {
+    desc: () => t('tasks.heartbeat.tpl.email'),
+    prompt: 'Ellenorizd az emailjeimet (search_emails newer_than:1h). Ha surgos vagy fontos levelet talalsz (pl. ugyfeltol, fonokotol, fizetessel kapcsolatos), szolj Telegramon. Ha csak promo/newsletter, ne irj semmit.',
+    schedule: '*/30 * * * *',
+  },
+  kanban: {
+    desc: () => t('tasks.heartbeat.tpl.kanban'),
+    prompt: () => `Ellenorizd a kanban tablat (curl -s http://localhost:${__serverPort}/api/kanban). Ha van olyan kartya aminek ma jar le a hatrideje vagy urgent prioritasu es meg nincs done, szolj Telegramon. Ha minden rendben, ne irj semmit.`,
+    schedule: '0 */2 * * *',
+  },
+  full: {
+    desc: () => t('tasks.heartbeat.tpl.full'),
+    prompt: 'Ellenorizd: 1) Naptar - van-e meeting 1 oran belul? 2) Email - jott-e surgos level az elmult oraban? 3) Kanban - van-e mai hataridovel kartya? Ha BARMIT talalsz ami fontos, szolj Telegramon tomoren. Ha minden csendes, ne irj semmit.',
+    schedule: '*/15 * * * *',
+  },
+}
+
+document.getElementById('heartbeatTemplate').addEventListener('change', () => {
+  const tpl = HEARTBEAT_TEMPLATES[document.getElementById('heartbeatTemplate').value]
+  if (!tpl) return
+  document.getElementById('scheduleDesc').value = typeof tpl.desc === 'function' ? tpl.desc() : tpl.desc
+  document.getElementById('schedulePrompt').value = typeof tpl.prompt === 'function' ? tpl.prompt() : tpl.prompt
+  document.getElementById('scheduleCustomCron').value = tpl.schedule
+  scheduleFrequency.value = 'custom'
+  customScheduleGroup.hidden = false
+  scheduleTimeGroup.hidden = true
+})
+
+scheduleFrequency.addEventListener('change', () => {
+  const freq = scheduleFrequency.value
+  const needsTime = ['daily', 'weekdays', 'weekly-mon', 'weekly-fri'].includes(freq)
+  const isCustom = freq === 'custom'
+  scheduleTimeGroup.hidden = !needsTime
+  customScheduleGroup.hidden = !isCustom
+  if (isCustom) document.getElementById('scheduleCustomCron').focus()
+})
+
+// View toggle buttons
+document.querySelectorAll('.view-btn[data-view]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.view-btn[data-view]').forEach(b => b.classList.remove('active'))
+    btn.classList.add('active')
+    currentScheduleView = btn.dataset.view
+    document.getElementById('scheduleListView').hidden = currentScheduleView !== 'list'
+    document.getElementById('scheduleTimelineView').hidden = currentScheduleView !== 'timeline'
+    document.getElementById('scheduleWeekView').hidden = currentScheduleView !== 'week'
+    if (currentScheduleView === 'timeline') renderTimeline(schedules)
+    if (currentScheduleView === 'week') renderWeekView(schedules)
+  })
+})
+
+function resetScheduleForm() {
+  document.getElementById('scheduleName').value = ''
+  document.getElementById('scheduleDesc').value = ''
+  document.getElementById('schedulePrompt').value = ''
+  document.getElementById('scheduleSkipIfBusy').checked = false
+  document.getElementById('scheduleForceSend').checked = false
+  document.getElementById('scheduleTargetSession').value = ''
+  scheduleFrequency.value = 'daily'
+  document.getElementById('scheduleTime').value = '09:00'
+  document.getElementById('scheduleCustomCron').value = ''
+  customScheduleGroup.hidden = true
+  scheduleTimeGroup.hidden = false
+  document.getElementById('expandQuestions').hidden = true
+  document.getElementById('expandStatus').textContent = ''
+  expandAnswers = []
+  document.getElementById('scheduleEditName').value = ''
+  document.getElementById('scheduleType').value = 'task'
+  document.getElementById('heartbeatTemplateGroup').hidden = true
+  document.getElementById('heartbeatTemplate').value = ''
+  saveScheduleBtn.disabled = false
+  saveScheduleBtn.querySelector('.btn-text').hidden = false
+  saveScheduleBtn.querySelector('.btn-loading').hidden = true
+}
+
+function getScheduleCron() {
+  const freq = scheduleFrequency.value
+  if (freq === 'custom') return document.getElementById('scheduleCustomCron').value.trim()
+
+  const time = document.getElementById('scheduleTime').value || '09:00'
+  const [h, m] = time.split(':').map(Number)
+
+  switch (freq) {
+    case 'daily': return `${m} ${h} * * *`
+    case 'weekdays': return `${m} ${h} * * 1-5`
+    case 'weekly-mon': return `${m} ${h} * * 1`
+    case 'weekly-fri': return `${m} ${h} * * 5`
+    case 'hourly': return `0 * * * *`
+    case 'every2h': return `0 */2 * * *`
+    case 'every4h': return `0 */4 * * *`
+    case 'every30m': return `*/30 * * * *`
+    default: return `${m} ${h} * * *`
+  }
+}
+
+function parseCronToForm(cron) {
+  const parts = cron.split(' ')
+  if (parts.length < 5) { scheduleFrequency.value = 'custom'; customScheduleGroup.hidden = false; document.getElementById('scheduleCustomCron').value = cron; return }
+  const [minute, hour, dom, month, dow] = parts
+
+  // Interval patterns
+  if (minute === '*/30' && hour === '*') { scheduleFrequency.value = 'every30m'; scheduleTimeGroup.hidden = true; customScheduleGroup.hidden = true; return }
+  if (minute === '0' && hour === '*') { scheduleFrequency.value = 'hourly'; scheduleTimeGroup.hidden = true; customScheduleGroup.hidden = true; return }
+  if (minute === '0' && hour === '*/2') { scheduleFrequency.value = 'every2h'; scheduleTimeGroup.hidden = true; customScheduleGroup.hidden = true; return }
+  if (minute === '0' && hour === '*/4') { scheduleFrequency.value = 'every4h'; scheduleTimeGroup.hidden = true; customScheduleGroup.hidden = true; return }
+
+  // Time-based patterns
+  const h = parseInt(hour); const m = parseInt(minute)
+  if (!isNaN(h) && !isNaN(m)) {
+    const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+    document.getElementById('scheduleTime').value = timeStr
+    scheduleTimeGroup.hidden = false
+    customScheduleGroup.hidden = true
+
+    if (dow === '1-5') { scheduleFrequency.value = 'weekdays'; return }
+    if (dow === '1') { scheduleFrequency.value = 'weekly-mon'; return }
+    if (dow === '5') { scheduleFrequency.value = 'weekly-fri'; return }
+    if (dow === '*' && dom === '*') { scheduleFrequency.value = 'daily'; return }
+  }
+
+  // Fallback to custom
+  scheduleFrequency.value = 'custom'
+  customScheduleGroup.hidden = false
+  scheduleTimeGroup.hidden = true
+  document.getElementById('scheduleCustomCron').value = cron
+}
+
+function describeCron(cron) {
+  const parts = cron.split(' ')
+  if (parts.length < 5) return cron
+  const [minute, hour, dom, month, dow] = parts
+
+  // Interval patterns
+  if (minute.startsWith('*/')) return t('tasks.cron.every_n_min', { n: minute.split('/')[1] })
+  if (hour.startsWith('*/')) return t('tasks.cron.every_n_hour', { n: hour.split('/')[1] })
+  if (minute === '0' && hour === '*') return t('tasks.cron.every_hour')
+
+  // Time-based
+  const h = parseInt(hour); const m = parseInt(minute)
+  if (!isNaN(h) && !isNaN(m)) {
+    const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+    if (dow === '1-5') return t('tasks.cron.weekdays', { time: timeStr })
+    if (dow === '0,6' || dow === '6,0') return t('tasks.cron.weekends', { time: timeStr })
+    if (t(`tasks.cron.dow.${dow}`) !== `tasks.cron.dow.${dow}`) return `${t(`tasks.cron.dow.${dow}`)} ${timeStr}`
+    if (dow === '*' && dom === '*') return t('tasks.cron.daily', { time: timeStr })
+    if (dom !== '*') return t('tasks.cron.monthly', { dom, time: timeStr })
+  }
+
+  return cron
+}
+
+function cronToHours(cron) {
+  const parts = cron.split(' ')
+  if (parts.length < 5) return []
+  const hour = parts[1]
+
+  if (hour === '*') return Array.from({length: 24}, (_, i) => i)
+  if (hour.includes('/')) {
+    const step = parseInt(hour.split('/')[1])
+    if (isNaN(step) || step <= 0) return []
+    return Array.from({length: 24}, (_, i) => i).filter(h => h % step === 0)
+  }
+  if (hour.includes(',')) return hour.split(',').map(Number).filter(n => !isNaN(n))
+  if (hour.includes('-')) {
+    const [start, end] = hour.split('-').map(Number)
+    if (isNaN(start) || isNaN(end)) return []
+    return Array.from({length: end - start + 1}, (_, i) => start + i)
+  }
+  const h = parseInt(hour)
+  return isNaN(h) ? [] : [h]
+}
+
+function cronToMinute(cron) {
+  const parts = cron.split(' ')
+  if (parts.length < 1) return 0
+  const m = parseInt(parts[0])
+  return isNaN(m) ? 0 : m
+}
+
+async function loadScheduleAgents() {
+  try {
+    const res = await fetch('/api/schedules/agents')
+    scheduleAgents = await res.json()
+    const sel = document.getElementById('scheduleAgent')
+    sel.innerHTML = ''
+    for (const a of scheduleAgents) {
+      const opt = document.createElement('option')
+      opt.value = a.name
+      opt.textContent = a.label || a.name
+      sel.appendChild(opt)
+    }
+  } catch (err) {
+    console.error('Ügynök lista hiba:', err)
+  }
+}
+
+async function loadSchedules() {
+  try {
+    const [schedulesRes] = await Promise.all([
+      fetch('/api/schedules'),
+      loadScheduleAgents(),
+    ])
+    schedules = await schedulesRes.json()
+    renderScheduleList(schedules)
+    if (currentScheduleView === 'timeline') renderTimeline(schedules)
+    loadPendingRetries()
+  } catch (err) {
+    console.error('Ütemezés betöltés hiba:', err)
+  }
+}
+
+async function loadPendingRetries() {
+  const container = document.getElementById('pendingRetriesSection')
+  if (!container) return
+  try {
+    const res = await fetch('/api/schedules/pending')
+    if (!res.ok) { container.hidden = true; return }
+    const rows = await res.json()
+    renderPendingRetries(container, Array.isArray(rows) ? rows : [])
+  } catch (err) {
+    console.error('Pending retry betöltés hiba:', err)
+    container.hidden = true
+  }
+}
+
+function formatPendingAge(ms) {
+  const mins = Math.floor(ms / 60000)
+  if (mins < 1) return t('common.time.less_than_min')
+  if (mins < 60) return t('common.time.minutes', { n: mins })
+  const hours = Math.floor(mins / 60)
+  const remMins = mins % 60
+  return remMins ? t('common.time.hours_mins', { h: hours, m: remMins }) : t('common.time.hours', { h: hours })
+}
+
+function renderPendingRetries(container, rows) {
+  if (!rows.length) {
+    container.hidden = true
+    container.innerHTML = ''
+    return
+  }
+  container.hidden = false
+  const items = rows.map(r => `
+    <div class="pending-retry-row" data-id="${r.id}">
+      <div class="pending-retry-info">
+        <div class="pending-retry-title">
+          ${escapeHtml(r.taskName)}
+          <span class="badge badge-paused">${escapeHtml(r.agentName)}</span>
+          ${r.alertSentAt
+            ? `<span class="badge badge-heartbeat" title="${t('tasks.heartbeat.alert_badge_sent')}">⚠️ ${t('tasks.heartbeat.alert_sent')}</span>`
+            : r.alertDue
+              ? `<span class="badge badge-heartbeat" title="${t('tasks.heartbeat.alert_badge_pending')}">⏳ ${t('tasks.heartbeat.alert_pending')}</span>`
+              : ''}
+        </div>
+        <div class="pending-retry-meta">
+          <span>${t('tasks.retries.meta', { age: formatPendingAge(r.ageMs), n: r.attemptCount })}</span>
+          ${r.lastReason ? `<span>ok: ${escapeHtml(r.lastReason)}</span>` : ''}
+        </div>
+      </div>
+      <button class="btn-icon btn-icon-danger" data-action="cancel-pending" title="${t('common.btn.remove')}">
+        ${trashIcon()}
+      </button>
+    </div>
+  `).join('')
+  container.innerHTML = `
+    <div class="pending-retries-banner">
+      <div class="pending-retries-header">
+        <span class="pending-retries-title">${t('tasks.retries.title', { n: rows.length })}</span>
+        <span class="pending-retries-hint">${t('tasks.retries.hint')}</span>
+      </div>
+      <div class="pending-retries-list">${items}</div>
+    </div>
+  `
+  container.querySelectorAll('[data-action="cancel-pending"]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation()
+      const row = e.currentTarget.closest('.pending-retry-row')
+      const id = row?.dataset.id
+      if (!id) return
+      if (!confirm(t('tasks.confirm.cancel_pending'))) return
+      try {
+        const res = await fetch(`/api/schedules/pending/${encodeURIComponent(id)}`, { method: 'DELETE' })
+        if (!res.ok) throw new Error('cancel failed')
+        loadPendingRetries()
+      } catch (err) {
+        console.error('Pending retry cancel hiba:', err)
+      }
+    })
+  })
+}
+
+// Classify a cron expression into a cadence bucket for grouping the list.
+function cronCadence(cron) {
+  const p = (cron || '').trim().split(/\s+/)
+  if (p.length < 5) return { order: 5, label: t('tasks.cadence.other') }
+  const [min, hour, , mon, dow] = p
+  const dom = p[2]
+  if (mon !== '*' || dom !== '*') return { order: 3, label: t('tasks.cadence.monthly') }
+  if (dow !== '*' && dow !== '1-5') return { order: 2, label: t('tasks.cadence.weekly') }
+  const multiDaily = /[\/,\-]/.test(min) || /[\/,\-]/.test(hour)
+  if (multiDaily) return { order: 0, label: t('tasks.cadence.sub_hourly') }
+  return { order: 1, label: t('tasks.cadence.daily') }
+}
+const CADENCE_ICON = { 0: '⚡', 1: '☀️', 2: '📅', 3: '🗓️', 5: '•' }
+
+function makeScheduleRow(task) {
+    const row = document.createElement('div')
+    row.className = 'schedule-row'
+    const agent = scheduleAgents.find(a => a.name === task.agent) || { name: task.agent || mainAgentId(), avatar: '/api/wraith/avatar', label: task.agent || mainAgentId() }
+
+    row.innerHTML = `
+      <div class="schedule-agent-avatar">
+        <img src="${agent.avatar}${avatarBust()}" alt="" onerror="this.style.display='none'">
+      </div>
+      <div class="schedule-info">
+        <div class="schedule-title">
+          ${escapeHtml(task.description || task.name)}
+          ${task.type === 'heartbeat' ? '<span class="badge badge-heartbeat">💓 heartbeat</span>' : ''}
+          <span class="badge ${task.enabled ? 'badge-active' : 'badge-paused'}">${task.enabled ? t('tasks.status.active') : t('tasks.status.paused')}</span>
+        </div>
+        <div class="schedule-meta">
+          <span class="schedule-cron">${escapeHtml(task.schedule)}</span>
+          <span>${describeCron(task.schedule)}</span>
+          <span class="schedule-agent-name">${escapeHtml(agent.label || agent.name)}</span>
+        </div>
+      </div>
+      <div class="schedule-actions">
+        <button class="btn-icon" data-action="run" title="${t('tasks.btn.run_now')}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+        </button>
+        <button class="btn-icon" data-action="toggle" title="${task.enabled ? t('tasks.btn.toggle_pause') : t('tasks.btn.toggle_resume')}">
+          ${task.enabled ? pauseIcon() : playIcon()}
+        </button>
+        <button class="btn-icon" data-action="history" title="${t('tasks.btn.history')}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+        </button>
+        <button class="btn-icon btn-icon-danger" data-action="delete" title="${t('tasks.btn.delete')}">
+          ${trashIcon()}
+        </button>
+      </div>
+    `
+
+    // Row click -> edit (but not action buttons)
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.btn-icon')) return
+      openEditSchedule(task)
+    })
+
+    // Action buttons
+    row.querySelector('[data-action="run"]').addEventListener('click', async (e) => {
+      e.stopPropagation()
+      try {
+        const r = await fetch(`/api/schedules/${encodeURIComponent(task.name)}/run`, { method: 'POST' })
+        const data = await r.json().catch(() => ({}))
+        if (r.ok) showToast(t('tasks.toast.run_started') + (data.result ? ': ' + data.result : ''))
+        else showToast('Hiba: ' + (data.error || r.status))
+        loadSchedules()
+      } catch { showToast(t('tasks.toast.run_error')) }
+    })
+
+    row.querySelector('[data-action="toggle"]').addEventListener('click', async (e) => {
+      e.stopPropagation()
+      try {
+        await fetch(`/api/schedules/${encodeURIComponent(task.name)}/toggle`, { method: 'POST' })
+        showToast(task.enabled ? t('tasks.toast.toggled_paused') : t('tasks.toast.toggled_resumed'))
+        loadSchedules()
+      } catch { showToast(t('common.error')) }
+    })
+
+    row.querySelector('[data-action="delete"]').addEventListener('click', async (e) => {
+      e.stopPropagation()
+      if (!confirm(t('tasks.confirm.task_delete'))) return
+      try {
+        await fetch(`/api/schedules/${encodeURIComponent(task.name)}`, { method: 'DELETE' })
+        showToast(t('tasks.toast.deleted'))
+        loadSchedules()
+      } catch { showToast(t('common.error_delete')) }
+    })
+
+    row.querySelector('[data-action="history"]').addEventListener('click', async (e) => {
+      e.stopPropagation()
+      openScheduleRunHistory(task.name)
+    })
+
+    return row
+}
+
+function renderScheduleList(tasks) {
+  scheduleList.innerHTML = ''
+  scheduleEmpty.hidden = tasks.length > 0
+  const groups = new Map()
+  for (const task of tasks) {
+    const c = cronCadence(task.schedule)
+    if (!groups.has(c.order)) groups.set(c.order, { label: c.label, tasks: [] })
+    groups.get(c.order).tasks.push(task)
+  }
+  for (const o of [0, 1, 2, 3, 5]) {
+    const g = groups.get(o)
+    if (!g) continue
+    const header = document.createElement('div')
+    header.className = 'schedule-section'
+    header.innerHTML = `<span class="schedule-section-icon">${CADENCE_ICON[o] || ''}</span><span class="schedule-section-label">${escapeHtml(g.label)}</span><span class="schedule-section-count">${g.tasks.length}</span>`
+    scheduleList.appendChild(header)
+    for (const task of g.tasks) scheduleList.appendChild(makeScheduleRow(task))
+  }
+}
+
+const scheduleRunHistoryOverlay = document.getElementById('scheduleRunHistoryOverlay')
+document.getElementById('scheduleRunHistoryClose').addEventListener('click', () => closeModal(scheduleRunHistoryOverlay))
+scheduleRunHistoryOverlay.addEventListener('click', (e) => { if (e.target === scheduleRunHistoryOverlay) closeModal(scheduleRunHistoryOverlay) })
+
+const RUN_STATUS_LABEL = {
+  fired: () => t('tasks.run_status.fired'),
+  error: () => t('tasks.run_status.error'),
+  skipped: () => t('tasks.run_status.skipped'),
+}
+const RUN_STATUS_CLASS = {
+  fired: 'badge-active',
+  error: 'badge-danger',
+  skipped: 'badge-paused',
+}
+
+async function openScheduleRunHistory(taskName) {
+  document.getElementById('scheduleRunHistoryTitle').textContent = t('tasks.history.title', { name: taskName })
+  const body = document.getElementById('scheduleRunHistoryBody')
+  body.innerHTML = '<p>' + t('common.loading') + '</p>'
+  openModal(scheduleRunHistoryOverlay)
+  try {
+    const r = await fetch(`/api/schedules/${encodeURIComponent(taskName)}/runs`)
+    const runs = await r.json()
+    if (!Array.isArray(runs) || runs.length === 0) {
+      body.innerHTML = '<p class="hint">' + t('tasks.history.empty') + '</p>'
+      return
+    }
+    const rows = runs.map(run => {
+      const d = new Date(run.ts)
+      const date = d.toLocaleDateString('hu-HU', { month: 'short', day: 'numeric' })
+      const time = d.toLocaleTimeString('hu-HU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      const labelRaw = RUN_STATUS_LABEL[run.status]
+      const label = labelRaw ? (typeof labelRaw === 'function' ? labelRaw() : labelRaw) : run.status
+      const cls = RUN_STATUS_CLASS[run.status] || 'badge-paused'
+      const tokens = run.tokens_est !== null ? `~${run.tokens_est.toLocaleString()}` : '-'
+      return `<tr>
+        <td style="white-space:nowrap">${date} ${time}</td>
+        <td><span class="badge ${cls}">${escapeHtml(label)}</span></td>
+        <td style="text-align:right;font-variant-numeric:tabular-nums">${tokens}</td>
+      </tr>`
+    }).join('')
+    body.innerHTML = `<table style="width:100%;border-collapse:collapse">
+      <thead><tr>
+        <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)">${t('tasks.history.time')}</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)">${t('tasks.history.status')}</th>
+        <th style="text-align:right;padding:4px 8px;border-bottom:1px solid var(--border)">${t('tasks.history.tokens')}</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`
+    body.querySelectorAll('tbody tr').forEach(tr => {
+      tr.querySelectorAll('td').forEach(td => { td.style.padding = '5px 8px'; td.style.borderBottom = '1px solid var(--border-light, #eee)' })
+    })
+  } catch { body.innerHTML = '<p class="hint">' + t('tasks.history.error') + '</p>' }
+}
+
+function renderTimeline(tasks) {
+  const hoursEl = document.getElementById('timelineHours')
+  const bodyEl = document.getElementById('timelineBody')
+  hoursEl.innerHTML = ''
+  bodyEl.innerHTML = ''
+
+  // Build hour labels
+  for (let h = 0; h < 24; h++) {
+    const hourDiv = document.createElement('div')
+    hourDiv.className = 'timeline-hour'
+    hourDiv.textContent = h.toString().padStart(2, '0')
+    hoursEl.appendChild(hourDiv)
+  }
+
+  // Group tasks by agent
+  const agentTasks = {}
+  for (const task of tasks) {
+    const agentName = task.agent || mainAgentId()
+    if (!agentTasks[agentName]) agentTasks[agentName] = []
+    agentTasks[agentName].push(task)
+  }
+
+  // If no tasks, show empty state
+  if (Object.keys(agentTasks).length === 0) {
+    bodyEl.innerHTML = `<div class="schedule-empty" style="padding:40px;text-align:center;color:var(--text-muted)">${t('tasks.schedule_empty')}</div>`
+    return
+  }
+
+  for (const [agentName, agTasks] of Object.entries(agentTasks)) {
+    const agent = scheduleAgents.find(a => a.name === agentName) || { name: agentName, avatar: '/api/wraith/avatar', label: agentName }
+
+    const row = document.createElement('div')
+    row.className = 'timeline-row'
+
+    // Agent label
+    row.innerHTML = `
+      <div class="timeline-agent">
+        <div class="timeline-agent-avatar">
+          <img src="${agent.avatar}${avatarBust()}" alt="" onerror="this.style.display='none'">
+        </div>
+        <span class="timeline-agent-name">${escapeHtml(agent.label || agent.name)}</span>
+      </div>
+      <div class="timeline-track"></div>
+    `
+
+    const track = row.querySelector('.timeline-track')
+
+    // Place markers for each task
+    for (const task of agTasks) {
+      const hours = cronToHours(task.schedule)
+      const minute = cronToMinute(task.schedule)
+
+      for (const h of hours) {
+        const pct = ((h * 60 + minute) / (24 * 60)) * 100
+        const marker = document.createElement('div')
+        marker.className = 'timeline-marker' + (task.enabled ? '' : ' disabled')
+        marker.style.left = `calc(${pct}% - 16px)`
+        marker.innerHTML = `
+          <img src="${agent.avatar}${avatarBust()}" alt="" onerror="this.style.display='none'">
+          <div class="timeline-marker-tooltip">${escapeHtml(task.description || task.name)} - ${h.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}</div>
+        `
+        marker.addEventListener('click', () => openEditSchedule(task))
+        track.appendChild(marker)
+      }
+    }
+
+    // "Now" indicator
+    const now = new Date()
+    const nowMinutes = now.getHours() * 60 + now.getMinutes()
+    const nowPct = (nowMinutes / (24 * 60)) * 100
+    const nowLine = document.createElement('div')
+    nowLine.className = 'timeline-now'
+    nowLine.style.left = `${nowPct}%`
+    track.appendChild(nowLine)
+
+    bodyEl.appendChild(row)
+  }
+}
+
+function cronMatchesDay(cron, dayOfWeek) {
+  // dayOfWeek: 0=Sun, 1=Mon, ..., 6=Sat
+  const parts = cron.split(' ')
+  if (parts.length < 5) return false
+  const dow = parts[4]
+  if (dow === '*') return true
+  if (dow.includes(',')) return dow.split(',').map(Number).includes(dayOfWeek)
+  if (dow.includes('-')) {
+    const [start, end] = dow.split('-').map(Number)
+    return dayOfWeek >= start && dayOfWeek <= end
+  }
+  return parseInt(dow) === dayOfWeek || (dayOfWeek === 0 && dow === '7')
+}
+
+function renderWeekView(data) {
+  const grid = document.getElementById('weekGrid')
+  grid.innerHTML = ''
+
+  const locale = _lang === 'en' ? 'en-US' : 'hu-HU'
+  const dayNums = [1, 2, 3, 4, 5, 6, 0]
+  // Jan 6 2025 = Mon; offset by dayNums index to get each weekday
+  const dayNames = dayNums.map(dow => new Date(2025, 0, 6 + (dow === 0 ? 6 : dow - 1)).toLocaleDateString(locale, { weekday: 'narrow' }))
+  const dayNamesFull = dayNums.map(dow => new Date(2025, 0, 6 + (dow === 0 ? 6 : dow - 1)).toLocaleDateString(locale, { weekday: 'long' }))
+
+  const today = new Date()
+  const todayDow = today.getDay()
+
+  function expandDay(targetCol) {
+    grid.querySelectorAll('.week-day').forEach(d => d.classList.remove('week-day-expanded'))
+    targetCol.classList.add('week-day-expanded')
+  }
+
+  for (let i = 0; i < 7; i++) {
+    const dayDow = dayNums[i]
+    const isToday = dayDow === todayDow
+    const dayCol = document.createElement('div')
+    dayCol.className = 'week-day' + (isToday ? ' week-day-today week-day-expanded' : '')
+
+    const header = document.createElement('div')
+    header.className = 'week-day-header'
+    header.textContent = dayCol.classList.contains('week-day-expanded') ? dayNamesFull[i] : dayNames[i]
+    header.dataset.short = dayNames[i]
+    header.dataset.full = dayNamesFull[i]
+    dayCol.appendChild(header)
+
+    const tasksForDay = data.filter(t => t.enabled && cronMatchesDay(t.schedule, dayDow))
+
+    // Collapsed count badge
+    const countDiv = document.createElement('div')
+    countDiv.className = 'week-day-count'
+    countDiv.innerHTML = `<span class="week-day-count-num">${tasksForDay.length}</span>`
+    dayCol.appendChild(countDiv)
+
+    // Expanded task list (positioned by time)
+    const tasksDiv = document.createElement('div')
+    tasksDiv.className = 'week-day-tasks'
+
+    if (tasksForDay.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'week-day-empty'
+      empty.textContent = 'Nincs feladat'
+      dayCol.appendChild(empty)
+    }
+
+    // Add hour grid lines (6:00 - 22:00)
+    for (let hr = 6; hr <= 22; hr += 2) {
+      const pct = (hr / 24) * 100
+      const line = document.createElement('div')
+      line.className = 'week-hour-line'
+      line.style.top = `${pct}%`
+      tasksDiv.appendChild(line)
+      const label = document.createElement('div')
+      label.className = 'week-hour-label'
+      label.style.top = `${pct}%`
+      label.textContent = `${String(hr).padStart(2,'0')}:00`
+      tasksDiv.appendChild(label)
+    }
+
+    // Group tasks by same time slot for side-by-side layout
+    const timeSlots = {}
+    for (const task of tasksForDay) {
+      const parts = task.schedule.split(' ')
+      const h = parseInt(parts[1]); const m = parseInt(parts[0])
+      const key = `${h}:${m}`
+      if (!timeSlots[key]) timeSlots[key] = []
+      timeSlots[key].push(task)
+    }
+
+    for (const [key, tasks] of Object.entries(timeSlots)) {
+      const [h, m] = key.split(':').map(Number)
+      const topPct = ((h * 60 + m) / (24 * 60)) * 100
+      const timeLabel = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`
+      const count = tasks.length
+
+      tasks.forEach((task, idx) => {
+        const agent = scheduleAgents.find(a => a.name === task.agent) || { name: task.agent || mainAgentId(), avatar: '/api/wraith/avatar' }
+
+        const card = document.createElement('div')
+        card.className = 'week-task-card'
+        card.style.top = `${topPct}%`
+
+        // Side by side: divide available width (after 32px label margin)
+        const availableStart = 32 // px from left for hour labels
+        const gap = 4
+        if (count > 1) {
+          card.style.left = `calc(${availableStart}px + ${idx} * ((100% - ${availableStart + 8}px) / ${count}) + ${idx * gap}px)`
+          card.style.width = `calc((100% - ${availableStart + 8 + (count - 1) * gap}px) / ${count})`
+        } else {
+          card.style.left = `${availableStart}px`
+          card.style.right = '8px'
+        }
+
+        card.innerHTML = `
+          <div class="week-task-avatar"><img src="${agent.avatar}${avatarBust()}" alt=""></div>
+          <div class="week-task-info">
+            <div class="week-task-time">${timeLabel}</div>
+            <div class="week-task-name">${escapeHtml(task.description || task.name)}</div>
+          </div>
+        `
+        card.addEventListener('click', (e) => { e.stopPropagation(); openEditSchedule(task) })
+        tasksDiv.appendChild(card)
+      })
+    }
+
+    dayCol.appendChild(tasksDiv)
+
+    // Click to expand
+    dayCol.addEventListener('click', () => {
+      if (!dayCol.classList.contains('week-day-expanded')) {
+        expandDay(dayCol)
+        // Update headers
+        grid.querySelectorAll('.week-day-header').forEach(hdr => {
+          hdr.textContent = hdr.closest('.week-day-expanded') ? hdr.dataset.full : hdr.dataset.short
+        })
+      }
+    })
+
+    grid.appendChild(dayCol)
+  }
+}
+
+function openEditSchedule(task) {
+  loadScheduleAgents().then(() => {
+    resetScheduleForm()
+    document.getElementById('scheduleModalTitle').textContent = t('tasks.modal.edit_title')
+    document.getElementById('scheduleName').value = task.name
+    document.getElementById('scheduleName').disabled = true
+    document.getElementById('scheduleDesc').value = task.description || ''
+    document.getElementById('schedulePrompt').value = task.prompt || ''
+    document.getElementById('scheduleEditName').value = task.name
+    document.getElementById('scheduleSkipIfBusy').checked = !!task.skipIfBusy
+    document.getElementById('scheduleForceSend').checked = !!task.forceSend
+    document.getElementById('scheduleTargetSession').value = task.targetSession || ''
+
+    // Set type (heartbeat or task; custom types fall back to task)
+    const typeEl = document.getElementById('scheduleType')
+    typeEl.value = (task.type === 'heartbeat') ? 'heartbeat' : 'task'
+    document.getElementById('heartbeatTemplateGroup').hidden = typeEl.value !== 'heartbeat'
+
+    // Set agent
+    const agentSel = document.getElementById('scheduleAgent')
+    if (agentSel.querySelector(`option[value="${task.agent}"]`)) {
+      agentSel.value = task.agent
+    }
+
+    // Parse cron back to frequency + time
+    parseCronToForm(task.schedule)
+
+    openModal(scheduleModalOverlay)
+  })
+}
+
+// Save schedule (create or update)
+// === Prompt expand ===
+let expandAnswers = []
+
+document.getElementById('expandPromptBtn').addEventListener('click', async () => {
+  const prompt = document.getElementById('schedulePrompt').value.trim()
+  if (!prompt) { document.getElementById('schedulePrompt').focus(); return }
+
+  const statusEl = document.getElementById('expandStatus')
+  const questionsEl = document.getElementById('expandQuestions')
+  const btn = document.getElementById('expandPromptBtn')
+
+  btn.disabled = true
+  statusEl.textContent = t('tasks.expand.generating')
+  expandAnswers = []
+
+  try {
+    const agent = document.getElementById('scheduleAgent').value
+    const res = await fetch('/api/schedules/expand-questions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, agent }),
+    })
+    if (!res.ok) throw new Error()
+    const questions = await res.json()
+
+    questionsEl.innerHTML = ''
+    questionsEl.hidden = false
+    statusEl.textContent = ''
+
+    for (const q of questions) {
+      const qDiv = document.createElement('div')
+      qDiv.className = 'expand-question'
+
+      const qText = document.createElement('div')
+      qText.className = 'expand-question-text'
+      qText.textContent = q.question
+      qDiv.appendChild(qText)
+
+      const optionsDiv = document.createElement('div')
+      optionsDiv.className = 'expand-options'
+      for (const opt of q.options) {
+        const optBtn = document.createElement('button')
+        optBtn.type = 'button'
+        optBtn.className = 'expand-option'
+        optBtn.textContent = opt
+        optBtn.addEventListener('click', () => {
+          optionsDiv.querySelectorAll('.expand-option').forEach(o => o.classList.remove('selected'))
+          optBtn.classList.add('selected')
+          // Store answer
+          const existing = expandAnswers.find(a => a.question === q.question)
+          if (existing) existing.answer = opt
+          else expandAnswers.push({ question: q.question, answer: opt })
+        })
+        optionsDiv.appendChild(optBtn)
+      }
+      qDiv.appendChild(optionsDiv)
+      questionsEl.appendChild(qDiv)
+    }
+
+    // Apply button
+    const applyRow = document.createElement('div')
+    applyRow.className = 'expand-apply-row'
+    const applyBtn = document.createElement('button')
+    applyBtn.type = 'button'
+    applyBtn.className = 'btn-primary btn-compact'
+    applyBtn.innerHTML = `<span class="btn-text">${t('tasks.expand.apply_btn')}</span><span class="btn-loading" hidden><span class="spinner"></span></span>`
+    applyBtn.addEventListener('click', async () => {
+      if (expandAnswers.length === 0) { showToast(t('tasks.expand.need_answer')); return }
+      applyBtn.disabled = true
+      applyBtn.querySelector('.btn-text').hidden = true
+      applyBtn.querySelector('.btn-loading').hidden = false
+      try {
+        const res2 = await fetch('/api/schedules/expand-prompt', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt, answers: expandAnswers }),
+        })
+        if (!res2.ok) throw new Error()
+        const { prompt: expanded } = await res2.json()
+        document.getElementById('schedulePrompt').value = expanded
+        questionsEl.hidden = true
+        showToast(t('tasks.expand.done'))
+      } catch {
+        showToast(t('tasks.expand.error'))
+      } finally {
+        applyBtn.disabled = false
+        applyBtn.querySelector('.btn-text').hidden = false
+        applyBtn.querySelector('.btn-loading').hidden = true
+      }
+    })
+    applyRow.appendChild(applyBtn)
+    questionsEl.appendChild(applyRow)
+  } catch {
+    statusEl.textContent = t('kanban.breakdown.error')
+  } finally {
+    btn.disabled = false
+  }
+})
+
+saveScheduleBtn.addEventListener('click', async () => {
+  const editName = document.getElementById('scheduleEditName').value
+  const name = document.getElementById('scheduleName').value.trim()
+  const description = document.getElementById('scheduleDesc').value.trim()
+  const prompt = document.getElementById('schedulePrompt').value.trim()
+  const schedule = getScheduleCron()
+  const agent = document.getElementById('scheduleAgent').value
+  const type = document.getElementById('scheduleType').value
+  // Advanced options -- the backend already persists these; expose them here.
+  const skipIfBusy = document.getElementById('scheduleSkipIfBusy').checked
+  const forceSend = document.getElementById('scheduleForceSend').checked
+  const targetSession = document.getElementById('scheduleTargetSession').value.trim()
+  const advanced = { skipIfBusy, forceSend }
+  if (targetSession) advanced.targetSession = targetSession
+
+  if (!name) { document.getElementById('scheduleName').focus(); return }
+  if (!prompt) { document.getElementById('schedulePrompt').focus(); return }
+  if (!schedule) { showToast(t('tasks.toast.select_schedule')); return }
+
+  saveScheduleBtn.disabled = true
+  saveScheduleBtn.querySelector('.btn-text').hidden = true
+  saveScheduleBtn.querySelector('.btn-loading').hidden = false
+
+  try {
+    if (editName) {
+      // Update
+      const res = await fetch(`/api/schedules/${encodeURIComponent(editName)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description, prompt, schedule, agent, type, ...advanced }),
+      })
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.error || 'Hiba')
+      }
+      showToast(t('tasks.toast.updated'))
+    } else {
+      // Create
+      const res = await fetch('/api/schedules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description, prompt, schedule, agent, type, ...advanced }),
+      })
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.error || 'Ismeretlen hiba')
+      }
+      showToast(t('tasks.toast.created'))
+    }
+    closeModal(scheduleModalOverlay)
+    loadSchedules()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    saveScheduleBtn.disabled = false
+    saveScheduleBtn.querySelector('.btn-text').hidden = false
+    saveScheduleBtn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+// ============================================================
+// === Memories (Tier System + Daily Log) ===
+// ============================================================
+
+const memList = document.getElementById('memList')
+const memEmpty = document.getElementById('memEmpty')
+const memStats = document.getElementById('memStats')
+const memSearchInput = document.getElementById('memSearchInput')
+const memModalOverlay = document.getElementById('memModalOverlay')
+
+let memSearchTimer = null
+let currentMemTier = 'hot'
+let currentLogDate = new Date().toISOString().split('T')[0]
+let logDates = []
+
+const tierLabels = { hot: '\u{1F525} Hot', warm: '\u{1F321}\uFE0F Warm', cold: '\u2744\uFE0F Cold', shared: '\u{1F517} Shared' }
+const tierColors = { hot: '#dc3c3c', warm: '#d97757', cold: '#6a9bcc', shared: '#9a8a30' }
+
+// Populate agent dropdowns from API
+async function loadMemAgents() {
+  try {
+    const res = await fetch('/api/schedules/agents')
+    const agents = await res.json()
+    const sel = document.getElementById('memAgentFilter')
+    const memSel = document.getElementById('memAgent')
+    sel.innerHTML = `<option value="">${t('memories.agent_all')}</option>`
+    memSel.innerHTML = ''
+    for (const a of agents) {
+      sel.innerHTML += `<option value="${a.name}">${a.label}</option>`
+      memSel.innerHTML += `<option value="${a.name}">${a.label}</option>`
+    }
+  } catch {}
+}
+
+// Agent filter change
+document.getElementById('memAgentFilter').addEventListener('change', () => {
+  if (currentMemTier === 'graph') {
+    loadMemoryGraph()
+  } else if (currentMemTier === 'log') {
+    loadDailyLog()
+  } else {
+    loadMemories()
+  }
+})
+
+// Search with debounce
+memSearchInput.addEventListener('input', () => {
+  clearTimeout(memSearchTimer)
+  memSearchTimer = setTimeout(loadMemories, 300)
+})
+
+// Enter to search immediately
+memSearchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    clearTimeout(memSearchTimer)
+    loadMemories()
+  }
+})
+
+// Tab switching
+document.getElementById('memTabs').addEventListener('click', (e) => {
+  const tab = e.target.closest('.mem-tab')
+  if (!tab) return
+  document.querySelectorAll('.mem-tab').forEach(t => t.classList.remove('active'))
+  tab.classList.add('active')
+  currentMemTier = tab.dataset.tier
+
+  const isLog = currentMemTier === 'log'
+  const isGraph = currentMemTier === 'graph'
+  document.getElementById('memTierView').hidden = isLog || isGraph
+  document.getElementById('memLogView').hidden = !isLog
+  document.getElementById('memGraphView').hidden = !isGraph
+
+  if (isGraph) {
+    loadMemoryGraph()
+  } else if (isLog) {
+    loadDailyLog()
+  } else {
+    loadMemories()
+  }
+})
+
+// Add memory button
+document.getElementById('memAddBtn').addEventListener('click', () => {
+  document.getElementById('memModalTitle').textContent = t('memories.modal.title_new')
+  document.getElementById('memContent').value = ''
+  document.getElementById('memTier').value = (currentMemTier === 'log' || currentMemTier === 'graph') ? 'warm' : currentMemTier
+  document.getElementById('memKeywords').value = ''
+  document.getElementById('memEditId').value = ''
+  openModal(memModalOverlay)
+  setTimeout(() => document.getElementById('memContent').focus(), 200)
+})
+
+// Close memory modal
+document.getElementById('memModalClose').addEventListener('click', () => closeModal(memModalOverlay))
+memModalOverlay.addEventListener('click', (e) => { if (e.target === memModalOverlay) closeModal(memModalOverlay) })
+
+// Save memory (create or edit)
+document.getElementById('saveMemBtn').addEventListener('click', async () => {
+  const content = document.getElementById('memContent').value.trim()
+  if (!content) { document.getElementById('memContent').focus(); return }
+
+  const editId = document.getElementById('memEditId').value
+  const tier = document.getElementById('memTier').value
+  const agentId = document.getElementById('memAgent').value
+  const keywords = document.getElementById('memKeywords').value.trim()
+
+  try {
+    if (editId) {
+      await fetch(`/api/memories/${editId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, tier, agent_id: agentId, keywords }),
+      })
+      showToast(t('memories.toast.updated'))
+    } else {
+      await fetch('/api/memories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent_id: agentId, content, tier, keywords }),
+      })
+      showToast(t('memories.toast.created'))
+    }
+    closeModal(memModalOverlay)
+    loadMemories()
+    loadMemStats()
+  } catch {
+    showToast(t('common.error_save'))
+  }
+})
+
+async function loadMemStats() {
+  try {
+    const res = await fetch('/api/memories/stats')
+    const stats = await res.json()
+    const embCount = stats.withEmbedding || 0
+    const embPct = stats.total > 0 ? Math.round(embCount / stats.total * 100) : 0
+    memStats.innerHTML = `
+      <div class="stat-card"><div class="stat-value">${stats.total}</div><div class="stat-label">${t('memories.stat.total')}</div></div>
+      ${Object.entries(stats.byTier || {}).map(([tier, count]) =>
+        `<div class="stat-card"><div class="stat-value" style="color:${tierColors[tier] || 'var(--accent)'}">${count}</div><div class="stat-label">${tierLabels[tier] || tier}</div></div>`
+      ).join('')}
+      <div class="stat-card"><div class="stat-value">${embCount}</div><div class="stat-label">${t('memories.stat.vectors_pct', { pct: embPct })}</div></div>
+      <button class="btn-secondary btn-compact" id="memBackfillBtn" style="margin-left:auto;font-size:11px;padding:6px 12px;align-self:center">${t('memories.stat.vectors_btn')}</button>
+    `
+    document.getElementById('memBackfillBtn')?.addEventListener('click', async () => {
+      const btn = document.getElementById('memBackfillBtn')
+      if (btn) { btn.textContent = t('memories.stat.vectors_gen'); btn.disabled = true }
+      try {
+        const r = await fetch('/api/memories/backfill', { method: 'POST' })
+        const data = await r.json()
+        showToast(t('memories.toast.vector_count', { count: data.count }))
+        loadMemStats()
+      } catch { showToast(t('memories.toast.vector_error')) }
+    })
+  } catch (err) {
+    console.error('Stats hiba:', err)
+  }
+}
+
+async function loadMemories() {
+  if (currentMemTier === 'log' || currentMemTier === 'graph') return
+  const q = memSearchInput.value.trim()
+  const agent = document.getElementById('memAgentFilter').value
+  const searchMode = document.getElementById('memSearchMode')?.value || 'hybrid'
+  const params = new URLSearchParams()
+  if (q) {
+    params.set('q', q)
+    params.set('mode', searchMode)
+  }
+  if (agent) params.set('agent', agent)
+  if (currentMemTier) params.set('tier', currentMemTier)
+  params.set('limit', '50')
+
+  try {
+    const res = await fetch(`/api/memories?${params}`)
+    const memories = await res.json()
+    renderMemories(memories)
+  } catch (err) {
+    console.error('Memória betöltés hiba:', err)
+  }
+}
+
+function renderMemories(memories) {
+  memList.innerHTML = ''
+  memEmpty.hidden = memories.length > 0
+
+  for (const mem of memories) {
+    const item = document.createElement('div')
+    item.className = 'mem-item'
+
+    const tier = mem.tier || mem.category || 'warm'
+    const tierBadge = tierLabels[tier] || tier
+    const badgeClass = 'badge-' + tier
+    const shortContent = mem.content.length > 120 ? mem.content.slice(0, 120) + '...' : mem.content
+    const agentLabel = mem.agent_id || mainAgentId()
+
+    // Build keywords HTML
+    let keywordsHtml = ''
+    if (mem.keywords) {
+      const kws = typeof mem.keywords === 'string' ? mem.keywords.split(',').map(k => k.trim()).filter(Boolean) : mem.keywords
+      if (kws.length > 0) {
+        keywordsHtml = `<div class="mem-keywords">${kws.map(k => `<span class="mem-keyword-tag">${escapeHtml(k)}</span>`).join('')}</div>`
+      }
+    }
+
+    item.innerHTML = `
+      <div class="mem-item-header">
+        <span class="badge ${badgeClass}">${tierBadge}</span>
+        <span class="mem-agent-badge">${escapeHtml(agentLabel)}</span>
+        <span class="mem-date">${escapeHtml(mem.created_label || '')}</span>
+        ${typeof mem.salience === 'number' ? `<span class="mem-salience" title="Relevancia ertek">S: ${mem.salience.toFixed(2)}</span>` : ''}
+      </div>
+      <div class="mem-content-short">${escapeHtml(shortContent)}</div>
+      <div class="mem-content-full">${escapeHtml(mem.content)}</div>
+      ${keywordsHtml}
+      <div class="mem-item-footer">
+        <button class="btn-secondary" data-edit-memid="${mem.id}" style="padding:6px 14px; font-size:12px;">${t('common.btn.edit')}</button>
+        <button class="btn-danger" data-memid="${mem.id}" style="padding:6px 14px; font-size:12px;">${t('common.btn.delete')}</button>
+      </div>
+    `
+
+    // Toggle expand
+    item.addEventListener('click', (e) => {
+      if (e.target.closest('.btn-danger') || e.target.closest('.btn-secondary')) return
+      item.classList.toggle('expanded')
+    })
+
+    // Edit
+    const editBtn = item.querySelector('[data-edit-memid]')
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      document.getElementById('memModalTitle').textContent = t('memories.modal.title_edit')
+      document.getElementById('memContent').value = mem.content
+      document.getElementById('memTier').value = tier
+      document.getElementById('memKeywords').value = mem.keywords || ''
+      document.getElementById('memEditId').value = mem.id
+      if (mem.agent_id) document.getElementById('memAgent').value = mem.agent_id
+      openModal(memModalOverlay)
+    })
+
+    // Delete
+    const delBtn = item.querySelector('.btn-danger')
+    delBtn.addEventListener('click', async (e) => {
+      e.stopPropagation()
+      if (!confirm('Biztosan torlod ezt az emleket?')) return
+      try {
+        await fetch(`/api/memories/${mem.id}`, { method: 'DELETE' })
+        showToast(t('memories.toast.deleted'))
+        loadMemories()
+        loadMemStats()
+      } catch {
+        showToast(t('common.error_delete'))
+      }
+    })
+
+    memList.appendChild(item)
+  }
+}
+
+// === Memory Graph (Force-directed, Obsidian-style) ===
+
+let graphNodes = []
+let graphEdges = []
+let graphSim = null
+let graphCanvas = null
+let graphCtx = null
+let graphDragging = null
+let graphHover = null
+let graphSelectedNode = null
+let graphSearchQuery = ''
+
+// Zoom & pan state
+let graphZoom = 1
+let graphPanX = 0
+let graphPanY = 0
+let graphPanning = false
+let graphPanStartX = 0
+let graphPanStartY = 0
+let graphZoomIndicatorTimer = null
+
+// Edge animation
+let graphAnimFrame = 0
+
+const GRAPH_TIER_COLORS = {
+  hot: '#dc3c3c',
+  warm: '#d97757',
+  cold: '#6a9bcc',
+  shared: '#b0a040',
+}
+
+const GRAPH_TIER_BG = {
+  hot: 'rgba(220, 60, 60, 0.06)',
+  warm: 'rgba(217, 119, 87, 0.06)',
+  cold: 'rgba(106, 155, 204, 0.06)',
+  shared: 'rgba(176, 160, 64, 0.06)',
+}
+
+function screenToWorld(sx, sy) {
+  return { x: (sx - graphPanX) / graphZoom, y: (sy - graphPanY) / graphZoom }
+}
+
+function worldToScreen(wx, wy) {
+  return { x: wx * graphZoom + graphPanX, y: wy * graphZoom + graphPanY }
+}
+
+async function loadMemoryGraph() {
+  const agent = document.getElementById('memAgentFilter').value
+  const params = new URLSearchParams()
+  if (agent) params.set('agent', agent)
+  params.set('limit', '200')
+
+  try {
+    const res = await fetch(`/api/memories?${params}`)
+    const memories = await res.json()
+
+    const emptyEl = document.getElementById('graphEmpty')
+    if (!memories || memories.length === 0) {
+      emptyEl.hidden = false
+      document.getElementById('memGraphCanvas').hidden = true
+      return
+    }
+    emptyEl.hidden = true
+    document.getElementById('memGraphCanvas').hidden = false
+
+    // Reset zoom/pan on new data load
+    graphZoom = 1
+    graphPanX = 0
+    graphPanY = 0
+    graphSelectedNode = null
+    hideGraphPanel()
+
+    buildGraph(memories)
+    startGraphSimulation()
+  } catch (err) {
+    console.error('Gráf betöltés hiba:', err)
+  }
+}
+
+function buildGraph(memories) {
+  graphNodes = []
+  graphEdges = []
+
+  const canvas = document.getElementById('memGraphCanvas')
+  const rect = canvas.parentElement.getBoundingClientRect()
+  const dpr = window.devicePixelRatio || 1
+  canvas.width = rect.width * dpr
+  canvas.height = rect.height * dpr
+  canvas.style.width = rect.width + 'px'
+  canvas.style.height = rect.height + 'px'
+  graphCanvas = canvas
+  graphCtx = canvas.getContext('2d')
+  graphCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+  const w = rect.width
+  const h = rect.height
+
+  // Create nodes from memories
+  for (const mem of memories) {
+    const keywords = (mem.keywords || '').split(',').map(k => k.trim()).filter(Boolean)
+    const label = mem.content.slice(0, 25).replace(/\n/g, ' ') + (mem.content.length > 25 ? '...' : '')
+    graphNodes.push({
+      id: mem.id,
+      x: w / 2 + (Math.random() - 0.5) * w * 0.6,
+      y: h / 2 + (Math.random() - 0.5) * h * 0.6,
+      vx: 0,
+      vy: 0,
+      radius: 6,
+      connectionCount: 0,
+      label: label,
+      tier: mem.tier || mem.category || 'warm',
+      agent: mem.agent_id || mainAgentId(),
+      keywords: keywords,
+      mem: mem,
+      searchMatch: true,
+    })
+  }
+
+  // Create edges based on shared keywords
+  for (let i = 0; i < graphNodes.length; i++) {
+    for (let j = i + 1; j < graphNodes.length; j++) {
+      const a = graphNodes[i]
+      const b = graphNodes[j]
+      const shared = a.keywords.filter(k => b.keywords.includes(k))
+      if (shared.length > 0) {
+        graphEdges.push({ source: i, target: j, strength: shared.length })
+        a.connectionCount += shared.length
+        b.connectionCount += shared.length
+      }
+      // Also connect same-agent same-tier with low probability
+      if (a.agent === b.agent && a.tier === b.tier && Math.random() < 0.3) {
+        graphEdges.push({ source: i, target: j, strength: 0.5 })
+        a.connectionCount += 0.5
+        b.connectionCount += 0.5
+      }
+    }
+  }
+
+  // Set node radius based on connection count
+  for (const node of graphNodes) {
+    node.radius = 5 + Math.min(Math.sqrt(node.connectionCount) * 2.5, 14)
+  }
+
+  // Ensure controls hint and zoom indicator exist
+  const graphView = document.getElementById('memGraphView')
+  if (!graphView.querySelector('.graph-controls-hint')) {
+    const hint = document.createElement('div')
+    hint.className = 'graph-controls-hint'
+    hint.innerHTML = 'Scroll: zoom | Drag: move nodes<br>Click: details | Dbl-click: edit'
+    graphView.appendChild(hint)
+  }
+  if (!graphView.querySelector('.graph-zoom-indicator')) {
+    const zi = document.createElement('div')
+    zi.className = 'graph-zoom-indicator'
+    zi.id = 'graphZoomIndicator'
+    graphView.appendChild(zi)
+  }
+}
+
+function simulateGraphStep(damping) {
+  const w = graphCanvas.width / (window.devicePixelRatio || 1)
+  const h = graphCanvas.height / (window.devicePixelRatio || 1)
+  const nodes = graphNodes
+
+  const tierCenters = {}
+  for (const node of nodes) {
+    if (!tierCenters[node.tier]) tierCenters[node.tier] = { x: 0, y: 0, count: 0 }
+    tierCenters[node.tier].x += node.x
+    tierCenters[node.tier].y += node.y
+    tierCenters[node.tier].count++
+  }
+  for (const tier of Object.keys(tierCenters)) {
+    tierCenters[tier].x /= tierCenters[tier].count
+    tierCenters[tier].y /= tierCenters[tier].count
+  }
+  for (const node of nodes) {
+    const tc = tierCenters[node.tier]
+    if (tc) {
+      node.vx += (tc.x - node.x) * 0.0005
+      node.vy += (tc.y - node.y) * 0.0005
+    }
+  }
+
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      let dx = nodes[j].x - nodes[i].x
+      let dy = nodes[j].y - nodes[i].y
+      let dist = Math.sqrt(dx * dx + dy * dy) || 1
+      let force = 800 / (dist * dist)
+      let fx = (dx / dist) * force
+      let fy = (dy / dist) * force
+      nodes[i].vx -= fx
+      nodes[i].vy -= fy
+      nodes[j].vx += fx
+      nodes[j].vy += fy
+    }
+  }
+
+  for (const edge of graphEdges) {
+    const a = nodes[edge.source]
+    const b = nodes[edge.target]
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    let dist = Math.sqrt(dx * dx + dy * dy) || 1
+    let force = (dist - 80) * 0.005 * edge.strength
+    let fx = (dx / dist) * force
+    let fy = (dy / dist) * force
+    a.vx += fx
+    a.vy += fy
+    b.vx -= fx
+    b.vy -= fy
+  }
+
+  for (const node of nodes) {
+    node.vx += (w / 2 - node.x) * 0.001
+    node.vy += (h / 2 - node.y) * 0.001
+  }
+
+  const maxV = 6
+  for (const node of nodes) {
+    if (node === graphDragging) continue
+    node.vx *= damping
+    node.vy *= damping
+    if (node.vx > maxV) node.vx = maxV; else if (node.vx < -maxV) node.vx = -maxV
+    if (node.vy > maxV) node.vy = maxV; else if (node.vy < -maxV) node.vy = -maxV
+    node.x += node.vx
+    node.y += node.vy
+    node.x = Math.max(-200, Math.min(w + 200, node.x))
+    node.y = Math.max(-200, Math.min(h + 200, node.y))
+  }
+}
+
+function startGraphSimulation() {
+  if (graphSim) cancelAnimationFrame(graphSim)
+
+  for (const node of graphNodes) {
+    node.vx = 0
+    node.vy = 0
+  }
+
+  const preSettleIterations = Math.min(250, 40 + graphNodes.length * 2)
+  for (let i = 0; i < preSettleIterations; i++) {
+    simulateGraphStep(0.88)
+  }
+
+  let frame = 0
+  const maxFrames = 60
+
+  function tick() {
+    if (frame > maxFrames) {
+      renderGraph()
+      return
+    }
+    frame++
+    graphAnimFrame = frame
+    simulateGraphStep(0.94 + (frame / maxFrames) * 0.05)
+    renderGraph()
+    graphSim = requestAnimationFrame(tick)
+  }
+
+  tick()
+}
+
+function renderGraph() {
+  const ctx = graphCtx
+  const dpr = window.devicePixelRatio || 1
+  const w = graphCanvas.width / dpr
+  const h = graphCanvas.height / dpr
+
+  ctx.clearRect(0, 0, w, h)
+
+  const cs = getComputedStyle(document.documentElement)
+  const borderColor = cs.getPropertyValue('--border').trim() || '#d1cfc5'
+  const textColor = cs.getPropertyValue('--text').trim() || '#141413'
+  const textMuted = cs.getPropertyValue('--text-muted').trim() || '#87867f'
+  const bgCard = cs.getPropertyValue('--bg-card').trim() || '#fff'
+  const bgColor = cs.getPropertyValue('--bg').trim() || '#faf9f5'
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark'
+
+  // === Dot grid background (drawn in screen space) ===
+  const gridSize = 20
+  const dotColor = borderColor
+  ctx.fillStyle = dotColor
+  ctx.globalAlpha = isDark ? 0.2 : 0.3
+  const offsetX = ((graphPanX % (gridSize * graphZoom)) + gridSize * graphZoom) % (gridSize * graphZoom)
+  const offsetY = ((graphPanY % (gridSize * graphZoom)) + gridSize * graphZoom) % (gridSize * graphZoom)
+  const scaledGrid = gridSize * graphZoom
+  if (scaledGrid > 4) {
+    for (let x = offsetX; x < w; x += scaledGrid) {
+      for (let y = offsetY; y < h; y += scaledGrid) {
+        ctx.beginPath()
+        ctx.arc(x, y, Math.max(0.5, graphZoom * 0.6), 0, Math.PI * 2)
+        ctx.fill()
+      }
+    }
+  }
+  ctx.globalAlpha = 1
+
+  // === Apply zoom/pan transform ===
+  ctx.save()
+  ctx.translate(graphPanX, graphPanY)
+  ctx.scale(graphZoom, graphZoom)
+
+  const hasSearch = graphSearchQuery.length > 0
+
+  // === Tier cluster backgrounds ===
+  const tierGroups = {}
+  for (const node of graphNodes) {
+    if (!tierGroups[node.tier]) tierGroups[node.tier] = []
+    tierGroups[node.tier].push(node)
+  }
+  for (const [tier, nodes] of Object.entries(tierGroups)) {
+    if (nodes.length < 2) continue
+    let cx = 0, cy = 0
+    for (const n of nodes) { cx += n.x; cy += n.y }
+    cx /= nodes.length
+    cy /= nodes.length
+    let maxDist = 0
+    for (const n of nodes) {
+      const d = Math.sqrt((n.x - cx) ** 2 + (n.y - cy) ** 2)
+      if (d > maxDist) maxDist = d
+    }
+    const radius = maxDist + 60
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius)
+    const bgTier = GRAPH_TIER_BG[tier] || 'rgba(128,128,128,0.04)'
+    grad.addColorStop(0, bgTier)
+    grad.addColorStop(1, 'rgba(0,0,0,0)')
+    ctx.fillStyle = grad
+    ctx.globalAlpha = hasSearch ? 0.3 : 0.8
+    ctx.beginPath()
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.globalAlpha = 1
+  }
+
+  // Build set of connected node indices for hovered/selected node
+  const connectedToActive = new Set()
+  const activeNode = graphHover || graphSelectedNode
+  if (activeNode) {
+    const activeIdx = graphNodes.indexOf(activeNode)
+    for (const edge of graphEdges) {
+      if (edge.source === activeIdx) connectedToActive.add(edge.target)
+      if (edge.target === activeIdx) connectedToActive.add(edge.source)
+    }
+  }
+
+  // === Draw edges (bezier curves with pulsing) ===
+  const time = Date.now() * 0.001
+  for (const edge of graphEdges) {
+    const a = graphNodes[edge.source]
+    const b = graphNodes[edge.target]
+
+    const isActiveEdge = activeNode && (a === activeNode || b === activeNode)
+    const searchFaded = hasSearch && (!a.searchMatch || !b.searchMatch)
+
+    // Edge thickness based on connection strength
+    const baseWidth = 0.5 + Math.min(edge.strength * 0.6, 2.5)
+
+    // Subtle pulse/breathe animation
+    const pulse = 0.85 + 0.15 * Math.sin(time * 1.5 + edge.source * 0.3 + edge.target * 0.7)
+
+    ctx.lineWidth = isActiveEdge ? baseWidth * 1.8 : baseWidth * pulse
+    ctx.strokeStyle = isActiveEdge ? GRAPH_TIER_COLORS[a === activeNode ? a.tier : b.tier] || borderColor : borderColor
+    ctx.globalAlpha = searchFaded ? 0.05 : (isActiveEdge ? 0.7 : (0.15 + Math.min(edge.strength * 0.1, 0.3)) * pulse)
+
+    // Bezier curve: midpoint offset perpendicular to the line
+    const mx = (a.x + b.x) / 2
+    const my = (a.y + b.y) / 2
+    const dx = b.x - a.x
+    const dy = b.y - a.y
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1
+    const curvature = Math.min(dist * 0.15, 30)
+    // Perpendicular offset
+    const cpx = mx + (-dy / dist) * curvature
+    const cpy = my + (dx / dist) * curvature
+
+    ctx.beginPath()
+    ctx.moveTo(a.x, a.y)
+    ctx.quadraticCurveTo(cpx, cpy, b.x, b.y)
+    ctx.stroke()
+  }
+  ctx.globalAlpha = 1
+
+  // === Draw nodes ===
+  const fontSize = Math.max(8, Math.min(12, 10 / graphZoom))
+
+  for (let ni = 0; ni < graphNodes.length; ni++) {
+    const node = graphNodes[ni]
+    const color = GRAPH_TIER_COLORS[node.tier] || '#d97757'
+    const isHover = node === graphHover
+    const isSelected = node === graphSelectedNode
+    const isConnected = connectedToActive.has(ni)
+    const searchFaded = hasSearch && !node.searchMatch
+    const searchGlow = hasSearch && node.searchMatch
+
+    // Opacity
+    let nodeAlpha = 0.85
+    if (searchFaded) nodeAlpha = 0.12
+    else if (searchGlow) nodeAlpha = 1
+    else if (isHover || isSelected) nodeAlpha = 1
+    else if (activeNode && !isConnected) nodeAlpha = 0.35
+
+    // Glow effect for hover, selected, search match
+    if ((isHover || isSelected || searchGlow) && !searchFaded) {
+      ctx.shadowColor = color
+      ctx.shadowBlur = isHover ? 20 : (searchGlow ? 15 : 10)
+    }
+
+    // Connected nodes get subtle highlight
+    if (isConnected && !searchFaded) {
+      ctx.shadowColor = color
+      ctx.shadowBlur = 6
+    }
+
+    const r = isHover ? node.radius + 3 : (isSelected ? node.radius + 2 : node.radius)
+
+    // Node fill
+    ctx.fillStyle = color
+    ctx.globalAlpha = nodeAlpha
+    ctx.beginPath()
+    ctx.arc(node.x, node.y, r, 0, Math.PI * 2)
+    ctx.fill()
+
+    // Subtle border ring for selected
+    if (isSelected) {
+      ctx.strokeStyle = color
+      ctx.lineWidth = 2
+      ctx.globalAlpha = 0.6
+      ctx.beginPath()
+      ctx.arc(node.x, node.y, r + 4, 0, Math.PI * 2)
+      ctx.stroke()
+    }
+
+    ctx.shadowBlur = 0
+    ctx.shadowColor = 'transparent'
+
+    // === Always show label (pill/badge style) ===
+    if (!searchFaded || (searchFaded && nodeAlpha > 0.15)) {
+      const labelText = node.label
+      const labelFontSize = Math.max(7, Math.min(11, 9 / Math.max(graphZoom * 0.7, 0.5)))
+      ctx.font = (isHover || isSelected) ? `600 ${labelFontSize + 1}px -apple-system, sans-serif` : `500 ${labelFontSize}px -apple-system, sans-serif`
+      const textWidth = ctx.measureText(labelText).width
+      const pillW = textWidth + 10
+      const pillH = labelFontSize + 6
+      const pillX = node.x - pillW / 2
+      const pillY = node.y + r + 5
+
+      // Dark pill background
+      ctx.globalAlpha = searchFaded ? 0.08 : ((isHover || isSelected) ? 0.9 : 0.65)
+      ctx.fillStyle = isDark ? 'rgba(20,20,19,0.85)' : 'rgba(30,30,28,0.8)'
+      graphRoundRect(ctx, pillX, pillY, pillW, pillH, 3)
+      ctx.fill()
+
+      // White text
+      ctx.fillStyle = isDark ? '#e8e7e0' : '#faf9f5'
+      ctx.globalAlpha = searchFaded ? 0.1 : ((isHover || isSelected) ? 1 : 0.85)
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(labelText, node.x, pillY + pillH / 2)
+    }
+
+    ctx.globalAlpha = 1
+    ctx.textBaseline = 'alphabetic'
+  }
+
+  // Hover tooltip (richer than before)
+  if (graphHover && !graphSelectedNode) {
+    const node = graphHover
+    const tLabels = { hot: 'Hot', warm: 'Warm', cold: 'Cold', shared: 'Shared' }
+    const text = `${tLabels[node.tier] || node.tier} | ${node.agent}`
+    const kw = node.keywords.length > 0 ? node.keywords.join(', ') : ''
+    const conns = `${Math.round(node.connectionCount)} connections`
+
+    ctx.font = 'bold 11px -apple-system, sans-serif'
+    const tw = Math.max(ctx.measureText(text).width, kw ? ctx.measureText(kw).width : 0, ctx.measureText(conns).width) + 24
+    const th = kw ? 64 : 48
+    let tx = node.x - tw / 2
+    let ty = node.y - node.radius - th - 12
+
+    // Tooltip background
+    ctx.fillStyle = isDark ? 'rgba(31,30,29,0.95)' : 'rgba(255,255,255,0.96)'
+    ctx.strokeStyle = borderColor
+    ctx.lineWidth = 1
+    ctx.shadowColor = 'rgba(0,0,0,0.15)'
+    ctx.shadowBlur = 12
+    graphRoundRect(ctx, tx, ty, tw, th, 8)
+    ctx.fill()
+    ctx.stroke()
+    ctx.shadowBlur = 0
+    ctx.shadowColor = 'transparent'
+
+    ctx.fillStyle = textColor
+    ctx.font = 'bold 11px -apple-system, sans-serif'
+    ctx.textAlign = 'left'
+    ctx.fillText(text, tx + 12, ty + 18)
+    ctx.font = '10px -apple-system, sans-serif'
+    ctx.fillStyle = textMuted
+    ctx.fillText(conns, tx + 12, ty + 34)
+    if (kw) {
+      ctx.fillText(kw.length > 40 ? kw.slice(0, 40) + '...' : kw, tx + 12, ty + 50)
+    }
+  }
+
+  ctx.restore()
+}
+
+function graphRoundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath()
+  ctx.moveTo(x + r, y)
+  ctx.lineTo(x + w - r, y)
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r)
+  ctx.lineTo(x + w, y + h - r)
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
+  ctx.lineTo(x + r, y + h)
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r)
+  ctx.lineTo(x, y + r)
+  ctx.quadraticCurveTo(x, y, x + r, y)
+  ctx.closePath()
+}
+
+// === Graph detail panel ===
+function showGraphPanel(node) {
+  let panel = document.getElementById('graphPanel')
+  if (!panel) {
+    panel = document.createElement('div')
+    panel.id = 'graphPanel'
+    panel.className = 'graph-panel'
+    document.getElementById('memGraphView').appendChild(panel)
+  }
+  const tierLabelsMap = { hot: 'Hot', warm: 'Warm', cold: 'Cold', shared: 'Shared' }
+  const created = node.mem.created_label || ''
+  panel.innerHTML = `
+    <div class="graph-panel-header">
+      <span class="badge badge-${node.tier}">${tierLabelsMap[node.tier] || node.tier}</span>
+      <span class="graph-panel-agent">${escapeHtml(node.agent)}</span>
+      <button class="graph-panel-close" id="graphPanelCloseBtn">&times;</button>
+    </div>
+    ${created ? `<div class="graph-panel-date">${escapeHtml(created)}</div>` : ''}
+    <div class="graph-panel-content">${escapeHtml(node.mem.content)}</div>
+    <div class="graph-panel-meta">
+      ${node.keywords.length ? '<div class="graph-panel-keywords">' + node.keywords.map(k => '<span class="mem-keyword-tag">' + escapeHtml(k) + '</span>').join('') + '</div>' : ''}
+    </div>
+  `
+  panel.hidden = false
+  document.getElementById('graphPanelCloseBtn').addEventListener('click', () => {
+    graphSelectedNode = null
+    panel.hidden = true
+    renderGraph()
+  })
+}
+
+function hideGraphPanel() {
+  const panel = document.getElementById('graphPanel')
+  if (panel) panel.hidden = true
+}
+
+function openEditMemory(mem) {
+  document.getElementById('memModalTitle').textContent = t('memories.modal.title_edit')
+  document.getElementById('memAgent').value = mem.agent_id || mainAgentId()
+  document.getElementById('memTier').value = mem.tier || mem.category || 'warm'
+  document.getElementById('memContent').value = mem.content || ''
+  document.getElementById('memKeywords').value = mem.keywords || ''
+  document.getElementById('memEditId').value = mem.id
+  openModal(memModalOverlay)
+}
+
+// === Graph search integration ===
+function updateGraphSearch() {
+  const q = memSearchInput.value.trim().toLowerCase()
+  graphSearchQuery = q
+  for (const node of graphNodes) {
+    if (!q) {
+      node.searchMatch = true
+    } else {
+      const content = (node.mem.content || '').toLowerCase()
+      const kws = node.keywords.join(' ').toLowerCase()
+      const agent = (node.agent || '').toLowerCase()
+      node.searchMatch = content.includes(q) || kws.includes(q) || agent.includes(q)
+    }
+  }
+  if (graphNodes.length > 0) renderGraph()
+}
+
+// === Zoom indicator ===
+function showZoomIndicator() {
+  const el = document.getElementById('graphZoomIndicator')
+  if (!el) return
+  el.textContent = `${Math.round(graphZoom * 100)}%`
+  el.classList.add('visible')
+  clearTimeout(graphZoomIndicatorTimer)
+  graphZoomIndicatorTimer = setTimeout(() => el.classList.remove('visible'), 1200)
+}
+
+// === Graph mouse interaction (with zoom/pan) ===
+;(function initGraphInteraction() {
+  const canvas = document.getElementById('memGraphCanvas')
+  let wasDragging = false
+  let wasPanning = false
+  let mouseDownPos = { x: 0, y: 0 }
+
+  // Mouse wheel zoom
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault()
+    const zoomFactor = e.deltaY > 0 ? 0.92 : 1.08
+    const rect = canvas.getBoundingClientRect()
+    const mx = e.clientX - rect.left
+    const my = e.clientY - rect.top
+
+    // Zoom toward cursor
+    const worldX = (mx - graphPanX) / graphZoom
+    const worldY = (my - graphPanY) / graphZoom
+
+    graphZoom = Math.max(0.3, Math.min(3.0, graphZoom * zoomFactor))
+
+    graphPanX = mx - worldX * graphZoom
+    graphPanY = my - worldY * graphZoom
+
+    showZoomIndicator()
+    if (graphNodes.length > 0) renderGraph()
+  }, { passive: false })
+
+  // Mouse move: hover detection + panning + dragging
+  canvas.addEventListener('mousemove', (e) => {
+    const rect = e.target.getBoundingClientRect()
+    const sx = e.clientX - rect.left
+    const sy = e.clientY - rect.top
+
+    // Panning
+    if (graphPanning) {
+      const dx = sx - graphPanStartX
+      const dy = sy - graphPanStartY
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) wasPanning = true
+      graphPanX += dx
+      graphPanY += dy
+      graphPanStartX = sx
+      graphPanStartY = sy
+      if (graphNodes.length > 0) renderGraph()
+      return
+    }
+
+    // Dragging a node
+    const world = screenToWorld(sx, sy)
+    if (graphDragging) {
+      const dx = sx - mouseDownPos.x
+      const dy = sy - mouseDownPos.y
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) wasDragging = true
+      graphDragging.x = world.x
+      graphDragging.y = world.y
+      graphDragging.vx = 0
+      graphDragging.vy = 0
+      if (graphNodes.length > 0) renderGraph()
+      return
+    }
+
+    // Hover detection in world space
+    graphHover = null
+    for (const node of graphNodes) {
+      const ndx = world.x - node.x
+      const ndy = world.y - node.y
+      const hitRadius = (node.radius + 6) / Math.max(graphZoom, 0.5)
+      if (ndx * ndx + ndy * ndy < hitRadius * hitRadius) {
+        graphHover = node
+        break
+      }
+    }
+    canvas.style.cursor = graphHover ? 'pointer' : 'grab'
+    if (graphNodes.length > 0) renderGraph()
+  })
+
+  // Mouse down: start drag on node, or start pan on empty space
+  canvas.addEventListener('mousedown', (e) => {
+    const rect = e.target.getBoundingClientRect()
+    const sx = e.clientX - rect.left
+    const sy = e.clientY - rect.top
+    mouseDownPos = { x: sx, y: sy }
+    wasDragging = false
+    wasPanning = false
+
+    if (graphHover) {
+      // Drag node
+      graphDragging = graphHover
+      canvas.style.cursor = 'grabbing'
+    } else {
+      // Pan
+      graphPanning = true
+      graphPanStartX = sx
+      graphPanStartY = sy
+      canvas.style.cursor = 'grabbing'
+    }
+  })
+
+  // Click: select node and show panel (only if not dragged/panned)
+  canvas.addEventListener('click', (e) => {
+    if (wasDragging || wasPanning) return
+
+    const rect = e.target.getBoundingClientRect()
+    const sx = e.clientX - rect.left
+    const sy = e.clientY - rect.top
+    const world = screenToWorld(sx, sy)
+
+    let clicked = null
+    for (const node of graphNodes) {
+      const dx = world.x - node.x
+      const dy = world.y - node.y
+      const hitRadius = (node.radius + 6) / Math.max(graphZoom, 0.5)
+      if (dx * dx + dy * dy < hitRadius * hitRadius) {
+        clicked = node
+        break
+      }
+    }
+
+    if (clicked) {
+      graphSelectedNode = clicked
+      showGraphPanel(clicked)
+    } else {
+      graphSelectedNode = null
+      hideGraphPanel()
+    }
+    if (graphNodes.length > 0) renderGraph()
+  })
+
+  // Double click: open edit modal
+  canvas.addEventListener('dblclick', (e) => {
+    if (graphHover && graphHover.mem) {
+      openEditMemory(graphHover.mem)
+    }
+  })
+
+  // Mouse up: stop drag/pan
+  document.addEventListener('mouseup', () => {
+    if (graphDragging) {
+      graphDragging = null
+      const c = document.getElementById('memGraphCanvas')
+      if (c) c.style.cursor = graphHover ? 'pointer' : 'grab'
+    }
+    if (graphPanning) {
+      graphPanning = false
+      const c = document.getElementById('memGraphCanvas')
+      if (c) c.style.cursor = 'grab'
+    }
+  })
+
+  // Search integration: listen to existing search input
+  memSearchInput.addEventListener('input', () => {
+    if (currentMemTier === 'graph') {
+      updateGraphSearch()
+    }
+  })
+  memSearchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && currentMemTier === 'graph') {
+      updateGraphSearch()
+    }
+  })
+})()
+
+// === Daily Log ===
+
+async function loadDailyLog() {
+  // "Minden ügynök" (empty value) falls back to the first agent in the
+  // filter dropdown, which is the main agent on any BOT_NAME -- avoids a
+  // hardcoded "wraith" slug that would 404 on zino/haver/etc installs.
+  const sel = document.getElementById('memAgentFilter')
+  const agent = sel.value || (sel.options[1] ? sel.options[1].value : '')
+  if (!agent) {
+    renderLogEntries([])
+    return
+  }
+
+  try {
+    const datesRes = await fetch(`/api/daily-log/dates?agent=${agent}`)
+    logDates = await datesRes.json()
+  } catch {
+    logDates = []
+  }
+
+  document.getElementById('logCurrentDate').textContent = formatLogDate(currentLogDate)
+
+  try {
+    const res = await fetch(`/api/daily-log?agent=${agent}&date=${currentLogDate}`)
+    const entries = await res.json()
+    renderLogEntries(entries)
+  } catch {
+    renderLogEntries([])
+  }
+}
+
+function renderLogEntries(entries) {
+  const el = document.getElementById('logEntries')
+  const empty = document.getElementById('logEmpty')
+  el.innerHTML = ''
+  empty.hidden = entries.length > 0
+
+  for (const entry of entries) {
+    const time = new Date(entry.created_at * 1000).toLocaleTimeString('hu-HU', { hour: '2-digit', minute: '2-digit' })
+    const div = document.createElement('div')
+    div.className = 'log-entry'
+    div.innerHTML = `
+      <div class="log-entry-time">${time}</div>
+      <div class="log-entry-content">${escapeHtml(entry.content)}</div>
+    `
+    el.appendChild(div)
+  }
+}
+
+function formatLogDate(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00')
+  return d.toLocaleDateString('hu-HU', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })
+}
+
+// Date navigation
+document.getElementById('logPrevDate').addEventListener('click', () => {
+  const d = new Date(currentLogDate)
+  d.setDate(d.getDate() - 1)
+  currentLogDate = d.toISOString().split('T')[0]
+  loadDailyLog()
+})
+document.getElementById('logNextDate').addEventListener('click', () => {
+  const d = new Date(currentLogDate)
+  d.setDate(d.getDate() + 1)
+  currentLogDate = d.toISOString().split('T')[0]
+  loadDailyLog()
+})
+
+// === SVG icons ===
+function pauseIcon() {
+  return '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>'
+}
+function playIcon() {
+  return '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>'
+}
+function trashIcon() {
+  return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>'
+}
+
+// ============================================================
+// === Connectors ===
+// ============================================================
+
+const connectorGrid = document.getElementById('connectorGrid')
+const connectorStats = document.getElementById('connectorStats')
+const connectorModalOverlay = document.getElementById('connectorModalOverlay')
+const connectorDetailOverlay = document.getElementById('connectorDetailOverlay')
+const catalogInstallOverlay = document.getElementById('catalogInstallOverlay')
+let connectors = []
+let catalogItems = []
+let catalogFilter = 'all'
+let catalogInstallTarget = null
+
+// Connector tab switching
+document.querySelectorAll('.connector-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.connector-tab').forEach(t => t.classList.remove('active'))
+    tab.classList.add('active')
+    const tabId = tab.dataset.ctab
+    document.getElementById('connectorInstalledTab').hidden = tabId !== 'installed'
+    document.getElementById('connectorGalleryTab').hidden = tabId !== 'gallery'
+    if (tabId === 'gallery') loadCatalog()
+  })
+})
+
+// Refresh button: triggers the server-side `claude mcp list` refresh.
+// Deliberately manual because every refresh spawns stdio / plugin MCPs
+// for a health check and can race the live Telegram bot. Button is
+// shared by both the Installed and Gallery tabs.
+document.getElementById('connectorRefreshBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('connectorRefreshBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch('/api/connectors/refresh', { method: 'POST' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok || !data.ok) {
+      showToast(t('updates.error', {msg: data.error || 'HTTP ' + res.status}))
+    } else {
+      showToast(t('connectors.toast.mcp_refreshed', { n: data.count || 0 }))
+    }
+    await loadConnectors()
+    // Reload catalog only if the Gallery tab is currently active so we
+    // do not fight for the catalog grid while the user is on Installed.
+    if (!document.getElementById('connectorGalleryTab').hidden) {
+      await loadCatalog()
+    }
+  } catch (err) {
+    showToast(t('updates.toast.error', {msg: err.message || err}))
+  } finally {
+    btn.disabled = false
+  }
+})
+
+// Catalog filter buttons
+document.querySelectorAll('.catalog-filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.catalog-filter-btn').forEach(b => b.classList.remove('active'))
+    btn.classList.add('active')
+    catalogFilter = btn.dataset.cat
+    renderCatalog()
+  })
+})
+
+// Catalog install modal
+document.getElementById('catalogInstallClose').addEventListener('click', () => closeModal(catalogInstallOverlay))
+catalogInstallOverlay.addEventListener('click', (e) => { if (e.target === catalogInstallOverlay) closeModal(catalogInstallOverlay) })
+
+async function loadCatalog() {
+  const grid = document.getElementById('catalogGrid')
+  grid.innerHTML = `<div class="connector-loading"><span class="spinner"></span> ${t('connectors.catalog_loading')}</div>`
+  try {
+    const res = await fetch('/api/mcp-catalog')
+    catalogItems = await res.json()
+    renderCatalog()
+  } catch (err) {
+    console.error('Catalog load error:', err)
+    grid.innerHTML = `<div class="connector-loading">${t('connectors.catalog_error')}</div>`
+  }
+}
+
+function renderCatalog() {
+  const grid = document.getElementById('catalogGrid')
+  grid.innerHTML = ''
+  const filtered = catalogFilter === 'all' ? catalogItems : catalogItems.filter(i => i.category === catalogFilter)
+  if (filtered.length === 0) {
+    grid.innerHTML = `<div class="connector-loading">${t('connectors.catalog_empty')}</div>`
+    return
+  }
+  for (const item of filtered) {
+    const card = document.createElement('div')
+    card.className = 'catalog-card'
+    const authHint = item.authType === 'oauth' && item.authNote ? `<span class="catalog-auth-hint">${escapeHtml(item.authNote)}</span>` : ''
+    card.innerHTML = `
+      <div class="catalog-card-header">
+        <div class="catalog-card-icon">${item.icon || '?'}</div>
+        <div class="catalog-card-info">
+          <div class="catalog-card-name">
+            ${escapeHtml(item.name)}
+            <span class="catalog-card-type ${item.type}">${item.type}</span>
+            ${item.infoUrl ? `<a href="${escapeHtml(item.infoUrl)}" target="_blank" rel="noopener" class="catalog-card-link" title="${t('connectors.tooltip.docs')}" onclick="event.stopPropagation()">&#x2197;</a>` : ''}
+          </div>
+          <div class="catalog-card-desc">${escapeHtml(item.description)}</div>
+        </div>
+      </div>
+      <div class="catalog-card-footer">
+        ${item.installed
+          ? `<span class="catalog-install-btn installed" title="${item.configMatch ? t('connectors.tooltip.installed_mcp') : t('connectors.tooltip.installed_src', { src: escapeHtml(item.installedSource || '') })}">Telepítve &#10003;${item.configMatch ? ' (.mcp.json)' : item.installedSource === 'claude.ai' ? ' (claude.ai)' : item.installedSource === 'plugin' ? ' (plugin)' : ''}</span>${(item.installedSource === 'claude.ai' || item.configMatch) ? '' : `<a class="catalog-uninstall-link" data-id="${item.id}">Eltávolítás</a>`}`
+          : `<button class="catalog-install-btn install" data-id="${item.id}">${t('connectors.catalog.install_btn')}</button>${authHint}`
+        }
+      </div>
+    `
+    // Install button
+    const installBtn = card.querySelector('.catalog-install-btn.install')
+    if (installBtn) {
+      installBtn.addEventListener('click', (e) => {
+        e.stopPropagation()
+        openCatalogInstall(item)
+      })
+    }
+    // Uninstall link
+    const uninstallLink = card.querySelector('.catalog-uninstall-link')
+    if (uninstallLink) {
+      uninstallLink.addEventListener('click', (e) => {
+        e.stopPropagation()
+        catalogUninstall(item)
+      })
+    }
+    grid.appendChild(card)
+  }
+}
+
+function openCatalogInstall(item) {
+  catalogInstallTarget = item
+  document.getElementById('catalogInstallTitle').textContent = t('connectors.catalog.install_title', { icon: item.icon, name: item.name })
+  document.getElementById('catalogInstallDesc').textContent = item.description
+
+  const envContainer = document.getElementById('catalogInstallEnvFields')
+  envContainer.innerHTML = ''
+  const noteEl = document.getElementById('catalogInstallNote')
+  noteEl.hidden = true
+
+  if (item.authType === 'apikey') {
+    // Show env key input fields
+    const envKeys = Object.keys(item.env || {})
+    for (const key of envKeys) {
+      const div = document.createElement('div')
+      div.className = 'catalog-env-group'
+      div.innerHTML = `
+        <label>${escapeHtml(key)}</label>
+        <input type="text" data-env-key="${escapeHtml(key)}" placeholder="${t('connectors.catalog.env_placeholder', { key: escapeHtml(key) })}">
+      `
+      envContainer.appendChild(div)
+    }
+    if (item.authNote) {
+      noteEl.textContent = item.authNote
+      noteEl.hidden = false
+    }
+  } else if (item.authType === 'oauth') {
+    if (item.authNote) {
+      noteEl.textContent = item.authNote
+      noteEl.hidden = false
+    }
+  }
+  // authType === 'none' -> no extra fields
+
+  openModal(catalogInstallOverlay)
+}
+
+document.getElementById('catalogInstallBtn').addEventListener('click', async () => {
+  if (!catalogInstallTarget) return
+  const item = catalogInstallTarget
+  const btn = document.getElementById('catalogInstallBtn')
+
+  // Collect env values
+  const envData = {}
+  const envInputs = document.querySelectorAll('#catalogInstallEnvFields input[data-env-key]')
+  for (const input of envInputs) {
+    const key = input.dataset.envKey
+    const val = input.value.trim()
+    if (!val) {
+      input.focus()
+      showToast(t('connectors.toast.required_field', { key }))
+      return
+    }
+    envData[key] = val
+  }
+
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  try {
+    const res = await fetch(`/api/mcp-catalog/${encodeURIComponent(item.id)}/install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ env: envData }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Hiba')
+    closeModal(catalogInstallOverlay)
+    showToast(data.message || t('connectors.toast.installed'))
+    // Reload both views
+    loadCatalog()
+    loadConnectors()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+async function catalogUninstall(item) {
+  if (!confirm(t('connectors.confirm.remove', { name: item.name }))) return
+  try {
+    const res = await fetch(`/api/mcp-catalog/${encodeURIComponent(item.id)}/uninstall`, { method: 'DELETE' })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Hiba')
+    showToast(data.message || t('connectors.toast.removed'))
+    loadCatalog()
+    loadConnectors()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  }
+}
+
+// Modal wiring
+document.getElementById('addConnectorBtn').addEventListener('click', () => {
+  document.getElementById('connectorName').value = ''
+  document.getElementById('connectorUrl').value = ''
+  document.getElementById('connectorCmd').value = ''
+  document.getElementById('connectorArgs').value = ''
+  document.getElementById('connectorType').value = 'stdio'
+  document.getElementById('connectorScope').value = 'user'
+  document.getElementById('connectorUrlGroup').hidden = true
+  document.getElementById('connectorCmdGroup').hidden = false
+  document.getElementById('connectorArgsGroup').hidden = false
+  document.getElementById('connectorEnvGroup').hidden = false
+  document.getElementById('connectorEnvList').innerHTML = ''
+  document.getElementById('connectorAssignGroup').hidden = true
+  loadNewConnectorAgents()
+  openModal(connectorModalOverlay)
+})
+document.getElementById('connectorModalClose').addEventListener('click', () => closeModal(connectorModalOverlay))
+document.getElementById('connectorDetailClose').addEventListener('click', () => closeModal(connectorDetailOverlay))
+connectorModalOverlay.addEventListener('click', (e) => { if (e.target === connectorModalOverlay) closeModal(connectorModalOverlay) })
+connectorDetailOverlay.addEventListener('click', (e) => { if (e.target === connectorDetailOverlay) closeModal(connectorDetailOverlay) })
+
+// Type toggle
+document.getElementById('connectorType').addEventListener('change', () => {
+  const isStdio = document.getElementById('connectorType').value === 'stdio'
+  document.getElementById('connectorUrlGroup').hidden = isStdio
+  document.getElementById('connectorCmdGroup').hidden = !isStdio
+  document.getElementById('connectorArgsGroup').hidden = !isStdio
+  document.getElementById('connectorEnvGroup').hidden = !isStdio
+})
+
+// Scope toggle: hide agent assignment for global scope
+document.getElementById('connectorScope').addEventListener('change', () => {
+  const isProject = document.getElementById('connectorScope').value === 'project'
+  document.getElementById('connectorAssignGroup').hidden = !isProject
+})
+
+// Default TRUE: if we never successfully read /api/connectors/status
+// (endpoint missing on older backends, network error, non-2xx response)
+// the safe assumption is that the cache has not populated yet. That
+// way an empty list renders as "warming" rather than the misleading
+// "no connectors" the F2 round-3 fix was meant to eliminate.
+let connectorCacheWarming = true
+let connectorCacheError = ''
+
+async function loadConnectors() {
+  connectorGrid.innerHTML = `<div class="connector-loading"><span class="spinner"></span> ${t('connectors.loading')}</div>`
+  connectorStats.innerHTML = ''
+  // Reset pessimistic state at the top of every load. Only an authoritative
+  // positive signal (status endpoint reports cacheLastRefreshed > 0) flips
+  // it to false, so a later status-fetch failure cannot leave a stale
+  // `false` that regresses into "no connectors" again.
+  connectorCacheWarming = true
+  connectorCacheError = ''
+  try {
+    // Fetch both in parallel: the list itself and a lightweight status
+    // readout that tells us whether the server-side cache has ever run.
+    // Without the status, a cold-start hit on the page would render
+    // "Nincsenek MCP connectorok" -- contradicting the info-box that
+    // says "A lista a dashboard indulasakor toltodik be".
+    const [listRes, statusRes] = await Promise.all([
+      fetch('/api/connectors'),
+      fetch('/api/connectors/status').catch(() => null),
+    ])
+    connectors = await listRes.json()
+    if (statusRes && statusRes.ok) {
+      const s = await statusRes.json().catch(() => ({}))
+      if (s && s.cacheLastRefreshed > 0) connectorCacheWarming = false
+      if (s && s.cacheError) connectorCacheError = String(s.cacheError)
+    }
+    renderConnectors()
+    loadExternalPaths()
+    loadGitHubRepos()
+    loadVault()
+  } catch (err) {
+    console.error('Connector betöltés hiba:', err)
+    connectorGrid.innerHTML = `<div class="connector-loading">${t('connectors.load_error')}</div>`
+  }
+}
+
+// Built-in MCPs: features that live inside the Claude Code binary or
+// app rather than as a registered MCP server. They cannot be detected
+// via `claude mcp list`, so the "Aktív / Kikapcsolva" label used to
+// always read "Kikapcsolva" regardless of the real state. Replace the
+// misleading state badge with a "Részletek" button that opens a modal
+// carrying the real enable instructions (which previously hid inside
+// a `title` tooltip the user had to hover to discover).
+const BUILTIN_MCPS = [
+  {
+    name: 'computer-use',
+    label: 'Computer Use',
+    desc: () => t('connectors.builtin.computer_use'),
+    get detailHtml() { return t('connectors.builtin.computer_use_html') },
+  },
+  {
+    name: 'chrome',
+    label: 'Claude in Chrome',
+    desc: () => t('connectors.builtin.chrome'),
+    get detailHtml() { return t('connectors.builtin.chrome_html') },
+  },
+]
+
+function openBuiltinDetail(item) {
+  const overlay = document.getElementById('builtinDetailOverlay')
+  if (!overlay) return
+  document.getElementById('builtinDetailTitle').textContent = item.label
+  document.getElementById('builtinDetailDesc').textContent = typeof item.desc === 'function' ? item.desc() : item.desc
+  // Static strings only. Never interpolate user or server input here
+  // without passing it through escapeHtml first -- detailHtml is a
+  // raw HTML sink.
+  document.getElementById('builtinDetailBody').innerHTML = item.detailHtml
+  openModal(overlay)
+  // Move focus into the dialog so keyboard users land inside the new
+  // surface instead of keeping the Részletek button focused behind
+  // the overlay. Same pattern the other modals in this file skip, but
+  // cheap to add for accessibility.
+  const closeBtn = document.getElementById('builtinDetailClose')
+  if (closeBtn) setTimeout(() => closeBtn.focus(), 50)
+}
+
+// Wire close paths for the built-in detail modal once per load. Guarded
+// so a future refactor that moves the script tag above the modal HTML
+// (e.g. deferred <head> load) does not fire a silent null-ref here.
+function wireBuiltinDetailModal() {
+  const overlay = document.getElementById('builtinDetailOverlay')
+  const closeBtn = document.getElementById('builtinDetailClose')
+  if (!overlay || !closeBtn) return
+  closeBtn.addEventListener('click', () => closeModal(overlay))
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeModal(overlay)
+  })
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', wireBuiltinDetailModal, { once: true })
+} else {
+  wireBuiltinDetailModal()
+}
+
+function renderConnectors() {
+  // Detach panels that live inside connectorGrid before innerHTML wipes them
+  const _extPathsPanel = document.getElementById('externalPathsSection')
+  if (_extPathsPanel) _extPathsPanel.remove()
+
+  // Stats
+  if (connectors.length === 0 && connectorCacheWarming) {
+    connectorStats.innerHTML = ''
+  } else {
+    const connected = connectors.filter(c => c.status === 'connected').length
+    // 'configured' = declared in a .mcp.json (not health-checked, the backend
+    // never spawns them). These are known-good, not broken -- surface them in a
+    // positive count so file-defined servers (e.g. gmail-egov) do not look
+    // un-ready just because they never went through the claude mcp list cache.
+    const configured = connectors.filter(c => c.status === 'configured').length
+    const needsAuth = connectors.filter(c => c.status === 'needs_auth').length
+    const failed = connectors.filter(c => c.status === 'failed').length
+    connectorStats.innerHTML = `
+      <div class="stat-card"><div class="stat-value">${connectors.length}</div><div class="stat-label">${t('connectors.stat.total')}</div></div>
+      <div class="stat-card"><div class="stat-value" style="color:var(--success)">${connected}</div><div class="stat-label">${t('connectors.stat.active')}</div></div>
+      ${configured ? `<div class="stat-card"><div class="stat-value" style="color:var(--info)">${configured}</div><div class="stat-label">${t('connectors.stat.configured')}</div></div>` : ''}
+      ${needsAuth ? `<div class="stat-card"><div class="stat-value" style="color:var(--accent)">${needsAuth}</div><div class="stat-label">${t('connectors.stat.needs_auth')}</div></div>` : ''}
+      ${failed ? `<div class="stat-card"><div class="stat-value" style="color:var(--danger)">${failed}</div><div class="stat-label">${t('connectors.stat.failed')}</div></div>` : ''}
+    `
+  }
+
+  connectorGrid.innerHTML = ''
+  const hasClaudeAiEntries = connectors.some(c => c.source === 'claude.ai')
+  if (connectors.length > 0 && !connectorCacheWarming && connectorCacheError && hasClaudeAiEntries) {
+    const banner = document.createElement('div')
+    banner.className = 'connector-stale-banner'
+    banner.innerHTML = t('connectors.stale_banner', { msg: escapeHtml(connectorCacheError) })
+    connectorGrid.appendChild(banner)
+  }
+  if (connectors.length === 0 && !BUILTIN_MCPS.length) {
+    if (connectorCacheWarming && connectorCacheError) {
+      connectorGrid.innerHTML = `<div class="connector-loading">${t('connectors.mcp_load_failed', { msg: escapeHtml(connectorCacheError) })}</div>`
+    } else if (connectorCacheWarming) {
+      connectorGrid.innerHTML = `<div class="connector-loading">${t('connectors.mcp_not_loaded')}</div>`
+    } else {
+      connectorGrid.innerHTML = `<div class="connector-loading">${t('connectors.no_mcps')}</div>`
+    }
+    return
+  }
+
+  // Group by scope
+  const groups = new Map()
+  for (const c of connectors) {
+    const scope = c.scope || 'global'
+    if (!groups.has(scope)) groups.set(scope, [])
+    groups.get(scope).push(c)
+  }
+
+  const globalScopes = ['global', 'plugin']
+  const agentScopes = []
+  const internalProjectScopes = []
+  const externalProjectScopes = []
+  for (const scope of groups.keys()) {
+    if (scope.startsWith('agent:')) agentScopes.push(scope)
+    else if (scope.startsWith('project:external/')) externalProjectScopes.push(scope)
+    else if (scope.startsWith('project:')) internalProjectScopes.push(scope)
+    else if (!globalScopes.includes(scope)) globalScopes.push(scope)
+  }
+  agentScopes.sort()
+  internalProjectScopes.sort()
+  externalProjectScopes.sort()
+
+  const sourceLabels = {
+    'claude.ai': 'claude.ai',
+    'plugin': 'plugin',
+    'local-user': 'local (user)',
+    'local-project': 'local (project)',
+    'local': 'local',
+    'agent': 'agent',
+    'agent-project': 'project',
+    'external-project': 'external',
+  }
+
+  function renderCard(c, container) {
+    const card = document.createElement('div')
+    card.className = 'connector-card'
+    const sourceTag = c.source ? `<span class="connector-source-badge">${escapeHtml(sourceLabels[c.source] || c.source)}</span>` : ''
+    const readOnly = c.source === 'claude.ai'
+    if (readOnly) card.classList.add('connector-card-readonly')
+    const readonlyHint = readOnly ? `<div class="connector-readonly-hint">${t('connectors.readonly_hint')}</div>` : ''
+    card.innerHTML = `
+      <div class="connector-status-dot ${c.status}"></div>
+      <div class="connector-info">
+        <div class="connector-name">${escapeHtml(c.name)} ${sourceTag}</div>
+        <div class="connector-endpoint">${escapeHtml(c.endpoint || '')}</div>
+        ${readonlyHint}
+      </div>
+      <span class="connector-type-badge ${c.type}">${c.type}</span>
+    `
+    if (!readOnly) card.addEventListener('click', () => openConnectorDetail(c))
+    container.appendChild(card)
+  }
+
+  function renderCollapsible(label, icon, items, container) {
+    const section = document.createElement('div')
+    section.className = 'connector-scope-section'
+    const header = document.createElement('div')
+    header.className = 'connector-scope-header collapsible'
+    header.innerHTML = `<span class="connector-scope-toggle">▶</span> ${icon} ${escapeHtml(label)} <span class="connector-scope-count">${items.length}</span>`
+    header.addEventListener('click', () => {
+      const grid = section.querySelector('.connector-scope-grid')
+      const toggle = header.querySelector('.connector-scope-toggle')
+      if (grid.hidden) { grid.hidden = false; toggle.textContent = '▼' }
+      else { grid.hidden = true; toggle.textContent = '▶' }
+    })
+    section.appendChild(header)
+    const grid = document.createElement('div')
+    grid.className = 'connector-scope-grid'
+    grid.hidden = true
+    for (const c of items) renderCard(c, grid)
+    section.appendChild(grid)
+    container.appendChild(section)
+  }
+
+  // === Claude globális ===
+  const globalHeading = document.createElement('div')
+  globalHeading.className = 'connector-group-heading'
+  globalHeading.textContent = t('connectors.heading.global')
+  connectorGrid.appendChild(globalHeading)
+
+  const builtinGrid = document.createElement('div')
+  builtinGrid.className = 'connector-builtin-grid'
+  for (const b of BUILTIN_MCPS) {
+    const div = document.createElement('div')
+    div.className = 'connector-builtin'
+    div.innerHTML = `
+      <div class="connector-status-dot unknown" title="${t('connectors.tooltip.auto_detect')}"></div>
+      <div class="connector-builtin-name">${escapeHtml(b.label)}<br><span style="font-size:11px;color:var(--text-muted);font-weight:400">${escapeHtml(typeof b.desc === 'function' ? b.desc() : b.desc)}</span></div>
+      <button type="button" class="connector-builtin-action btn-link" data-builtin="${escapeHtml(b.name)}">${t('connectors.builtin.details')}</button>
+    `
+    const btn = div.querySelector('button[data-builtin]')
+    if (btn) btn.addEventListener('click', () => openBuiltinDetail(b))
+    builtinGrid.appendChild(div)
+  }
+  connectorGrid.appendChild(builtinGrid)
+
+  const globalGrid = document.createElement('div')
+  globalGrid.className = 'connector-scope-grid'
+  for (const scope of globalScopes) {
+    for (const c of (groups.get(scope) || [])) renderCard(c, globalGrid)
+  }
+  if (globalGrid.children.length > 0) connectorGrid.appendChild(globalGrid)
+
+  // === Ügynökök ===
+  if (agentScopes.length > 0) {
+    const agentHeading = document.createElement('div')
+    agentHeading.className = 'connector-group-heading'
+    agentHeading.textContent = t('connectors.heading.agents')
+    connectorGrid.appendChild(agentHeading)
+
+    for (const ag of agentScopes) {
+      const agentName = ag.slice('agent:'.length)
+      renderCollapsible(agentName, '🤖', groups.get(ag), connectorGrid)
+    }
+  }
+
+  // === Projektek (belső) ===
+  if (internalProjectScopes.length > 0) {
+    const projectHeading = document.createElement('div')
+    projectHeading.className = 'connector-group-heading'
+    projectHeading.textContent = t('connectors.heading.projects')
+    connectorGrid.appendChild(projectHeading)
+
+    for (const ps of internalProjectScopes) {
+      const parts = ps.slice('project:'.length).split('/')
+      const projLabel = parts[parts.length - 1]
+      renderCollapsible(projLabel, '📁', groups.get(ps), connectorGrid)
+    }
+  }
+
+  // === Külső projektek ===
+  if (externalProjectScopes.length > 0 || _extPathsPanel) {
+    const extHeading = document.createElement('div')
+    extHeading.className = 'connector-group-heading'
+    extHeading.textContent = t('connectors.heading.external')
+    connectorGrid.appendChild(extHeading)
+
+    if (_extPathsPanel) connectorGrid.appendChild(_extPathsPanel)
+
+    for (const ps of externalProjectScopes) {
+      const projLabel = ps.slice('project:external/'.length)
+      renderCollapsible(projLabel, '📂', groups.get(ps), connectorGrid)
+    }
+  }
+}
+
+// --- GitHub repo management ---
+async function loadGitHubRepos() {
+  try {
+    const res = await fetch('/api/connectors/github-repos')
+    const data = await res.json()
+    const repos = data.repos || []
+    document.getElementById('githubRepoCount').textContent = String(repos.length)
+    const list = document.getElementById('githubRepoList')
+    list.innerHTML = ''
+    for (const r of repos) {
+      const item = document.createElement('div')
+      item.className = 'connector-external-item github-repo-item'
+      const date = new Date(r.installedAt).toLocaleDateString('hu-HU')
+      item.innerHTML = `<div class="github-repo-info"><span class="github-repo-name">${escapeHtml(r.name.replace('--', '/'))}</span><span class="github-repo-date">${date}</span></div><div class="github-repo-actions"><button class="github-repo-update" title="Frissites">&#x21bb;</button><button class="github-repo-delete" title="Torles">&times;</button></div>`
+      item.querySelector('.github-repo-update').addEventListener('click', async (e) => {
+        const btn = e.currentTarget
+        btn.disabled = true
+        btn.textContent = '...'
+        try {
+          const res = await fetch(`/api/connectors/github-repos/${encodeURIComponent(r.name)}`, { method: 'PATCH' })
+          const data = await res.json()
+          if (data.error) { alert(data.error); return }
+          loadConnectors()
+        } finally { btn.disabled = false; btn.innerHTML = '&#x21bb;' }
+      })
+      item.querySelector('.github-repo-delete').addEventListener('click', async () => {
+        if (!confirm(`Torlod: ${r.name.replace('--', '/')}?`)) return
+        await fetch(`/api/connectors/github-repos/${encodeURIComponent(r.name)}`, { method: 'DELETE' })
+        loadGitHubRepos()
+        loadExternalPaths()
+        loadConnectors()
+      })
+      list.appendChild(item)
+    }
+  } catch { /* ignore */ }
+}
+
+;(function wireGitHubRepos() {
+  const toggle = document.getElementById('githubReposToggle')
+  const body = document.getElementById('githubReposBody')
+  if (!toggle || !body) return
+  toggle.addEventListener('click', () => {
+    const arrow = toggle.querySelector('.connector-scope-toggle')
+    if (body.hidden) { body.hidden = false; arrow.textContent = '▼' }
+    else { body.hidden = true; arrow.textContent = '▶' }
+  })
+  const addBtn = document.getElementById('githubRepoAddBtn')
+  const input = document.getElementById('githubRepoInput')
+  const status = document.getElementById('githubRepoStatus')
+  addBtn.addEventListener('click', async () => {
+    const val = input.value.trim()
+    if (!val) return
+    addBtn.disabled = true
+    addBtn.textContent = 'Telepites...'
+    status.hidden = false
+    status.className = 'github-repo-status loading'
+    status.textContent = t('connectors.cloning')
+    try {
+      const res = await fetch('/api/connectors/github-repos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: val }),
+      })
+      const data = await res.json()
+      if (data.error) {
+        status.className = 'github-repo-status error'
+        status.textContent = data.error
+        return
+      }
+      if (data.requiredEnvVars && data.requiredEnvVars.length > 0) {
+        status.className = 'github-repo-status loading'
+        status.textContent = t('connectors.api_keys_needed')
+        const envValues = await showEnvVarModal(data.requiredEnvVars)
+        if (envValues && Object.keys(envValues).length > 0) {
+          let vaultAllOk = true
+          for (const [key, value] of Object.entries(envValues)) {
+            const r = await fetch('/api/vault', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: `github-env-${data.repo.name}-${key}`, label: `${key} (${data.repo.name.replace('--', '/')})`, value }),
+            })
+            if (!r.ok) vaultAllOk = false
+          }
+          if (vaultAllOk) {
+            status.className = 'github-repo-status success'
+            status.textContent = 'Telepitve, kulcsok mentve a Vault-ba!'
+          } else {
+            status.className = 'github-repo-status error'
+            status.textContent = 'Telepitve, de néhány kulcs mentése sikertelen. Add meg újra a Vault-ban.'
+          }
+          loadVault()
+        } else {
+          status.className = 'github-repo-status success'
+          status.textContent = 'Telepitve (kulcsok kihagyva)'
+        }
+      } else {
+        status.className = 'github-repo-status success'
+        status.textContent = 'Telepitve!'
+      }
+      input.value = ''
+      loadGitHubRepos()
+      loadExternalPaths()
+      loadConnectors()
+      setTimeout(() => { status.hidden = true }, 4000)
+    } catch (err) {
+      status.className = 'github-repo-status error'
+      status.textContent = 'Hiba: ' + err.message
+    } finally {
+      addBtn.disabled = false
+      addBtn.textContent = 'Telepites'
+    }
+  })
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') addBtn.click() })
+})()
+
+// --- Vault management ---
+async function loadVault() {
+  try {
+    const res = await fetch('/api/vault')
+    const data = await res.json()
+    const secrets = data.secrets || []
+    document.getElementById('vaultCount').textContent = String(secrets.length)
+    const list = document.getElementById('vaultList')
+    list.innerHTML = ''
+    for (const s of secrets) {
+      const item = document.createElement('div')
+      item.className = 'connector-external-item'
+      const date = new Date(s.updatedAt).toLocaleDateString('hu-HU')
+      item.innerHTML = `<div class="github-repo-info"><span class="github-repo-name">${escapeHtml(s.label)}</span><span class="github-repo-date">${escapeHtml(s.id)} &middot; ${date}</span></div><button title="Torles" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:14px;padding:2px 6px">&times;</button>`
+      item.querySelector('button').addEventListener('click', async () => {
+        if (!confirm(`Torlod: ${s.label}?`)) return
+        const res = await fetch(`/api/vault/${encodeURIComponent(s.id)}`, { method: 'DELETE' })
+        if (!res.ok) { showToast('Törlés sikertelen'); return }
+        loadVault()
+      })
+      list.appendChild(item)
+    }
+  } catch { /* ignore */ }
+}
+
+;(function wireVault() {
+  const toggle = document.getElementById('vaultToggle')
+  const body = document.getElementById('vaultBody')
+  if (!toggle || !body) return
+  toggle.addEventListener('click', () => {
+    const arrow = toggle.querySelector('.connector-scope-toggle')
+    if (body.hidden) { body.hidden = false; arrow.textContent = '▼' }
+    else { body.hidden = true; arrow.textContent = '▶' }
+  })
+  const addBtn = document.getElementById('vaultAddBtn')
+  const idInput = document.getElementById('vaultIdInput')
+  const valInput = document.getElementById('vaultValueInput')
+  addBtn.addEventListener('click', async () => {
+    const id = idInput.value.trim()
+    const val = valInput.value
+    if (!id || !val) return
+    const res = await fetch('/api/vault', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, label: id, value: val }),
+    })
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}))
+      showToast('Mentés sikertelen: ' + (e.error || res.status))
+      return
+    }
+    idInput.value = ''
+    valInput.value = ''
+    loadVault()
+  })
+  valInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addBtn.click() })
+})()
+
+// --- Env var modal for GitHub repo install ---
+let _envVarResolve = null
+function showEnvVarModal(envVars) {
+  return new Promise((resolve) => {
+    _envVarResolve = resolve
+    const modal = document.getElementById('envVarModal')
+    const fields = document.getElementById('envVarFields')
+    fields.innerHTML = ''
+    for (const v of envVars) {
+      const row = document.createElement('div')
+      row.className = 'env-var-row'
+      row.innerHTML = `<label class="env-var-label">${escapeHtml(v)}</label><input type="password" class="input env-var-input" data-key="${escapeHtml(v)}" placeholder="Ertek...">`
+      fields.appendChild(row)
+    }
+    modal.hidden = false
+  })
+}
+
+;(function wireEnvVarModal() {
+  const modal = document.getElementById('envVarModal')
+  if (!modal) return
+  document.getElementById('envVarModalClose').addEventListener('click', () => {
+    modal.hidden = true
+    if (_envVarResolve) { _envVarResolve(null); _envVarResolve = null }
+  })
+  document.getElementById('envVarSkipBtn').addEventListener('click', () => {
+    modal.hidden = true
+    if (_envVarResolve) { _envVarResolve(null); _envVarResolve = null }
+  })
+  document.getElementById('envVarSaveBtn').addEventListener('click', () => {
+    const inputs = document.querySelectorAll('#envVarFields .env-var-input')
+    const env = {}
+    for (const inp of inputs) {
+      const key = inp.getAttribute('data-key')
+      const val = inp.value.trim()
+      if (key && val) env[key] = val
+    }
+    modal.hidden = true
+    if (_envVarResolve) { _envVarResolve(env); _envVarResolve = null }
+  })
+})()
+
+// --- SSH Vault ---
+let _sshServers = []
+let _sshKeys = []
+let _sshView = 'table'
+let _sshEditingId = null
+
+async function loadSshServers() {
+  try {
+    const res = await fetch('/api/vault/ssh-servers')
+    const data = await res.json()
+    _sshServers = data.servers || []
+    renderSshServers()
+  } catch { /* ignore */ }
+}
+
+async function loadSshKeys() {
+  try {
+    const res = await fetch('/api/vault/ssh-keys')
+    if (!res.ok) return
+    const data = await res.json()
+    _sshKeys = data.keys || []
+    renderSshKeys()
+    _refreshKeySelects()
+  } catch { /* ignore */ }
+}
+
+function renderSshKeys() {
+  const tbody = document.getElementById('sshKeysTableBody')
+  const keysView = document.getElementById('sshKeysView')
+  const emptyEl = document.getElementById('sshKeysEmpty')
+  if (!tbody) return
+  if (_sshKeys.length === 0) {
+    keysView.hidden = true
+    emptyEl.hidden = false
+    return
+  }
+  keysView.hidden = false
+  emptyEl.hidden = true
+  tbody.innerHTML = _sshKeys.map(k => `
+    <tr>
+      <td class="ssh-table-name">${escapeHtml(k.label || k.id)}</td>
+      <td class="ssh-table-mono">${escapeHtml(k.username || '')}</td>
+      <td class="ssh-table-mono">${escapeHtml(k.keyType || 'ed25519')}</td>
+      <td class="ssh-table-mono" style="font-size:11px">${k.fingerprint ? escapeHtml(k.fingerprint.slice(0,28)) + '…' : ''}</td>
+      <td class="ssh-table-mono">${k.createdAt ? new Date(k.createdAt).toLocaleDateString('hu-HU') : ''}</td>
+      <td><div class="ssh-table-actions">
+        <button class="btn-secondary btn-compact ssh-key-copy-btn" data-id="${escapeHtml(k.id)}" title="Publikus kulcs másolása">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+        <button class="btn-secondary btn-compact ssh-key-delete-btn" data-id="${escapeHtml(k.id)}" title="Törlés">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+        </button>
+      </div></td>
+    </tr>
+  `).join('')
+  tbody.querySelectorAll('.ssh-key-copy-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const key = _sshKeys.find(k => k.id === btn.dataset.id)
+      if (!key) return
+      try {
+        const res = await fetch(`/api/vault/ssh-keys/${encodeURIComponent(btn.dataset.id)}/public-key`)
+        if (res.ok) {
+          const data = await res.json()
+          await navigator.clipboard.writeText(data.publicKey || '')
+          btn.textContent = '✓'
+          setTimeout(() => { btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>' }, 1500)
+        }
+      } catch { /* ignore */ }
+    })
+  })
+  tbody.querySelectorAll('.ssh-key-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Biztosan törlöd ezt a kulcsot?')) return
+      await fetch(`/api/vault/ssh-keys/${encodeURIComponent(btn.dataset.id)}`, { method: 'DELETE' })
+      await loadSshKeys()
+    })
+  })
+}
+
+function _refreshKeySelects() {
+  const opts = ['<option value="">-- Nincs kulcs --</option>',
+    ..._sshKeys.map(k => `<option value="${escapeHtml(k.id)}">${escapeHtml(k.label || k.id)} (${escapeHtml(k.username || '')})</option>`)
+  ].join('')
+  document.querySelectorAll('.ssh-key-select').forEach(sel => {
+    const prev = sel.value
+    sel.innerHTML = opts
+    sel.value = prev
+  })
+}
+
+function _sshKeyBadge(status) {
+  const labels = { ok: 'OK', missing: 'Hiányzó', expired: 'Lejárt' }
+  const icons = {
+    ok: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>',
+    missing: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
+    expired: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+  }
+  return `<span class="ssh-key-badge ${status}">${icons[status] || ''} ${labels[status] || status}</span>`
+}
+
+function _sshKeyAssignSelect(s) {
+  const currentKeyId = s.sshKeyId || s.assignedKeyId || s.vaultKeyId || ''
+  const opts = ['<option value="">-- Nincs kulcs --</option>',
+    ..._sshKeys.map(k => {
+      const sel = (currentKeyId && currentKeyId === k.id) ? ' selected' : ''
+      return `<option value="${escapeHtml(k.id)}"${sel}>${escapeHtml(k.label || k.id)}</option>`
+    })
+  ].join('')
+  return `<select class="ssh-key-assign ssh-key-select" data-id="${escapeHtml(s.id)}" title="Kulcs hozzárendelése">${opts}</select>`
+}
+
+function _sshInfoBtn(s) {
+  return `<button class="ssh-info-btn" data-id="${escapeHtml(s.id)}" data-user="${escapeHtml(s.user)}" title="Telepítési útmutató">i</button>`
+}
+
+function renderSshServers() {
+  const cardsEl = document.getElementById('sshCardsView')
+  const tableView = document.getElementById('sshTableView')
+  const tableBody = document.getElementById('sshTableBody')
+  const emptyEl = document.getElementById('sshEmpty')
+  if (!cardsEl || !tableBody || !emptyEl) return
+
+  // Sync view state with _sshView
+  const isTable = _sshView === 'table'
+  cardsEl.hidden = isTable
+  if (tableView) tableView.hidden = !isTable
+  document.getElementById('sshViewCards')?.classList.toggle('active', !isTable)
+  document.getElementById('sshViewTable')?.classList.toggle('active', isTable)
+
+  if (_sshServers.length === 0) {
+    cardsEl.innerHTML = ''
+    tableBody.innerHTML = ''
+    emptyEl.hidden = false
+    return
+  }
+  emptyEl.hidden = true
+
+  // Cards
+  cardsEl.innerHTML = _sshServers.map(s => `
+    <div class="ssh-card" data-id="${escapeHtml(s.id)}">
+      <div class="ssh-card-head">
+        <div class="ssh-card-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+        </div>
+        <div class="ssh-card-title">
+          <div class="ssh-card-name">${escapeHtml(s.name)}</div>
+          ${s.desc ? `<div class="ssh-card-desc">${escapeHtml(s.desc)}</div>` : ''}
+        </div>
+      </div>
+      <div class="ssh-card-meta">
+        <div class="ssh-card-row">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          <span>${escapeHtml(s.host)}</span>
+        </div>
+        <div class="ssh-card-row">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <span>${escapeHtml(s.user)}${s.port !== 22 ? ` :${s.port}` : ''}</span>
+        </div>
+        ${s.fingerprint ? `<div class="ssh-card-row"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span>${escapeHtml(s.keyType || '')} ${escapeHtml(s.fingerprint.slice(0,24))}…</span></div>` : ''}
+      </div>
+      <div class="ssh-card-footer">
+        <div style="display:flex;align-items:center;gap:4px;width:100%">
+          ${_sshKeyAssignSelect(s)}
+          <div class="ssh-card-actions">
+            <button class="btn-secondary btn-compact ssh-edit-btn" data-id="${escapeHtml(s.id)}" title="Szerkesztés">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            </button>
+            <button class="btn-secondary btn-compact ssh-delete-btn" data-id="${escapeHtml(s.id)}" title="Törlés">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `).join('')
+
+  // Table
+  tableBody.innerHTML = _sshServers.map(s => `
+    <tr data-id="${escapeHtml(s.id)}">
+      <td class="ssh-table-name">${escapeHtml(s.name)}</td>
+      <td class="ssh-table-mono">${escapeHtml(s.host)}</td>
+      <td class="ssh-table-mono">${escapeHtml(s.user)}</td>
+      <td class="ssh-table-mono">${s.port}</td>
+      <td>${_sshKeyAssignSelect(s)}</td>
+      <td style="color:var(--text-muted)">${escapeHtml(s.desc || '')}</td>
+      <td><div class="ssh-table-actions">
+        <button class="btn-secondary btn-compact ssh-edit-btn" data-id="${escapeHtml(s.id)}" title="Szerkesztés">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </button>
+        <button class="btn-secondary btn-compact ssh-delete-btn" data-id="${escapeHtml(s.id)}" title="Törlés">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+        </button>
+      </div></td>
+    </tr>
+  `).join('')
+
+  // Delete handlers
+  document.querySelectorAll('.ssh-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-id')
+      if (!confirm(`Törlöd: ${id}?`)) return
+      try {
+        await fetch(`/api/vault/ssh-servers/${encodeURIComponent(id)}`, { method: 'DELETE' })
+        await loadSshServers()
+      } catch { showToast('Törlés sikertelen') }
+    })
+  })
+
+  // Edit handlers -- open the add-server panel pre-filled, switch it to edit mode
+  document.querySelectorAll('.ssh-edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-id')
+      const server = _sshServers.find(s => s.id === id)
+      if (!server) return
+      _sshEditingId = id
+
+      document.getElementById('sshNameInput').value = server.name || ''
+      document.getElementById('sshHostInput').value = server.host || ''
+      document.getElementById('sshUserInput').value = server.user || ''
+      document.getElementById('sshPortInput').value = server.port || 22
+      document.getElementById('sshDescInput').value = server.desc || ''
+      const keySel = document.getElementById('sshKeySelectInput')
+      if (keySel) keySel.value = server.sshKeyId || server.assignedKeyId || server.vaultKeyId || ''
+
+      const titleEl = document.getElementById('sshAddPanelTitle')
+      if (titleEl) titleEl.textContent = `Szerver szerkesztése – ${server.name}`
+
+      const panel = document.getElementById('sshAddPanel')
+      panel.hidden = false
+      document.getElementById('sshNameInput').focus()
+    })
+  })
+
+  // Key assign select handlers
+  document.querySelectorAll('.ssh-key-assign').forEach(sel => {
+    sel.addEventListener('change', async () => {
+      const id = sel.getAttribute('data-id')
+      const sshKeyId = sel.value || null
+      try {
+        await fetch(`/api/vault/ssh-servers/${encodeURIComponent(id)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sshKeyId }),
+        })
+        await loadSshServers()
+      } catch { /* ignore */ }
+    })
+  })
+
+}
+
+// --- SSH Keygen modal (standalone key creation for Kulcstároló) ---
+let _sshKeygenCallback = null  // called with new key after successful generation
+
+function openSshKeygenModal(callback) {
+  const overlay = document.getElementById('sshKeygenOverlay')
+  document.getElementById('sshKeygenLabelInput').value = ''
+  document.getElementById('sshKeygenUserInput').value = ''
+  document.getElementById('sshKeygenSpinner').hidden = true
+  document.getElementById('sshKeygenResult').hidden = true
+  document.getElementById('sshKeygenFooter').hidden = false
+  document.getElementById('sshKeygenForm').hidden = false
+  document.getElementById('sshKeygenPubkeyBox').value = ''
+  _sshKeygenCallback = callback || null
+  openModal(overlay)
+  document.getElementById('sshKeygenLabelInput').focus()
+}
+
+;(function wireSshKeygenModal() {
+  const overlay = document.getElementById('sshKeygenOverlay')
+  const closeBtn = document.getElementById('sshKeygenClose')
+  const submitBtn = document.getElementById('sshKeygenSubmitBtn')
+  const copyBtn = document.getElementById('sshKeygenCopyBtn')
+  if (!overlay) return
+
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(overlay) })
+  closeBtn.addEventListener('click', () => closeModal(overlay))
+
+  submitBtn.addEventListener('click', async () => {
+    const label = document.getElementById('sshKeygenLabelInput').value.trim()
+    const username = document.getElementById('sshKeygenUserInput').value.trim()
+    if (!label || !username) { showToast('Cimke és felhasználónév megadása kötelező'); return }
+
+    document.getElementById('sshKeygenForm').hidden = true
+    document.getElementById('sshKeygenSpinner').hidden = false
+    document.getElementById('sshKeygenResult').hidden = true
+    document.getElementById('sshKeygenFooter').hidden = true
+
+    try {
+      const res = await fetch('/api/vault/ssh-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label, username }),
+      })
+      const data = await res.json()
+      if (!res.ok) { showToast(data.error || 'Generálás sikertelen'); resetKeygenForm(); return }
+
+      const pubkey = data.publicKey || (data.key && data.key.publicKey) || ''
+      document.getElementById('sshKeygenPubkeyBox').value = pubkey
+      document.getElementById('sshKeygenSpinner').hidden = true
+      document.getElementById('sshKeygenResult').hidden = false
+
+      await loadSshKeys()
+      if (_sshKeygenCallback) _sshKeygenCallback(data.key || data)
+    } catch { showToast('Hálózati hiba'); resetKeygenForm() }
+  })
+
+  copyBtn?.addEventListener('click', () => {
+    const val = document.getElementById('sshKeygenPubkeyBox').value
+    navigator.clipboard.writeText(val).then(() => {
+      copyBtn.textContent = 'Másolva!'
+      setTimeout(() => { copyBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Másolás' }, 2000)
+    }).catch(() => {})
+  })
+
+  function resetKeygenForm() {
+    document.getElementById('sshKeygenForm').hidden = false
+    document.getElementById('sshKeygenSpinner').hidden = true
+    document.getElementById('sshKeygenResult').hidden = true
+    document.getElementById('sshKeygenFooter').hidden = false
+  }
+})()
+
+// --- SSH Info modal ---
+let _sshInfoServerId = null
+
+async function _sshInfoLoadKey(keyId, serverUser) {
+  const installSection = document.getElementById('sshInfoInstallSection')
+  const noKeyEl = document.getElementById('sshInfoNoKey')
+  if (!keyId) {
+    installSection.hidden = true
+    noKeyEl.hidden = false
+    return
+  }
+  installSection.hidden = false
+  noKeyEl.hidden = true
+
+  let pubkey = ''
+  try {
+    const res = await fetch(`/api/vault/ssh-keys/${encodeURIComponent(keyId)}/public-key`)
+    if (res.ok) { const d = await res.json(); pubkey = d.publicKey || '' }
+  } catch {}
+
+  const targetUser = serverUser || 'root'
+  document.getElementById('sshInfoUser').textContent = targetUser
+
+  // root always exists -- only show the "create user" step for a real,
+  // non-root target user (e.g. a fresh server that needs the account first).
+  const step0 = document.getElementById('sshInfoStep0')
+  if (targetUser === 'root') {
+    step0.hidden = true
+  } else {
+    step0.hidden = false
+    document.getElementById('sshInfoCmd0').textContent = `useradd -m -s /bin/bash ${targetUser}`
+  }
+
+  const cmd2text = pubkey
+    ? `echo "${pubkey}" >> ~/.ssh/authorized_keys`
+    : `echo "<publikus kulcs ide>" >> ~/.ssh/authorized_keys`
+  document.getElementById('sshInfoCmd2').textContent = cmd2text
+  document.getElementById('sshInfoPubkey').textContent = pubkey || '(kulcs nem elérhető)'
+
+  const overlay = document.getElementById('sshInfoOverlay')
+  overlay.querySelectorAll('.ssh-code-copy').forEach(btn => {
+    const clone = btn.cloneNode(true)
+    btn.parentNode.replaceChild(clone, btn)
+    clone.addEventListener('click', () => {
+      const text = document.getElementById(clone.getAttribute('data-target'))?.textContent || ''
+      navigator.clipboard.writeText(text).then(() => {
+        clone.classList.add('copied')
+        setTimeout(() => clone.classList.remove('copied'), 2000)
+      }).catch(() => {})
+    })
+  })
+}
+
+function _sshInfoLoadServer(serverId) {
+  _sshInfoServerId = serverId
+  const server = _sshServers.find(s => s.id === serverId)
+
+  document.getElementById('sshInfoServerName').textContent = server ? server.name : (serverId || '')
+
+  const keySel = document.getElementById('sshInfoKeySelect')
+  keySel.innerHTML = ['<option value="">-- Nincs kulcs --</option>',
+    ..._sshKeys.map(k => `<option value="${escapeHtml(k.id)}">${escapeHtml(k.label || k.id)} (${escapeHtml(k.username || '')})</option>`)
+  ].join('')
+  const assignedKeyId = (server && (server.sshKeyId || server.assignedKeyId || server.vaultKeyId)) || ''
+  keySel.value = assignedKeyId
+  return { server, assignedKeyId }
+}
+
+function openSshInfoModal(preselectedServerId, { keyOnly = false } = {}) {
+  const overlay = document.getElementById('sshInfoOverlay')
+  const serverSection = overlay.querySelector('.ssh-info-server-section')
+
+  if (keyOnly) {
+    // Key-only mode: hide server selector, reset server context
+    serverSection.hidden = true
+    _sshInfoServerId = null
+    document.getElementById('sshInfoServerName').textContent = 'Új szerver'
+
+    // Populate key selector without a pre-selected key
+    const keySel = document.getElementById('sshInfoKeySelect')
+    keySel.innerHTML = ['<option value="">-- Válassz kulcsot --</option>',
+      ..._sshKeys.map(k => `<option value="${escapeHtml(k.id)}">${escapeHtml(k.label || k.id)} (${escapeHtml(k.username || '')})</option>`)
+    ].join('')
+    // Pre-select whatever is chosen in the form's key dropdown
+    const formKeyId = document.getElementById('sshKeySelectInput')?.value || ''
+    keySel.value = formKeyId
+
+    // Use the username typed into the new-server form, not a hardcoded root
+    const formUser = document.getElementById('sshUserInput')?.value.trim() || 'root'
+
+    openModal(overlay)
+    _sshInfoLoadKey(formKeyId, formUser)
+  } else {
+    // Normal mode: show server selector, pick first server by default
+    serverSection.hidden = false
+    const serverSel = document.getElementById('sshInfoServerSelect')
+    serverSel.innerHTML = ['<option value="">-- Válassz szervert --</option>',
+      ..._sshServers.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)} (${escapeHtml(s.host)})</option>`)
+    ].join('')
+
+    const firstId = preselectedServerId || (_sshServers[0] && _sshServers[0].id) || ''
+    serverSel.value = firstId
+
+    const { server, assignedKeyId } = _sshInfoLoadServer(firstId)
+    const targetUser = (server && server.user) || 'root'
+
+    openModal(overlay)
+    _sshInfoLoadKey(assignedKeyId, targetUser)
+  }
+}
+
+;(function wireSshInfoModal() {
+  const overlay = document.getElementById('sshInfoOverlay')
+  const closeBtn = document.getElementById('sshInfoClose')
+  const serverSel = document.getElementById('sshInfoServerSelect')
+  const keySel = document.getElementById('sshInfoKeySelect')
+  if (!overlay) return
+
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(overlay) })
+  closeBtn.addEventListener('click', () => closeModal(overlay))
+
+  serverSel?.addEventListener('change', () => {
+    const { server, assignedKeyId } = _sshInfoLoadServer(serverSel.value)
+    _sshInfoLoadKey(assignedKeyId, (server && server.user) || 'root')
+  })
+
+  keySel?.addEventListener('change', async () => {
+    const keyId = keySel.value || null
+    // Key-only mode (new-server flow) has no _sshInfoServerId -- read the
+    // username from the new-server form instead of falling back to root.
+    const targetUser = _sshInfoServerId
+      ? ((_sshServers.find(s => s.id === _sshInfoServerId) || {}).user || 'root')
+      : (document.getElementById('sshUserInput')?.value.trim() || 'root')
+
+    if (_sshInfoServerId) {
+      try {
+        await fetch(`/api/vault/ssh-servers/${encodeURIComponent(_sshInfoServerId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sshKeyId: keyId }),
+        })
+        await loadSshServers()
+      } catch { /* ignore */ }
+    }
+    await _sshInfoLoadKey(keyId, targetUser)
+  })
+})()
+
+;(function wireSshSection() {
+  const newBtn = document.getElementById('sshNewBtn')
+  const panel = document.getElementById('sshAddPanel')
+  const closeBtn = document.getElementById('sshAddPanelClose')
+  const addBtn = document.getElementById('sshAddBtn')
+  const cardViewBtn = document.getElementById('sshViewCards')
+  const tableViewBtn = document.getElementById('sshViewTable')
+  const cardsView = document.getElementById('sshCardsView')
+  const tableView = document.getElementById('sshTableView')
+
+  if (!newBtn) return
+
+  function resetSshAddForm() {
+    _sshEditingId = null
+    const titleEl = document.getElementById('sshAddPanelTitle')
+    if (titleEl) titleEl.textContent = 'Szerver hozzáadása'
+    document.getElementById('sshNameInput').value = ''
+    document.getElementById('sshHostInput').value = ''
+    document.getElementById('sshUserInput').value = ''
+    document.getElementById('sshPortInput').value = '22'
+    document.getElementById('sshDescInput').value = ''
+    if (document.getElementById('sshKeySelectInput')) document.getElementById('sshKeySelectInput').value = ''
+  }
+
+  newBtn.addEventListener('click', () => {
+    if (panel.hidden) resetSshAddForm()
+    panel.hidden = !panel.hidden
+    if (!panel.hidden) document.getElementById('sshNameInput').focus()
+  })
+  closeBtn?.addEventListener('click', () => { panel.hidden = true; resetSshAddForm() })
+
+  // (i) install guide button inside the "new server" form -- key-only mode
+  document.getElementById('sshKeyInstallFromFormBtn')?.addEventListener('click', () => {
+    openSshInfoModal(null, { keyOnly: true })
+  })
+
+  // "+ Új kulcs" button inside the "new server" form
+  document.getElementById('sshKeyNewFromFormBtn')?.addEventListener('click', () => {
+    openSshKeygenModal(newKey => {
+      // After key created, select it in the form dropdown
+      if (newKey && newKey.id) {
+        const sel = document.getElementById('sshKeySelectInput')
+        if (sel) sel.value = newKey.id
+      }
+    })
+  })
+
+  addBtn?.addEventListener('click', async () => {
+    const name = document.getElementById('sshNameInput').value.trim()
+    const host = document.getElementById('sshHostInput').value.trim()
+    const user = document.getElementById('sshUserInput').value.trim()
+    const port = parseInt(document.getElementById('sshPortInput').value, 10) || 22
+    const desc = document.getElementById('sshDescInput').value.trim()
+    const sshKeyId = document.getElementById('sshKeySelectInput')?.value || null
+    if (!name || !host || !user) { showToast('Név, IP és felhasználó megadása kötelező'); return }
+    const isEdit = !!_sshEditingId
+    try {
+      const res = await fetch(
+        isEdit ? `/api/vault/ssh-servers/${encodeURIComponent(_sshEditingId)}` : '/api/vault/ssh-servers',
+        {
+          method: isEdit ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, host, user, port, desc, sshKeyId: sshKeyId || undefined }),
+        }
+      )
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        showToast(err.error || 'Hiba a mentéskor'); return
+      }
+      resetSshAddForm()
+      panel.hidden = true
+      await loadSshServers()
+      showToast(isEdit ? 'Szerver frissítve' : 'Szerver hozzáadva')
+    } catch { showToast('Hálózati hiba') }
+  })
+
+  cardViewBtn?.addEventListener('click', () => {
+    _sshView = 'cards'
+    cardViewBtn.classList.add('active')
+    tableViewBtn.classList.remove('active')
+    cardsView.hidden = false
+    tableView.hidden = true
+  })
+
+  tableViewBtn?.addEventListener('click', () => {
+    _sshView = 'table'
+    tableViewBtn.classList.add('active')
+    cardViewBtn.classList.remove('active')
+    cardsView.hidden = true
+    tableView.hidden = false
+  })
+
+  // Kulcstároló "Új kulcs generálása" button
+  document.getElementById('sshKeyNewBtn')?.addEventListener('click', () => {
+    openSshKeygenModal()
+  })
+
+  // Global (i) info button in section header
+  document.getElementById('sshInfoGlobalBtn')?.addEventListener('click', () => {
+    openSshInfoModal()
+  })
+})()
+
+// --- Vault Page ---
+let _vaultSecrets = []
+
+let _vaultBindings = []
+
+async function loadVaultPage() {
+  try {
+    const [secretsRes, bindingsRes] = await Promise.all([
+      fetch('/api/vault'),
+      fetch('/api/vault/bindings'),
+    ])
+    const secretsData = await secretsRes.json()
+    const bindingsData = await bindingsRes.json()
+    _vaultSecrets = secretsData.secrets || []
+    _vaultBindings = bindingsData.bindings || []
+    document.getElementById('vaultStatTotal').textContent = String(_vaultSecrets.length)
+    document.getElementById('vaultStatBindings').textContent = String(_vaultBindings.length)
+    renderVaultGrid(_vaultSecrets)
+    await Promise.all([loadSshKeys(), loadSshServers()])
+  } catch { /* ignore */ }
+}
+
+function renderVaultGrid(secrets) {
+  const list = document.getElementById('vaultPageList')
+  const empty = document.getElementById('vaultPageEmpty')
+  list.innerHTML = ''
+  if (secrets.length === 0) { empty.hidden = false; return }
+  empty.hidden = true
+  for (const s of secrets) {
+    const card = document.createElement('div')
+    card.className = 'vault-card'
+    const date = new Date(s.updatedAt).toLocaleDateString('hu-HU')
+    const bindingCount = _vaultBindings.filter(b => b.vaultSecretId === s.id).length
+    const bindingBadge = bindingCount > 0 ? `<span class="vault-binding-badge" title="${bindingCount} kotes">${bindingCount} kotes</span>` : ''
+    card.innerHTML = `<div class="vault-card-header"><div class="vault-card-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div><div class="vault-card-title"><div class="vault-card-id">${escapeHtml(s.id)} ${bindingBadge}</div>${s.label !== s.id ? `<div class="vault-card-label">${escapeHtml(s.label)}</div>` : ''}</div><div class="vault-card-meta">${date}</div></div><div class="vault-card-actions"><button class="btn-secondary btn-compact vault-card-reveal" data-id="${escapeHtml(s.id)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>${t('vault.btn.show')}</button><button class="btn-secondary btn-compact vault-card-edit" data-id="${escapeHtml(s.id)}" data-label="${escapeHtml(s.label)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>${t('vault.btn.edit')}</button><button class="btn-secondary btn-compact vault-card-delete" data-id="${escapeHtml(s.id)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>${t('vault.btn.delete')}</button></div>`
+    list.appendChild(card)
+  }
+  list.querySelectorAll('.vault-card-reveal').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-id')
+      const card = btn.closest('.vault-card')
+      const existing = card.querySelector('.vault-card-value')
+      if (existing) { existing.remove(); btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> ${t('vault.btn.show')}`; return }
+      const res = await fetch(`/api/vault/${encodeURIComponent(id)}`)
+      const data = await res.json()
+      if (data.value) {
+        const valEl = document.createElement('div')
+        valEl.className = 'vault-card-value'
+        valEl.textContent = data.value
+        card.appendChild(valEl)
+        btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg> ${t('vault.btn.hide')}`
+      }
+    })
+  })
+  list.querySelectorAll('.vault-card-edit').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-id')
+      const label = btn.getAttribute('data-label')
+      const card = btn.closest('.vault-card')
+      const existing = card.querySelector('.vault-card-edit-form')
+      if (existing) { existing.remove(); return }
+      card.querySelector('.vault-card-value')?.remove()
+      const res = await fetch(`/api/vault/${encodeURIComponent(id)}`)
+      const data = await res.json()
+      if (!data.value) return
+      const form = document.createElement('div')
+      form.className = 'vault-card-edit-form'
+      form.innerHTML = `<input type="password" class="input vault-edit-value" value="${escapeHtml(data.value)}" style="font-size:13px;margin-bottom:6px"><button class="btn-primary btn-compact vault-edit-save">${t('vault.btn.save')}</button> <button class="btn-secondary btn-compact vault-edit-cancel">${t('vault.btn.cancel')}</button>`
+      card.appendChild(form)
+      const input = form.querySelector('.vault-edit-value')
+      input.focus()
+      input.select()
+      form.querySelector('.vault-edit-cancel').addEventListener('click', () => form.remove())
+      form.querySelector('.vault-edit-save').addEventListener('click', async () => {
+        const newVal = input.value
+        if (!newVal) return
+        const saveBtn = form.querySelector('.vault-edit-save')
+        saveBtn.disabled = true
+        saveBtn.textContent = '...'
+        const res = await fetch('/api/vault', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, label, value: newVal }),
+        })
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}))
+          showToast('Frissítés sikertelen: ' + (e.error || res.status))
+          saveBtn.disabled = false
+          saveBtn.textContent = 'Mentés'
+          return
+        }
+        form.remove()
+        showToast('Kulcs frissitve es szinkronizalva')
+        loadVaultPage()
+        loadVault()
+      })
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') form.querySelector('.vault-edit-save').click()
+        if (e.key === 'Escape') form.remove()
+      })
+    })
+  })
+  list.querySelectorAll('.vault-card-delete').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-id')
+      if (!confirm(`Torlod: ${id}?`)) return
+      const res = await fetch(`/api/vault/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!res.ok) { showToast('Törlés sikertelen'); return }
+      loadVaultPage()
+      loadVault()
+    })
+  })
+}
+
+;(function wireVaultPage() {
+  const newBtn = document.getElementById('vaultPageNewBtn')
+  const panel = document.getElementById('vaultAddPanel')
+  const closeBtn = document.getElementById('vaultAddPanelClose')
+  const addBtn = document.getElementById('vaultPageAddBtn')
+  if (!newBtn || !panel) return
+
+  newBtn.addEventListener('click', () => {
+    panel.hidden = !panel.hidden
+    if (!panel.hidden) document.getElementById('vaultPageIdInput').focus()
+  })
+  closeBtn?.addEventListener('click', () => { panel.hidden = true })
+
+  addBtn.addEventListener('click', async () => {
+    const id = document.getElementById('vaultPageIdInput').value.trim()
+    const label = document.getElementById('vaultPageLabelInput').value.trim() || id
+    const value = document.getElementById('vaultPageValueInput').value
+    if (!id || !value) return
+    addBtn.disabled = true
+    await fetch('/api/vault', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, label, value }),
+    })
+    document.getElementById('vaultPageIdInput').value = ''
+    document.getElementById('vaultPageLabelInput').value = ''
+    document.getElementById('vaultPageValueInput').value = ''
+    addBtn.disabled = false
+    panel.hidden = true
+    loadVaultPage()
+    loadVault()
+  })
+  document.getElementById('vaultPageValueInput')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') addBtn.click() })
+
+  document.getElementById('vaultSearchInput')?.addEventListener('input', (e) => {
+    const q = e.target.value.toLowerCase().trim()
+    if (!q) { renderVaultGrid(_vaultSecrets); return }
+    renderVaultGrid(_vaultSecrets.filter(s => s.id.toLowerCase().includes(q) || s.label.toLowerCase().includes(q)))
+  })
+})()
+
+// --- Vault Binding modal ---
+;(function wireVaultBind() {
+  const bindBtn = document.getElementById('vaultBindBtn')
+  const overlay = document.getElementById('vaultBindOverlay')
+  const closeBtn = document.getElementById('vaultBindClose')
+  const saveBtn = document.getElementById('vaultBindSaveBtn')
+  const secretSelect = document.getElementById('vaultBindSecret')
+  const serverSelect = document.getElementById('vaultBindServer')
+  const envVarInput = document.getElementById('vaultBindEnvVar')
+  const statusEl = document.getElementById('vaultBindStatus')
+  if (!bindBtn || !overlay) return
+
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(overlay) })
+  closeBtn.addEventListener('click', () => { closeModal(overlay) })
+
+  bindBtn.addEventListener('click', async () => {
+    try {
+      statusEl.hidden = true
+      envVarInput.value = ''
+
+      const [secretsRes, connectorsRes] = await Promise.all([
+        fetch('/api/vault'),
+        fetch('/api/connectors'),
+      ])
+      const secrets = (await secretsRes.json()).secrets || []
+      const connectors = await connectorsRes.json()
+
+      secretSelect.innerHTML = ''
+      for (const s of secrets) {
+        const opt = document.createElement('option')
+        opt.value = s.id
+        opt.textContent = s.label !== s.id ? `${s.id} (${s.label})` : s.id
+        secretSelect.appendChild(opt)
+      }
+      if (secrets.length === 0) {
+        const opt = document.createElement('option')
+        opt.textContent = '-- Nincs vault kulcs --'
+        opt.disabled = true
+        secretSelect.appendChild(opt)
+      }
+
+      const mcpConnectors = connectors.filter(c => c.source !== 'plugin' && c.source !== 'claude.ai')
+      serverSelect.innerHTML = ''
+      for (const c of mcpConnectors) {
+        const opt = document.createElement('option')
+        opt.value = c.name
+        opt.textContent = c.scope !== 'global' ? `${c.name} (${c.scope})` : c.name
+        serverSelect.appendChild(opt)
+      }
+      if (mcpConnectors.length === 0) {
+        const opt = document.createElement('option')
+        opt.textContent = '-- Nincs MCP szerver --'
+        opt.disabled = true
+        serverSelect.appendChild(opt)
+      }
+
+      openModal(overlay)
+    } catch (err) {
+      console.error('Vault bind modal error:', err)
+      showToast('Hiba a hozzarendeles betoltesekor: ' + err.message)
+    }
+  })
+
+  saveBtn.addEventListener('click', async () => {
+    const vaultSecretId = secretSelect.value
+    const serverName = serverSelect.value
+    const envVar = envVarInput.value.trim()
+    if (!vaultSecretId || !serverName || !envVar) {
+      statusEl.textContent = 'Minden mezo kitoltese kotelezo'
+      statusEl.className = 'vault-bind-status error'
+      statusEl.hidden = false
+      return
+    }
+
+    saveBtn.disabled = true
+    saveBtn.textContent = t('connectors.save_btn')
+    try {
+      const res = await fetch('/api/vault/bindings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vaultSecretId, envVar, serverName }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        statusEl.textContent = `Hozzarendelve! ${data.synced || 0} fajl frissitve.`
+        statusEl.className = 'vault-bind-status success'
+        statusEl.hidden = false
+        loadVaultPage()
+        loadVault()
+        setTimeout(() => { closeModal(overlay) }, 1500)
+      } else {
+        statusEl.textContent = data.error || 'Hiba tortent'
+        statusEl.className = 'vault-bind-status error'
+        statusEl.hidden = false
+      }
+    } catch (err) {
+      statusEl.textContent = 'Halozati hiba'
+      statusEl.className = 'vault-bind-status error'
+      statusEl.hidden = false
+    } finally {
+      saveBtn.disabled = false
+      saveBtn.textContent = 'Hozzarendeles'
+    }
+  })
+})()
+
+// --- Vault Scan & Import ---
+;(function wireVaultScan() {
+  const scanBtn = document.getElementById('vaultScanBtn')
+  const syncBtn = document.getElementById('vaultSyncBtn')
+  const overlay = document.getElementById('vaultScanOverlay')
+  const closeBtn = document.getElementById('vaultScanClose')
+  const importBtn = document.getElementById('vaultScanImportBtn')
+  if (!scanBtn || !overlay) return
+
+  scanBtn.addEventListener('click', async () => {
+    scanBtn.disabled = true
+    scanBtn.textContent = 'Kereses...'
+    try {
+      const res = await fetch('/api/vault/scan')
+      const data = await res.json()
+      const findings = data.findings || []
+      renderScanResults(findings)
+      openModal(overlay)
+    } finally {
+      scanBtn.disabled = false
+      scanBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Scan &amp; Import'
+    }
+  })
+
+  closeBtn?.addEventListener('click', () => { closeModal(overlay) })
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(overlay) })
+
+  syncBtn?.addEventListener('click', async () => {
+    syncBtn.disabled = true
+    syncBtn.textContent = 'Szinkron...'
+    try {
+      const res = await fetch('/api/vault/sync', { method: 'POST' })
+      const data = await res.json()
+      if (data.updated > 0) {
+        showToast(`${data.updated} .mcp.json frissitve`)
+      } else {
+        showToast('Nincs szinkronizalando kotes')
+      }
+      if (data.errors?.length) {
+        showToast('Hibak: ' + data.errors.join(', '))
+      }
+    } finally {
+      syncBtn.disabled = false
+      syncBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Szinkron'
+    }
+  })
+
+  function renderScanResults(findings) {
+    const results = document.getElementById('vaultScanResults')
+    const empty = document.getElementById('vaultScanEmpty')
+    const footer = document.getElementById('vaultScanFooter')
+    results.innerHTML = ''
+
+    const actionable = findings.filter(f => !f.alreadyInVault)
+    if (actionable.length === 0) {
+      empty.hidden = false
+      footer.hidden = true
+      if (findings.length > 0) {
+        empty.textContent = `${findings.length} erzekeny ertek talalva, de mind mar a Vault-ban van.`
+      }
+      return
+    }
+    empty.hidden = true
+    footer.hidden = false
+
+    const grouped = new Map()
+    for (const f of actionable) {
+      const key = `${f.serverName}|${f.envVar}`
+      if (!grouped.has(key)) grouped.set(key, { ...f, allTargets: [] })
+      grouped.get(key).allTargets.push({ mcpFilePath: f.mcpFilePath, serverName: f.serverName })
+    }
+
+    for (const [key, f] of grouped) {
+      const row = document.createElement('div')
+      row.className = 'vault-scan-row'
+      row.innerHTML = `
+        <label class="vault-scan-check">
+          <input type="checkbox" checked data-key="${escapeHtml(key)}">
+        </label>
+        <div class="vault-scan-info">
+          <div class="vault-scan-server">${escapeHtml(f.serverName)}</div>
+          <div class="vault-scan-env">${escapeHtml(f.envVar)} = <code>${escapeHtml(f.maskedValue)}</code></div>
+          <div class="vault-scan-targets">${f.allTargets.length} fajlban</div>
+        </div>
+        <div class="vault-scan-id">
+          <input type="text" class="input vault-scan-vault-id" value="${escapeHtml(f.suggestedVaultId)}" data-key="${escapeHtml(key)}" style="font-size:12px;width:180px">
+        </div>
+      `
+      results.appendChild(row)
+    }
+  }
+
+  importBtn?.addEventListener('click', async () => {
+    const results = document.getElementById('vaultScanResults')
+    const rows = results.querySelectorAll('.vault-scan-row')
+    const imports = []
+
+    const scanRes = await fetch('/api/vault/scan')
+    const scanData = await scanRes.json()
+    const allFindings = scanData.findings || []
+
+    for (const row of rows) {
+      const cb = row.querySelector('input[type="checkbox"]')
+      if (!cb?.checked) continue
+      const key = cb.getAttribute('data-key')
+      const [serverName, envVar] = key.split('|')
+      const vaultIdInput = row.querySelector('.vault-scan-vault-id')
+      const vaultId = vaultIdInput?.value?.trim() || key
+
+      const matchingFindings = allFindings.filter(
+        f => f.serverName === serverName && f.envVar === envVar && !f.alreadyInVault,
+      )
+      if (matchingFindings.length === 0) continue
+
+      imports.push({
+        serverName,
+        envVar,
+        vaultId,
+        label: `${envVar} (${serverName})`,
+        createBinding: true,
+        targets: matchingFindings.map(f => ({ mcpFilePath: f.mcpFilePath, serverName: f.serverName })),
+      })
+    }
+
+    if (imports.length === 0) { showToast('Nincs kivalasztott elem'); return }
+
+    importBtn.disabled = true
+    importBtn.textContent = 'Importalas...'
+
+    try {
+      const res = await fetch('/api/vault/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imports }),
+      })
+      const data = await res.json()
+      if (data.imported > 0) {
+        showToast(`${data.imported} kulcs importalva, ${data.bound} kotes letrehozva`)
+      }
+      if (data.errors?.length) {
+        showToast('Hibak: ' + data.errors.join(', '))
+      }
+    } finally {
+      importBtn.disabled = false
+      importBtn.textContent = 'Kivalasztottak importalasa'
+    }
+    closeModal(overlay)
+    loadVaultPage()
+    loadVault()
+  })
+})()
+
+// --- External project paths management ---
+async function loadExternalPaths() {
+  try {
+    const res = await fetch('/api/connectors/external-paths')
+    const data = await res.json()
+    const paths = data.paths || []
+    document.getElementById('externalPathCount').textContent = String(paths.length)
+    const list = document.getElementById('externalPathList')
+    list.innerHTML = ''
+    for (const p of paths) {
+      const item = document.createElement('div')
+      item.className = 'connector-external-item'
+      item.innerHTML = `<span>${escapeHtml(p)}</span><button title="Torles">&times;</button>`
+      item.querySelector('button').addEventListener('click', async () => {
+        await fetch('/api/connectors/external-paths', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: p }),
+        })
+        loadExternalPaths()
+        loadConnectors()
+      })
+      list.appendChild(item)
+    }
+  } catch { /* ignore */ }
+}
+
+;(function wireExternalPaths() {
+  const toggle = document.getElementById('externalPathsToggle')
+  const body = document.getElementById('externalPathsBody')
+  if (!toggle || !body) return
+  toggle.addEventListener('click', () => {
+    const arrow = toggle.querySelector('.connector-scope-toggle')
+    if (body.hidden) { body.hidden = false; arrow.textContent = '▼' }
+    else { body.hidden = true; arrow.textContent = '▶' }
+  })
+  const addBtn = document.getElementById('externalPathAddBtn')
+  const input = document.getElementById('externalPathInput')
+  addBtn.addEventListener('click', async () => {
+    const val = input.value.trim()
+    if (!val) return
+    const res = await fetch('/api/connectors/external-paths', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: val }),
+    })
+    const data = await res.json()
+    if (data.error) { alert(data.error); return }
+    input.value = ''
+    loadExternalPaths()
+    loadConnectors()
+  })
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') addBtn.click() })
+})()
+
+async function openConnectorDetail(connector) {
+  document.getElementById('connectorDetailTitle').textContent = connector.name
+
+  // Fetch detailed info
+  try {
+    const res = await fetch(`/api/connectors/${encodeURIComponent(connector.name)}`)
+    const detail = await res.json()
+
+    const statusLabels = { connected: t('connectors.status.connected'), needs_auth: t('connectors.status.needs_auth'), failed: t('connectors.status.failed'), unknown: t('connectors.status.unknown') }
+    const statusColors = { connected: 'var(--success)', needs_auth: 'var(--accent)', failed: 'var(--danger)', unknown: 'var(--text-muted)' }
+
+    document.getElementById('connectorDetailInfo').innerHTML = `
+      <div class="connector-detail-row">
+        <span class="meta-label">Statusz</span>
+        <span class="meta-value" style="color:${statusColors[detail.status] || ''}">${statusLabels[detail.status] || detail.status}</span>
+      </div>
+      <div class="connector-detail-row">
+        <span class="meta-label">Hatokor</span>
+        <span class="meta-value">${escapeHtml(detail.scope || '-')}</span>
+      </div>
+      ${detail.type ? `<div class="connector-detail-row"><span class="meta-label">Tipus</span><span class="meta-value">${escapeHtml(detail.type)}</span></div>` : ''}
+      ${detail.command ? `<div class="connector-detail-row"><span class="meta-label">Parancs</span><span class="meta-value" style="font-family:monospace;font-size:12px">${escapeHtml(detail.command)} ${escapeHtml(detail.args || '')}</span></div>` : ''}
+      ${Object.keys(detail.env || {}).length ? `<div class="connector-detail-row"><span class="meta-label">Env</span><span class="meta-value" style="font-family:monospace;font-size:11px">${Object.entries(detail.env).map(([k,v]) => `${k}=${v}`).join(', ')}</span></div>` : ''}
+    `
+  } catch {
+    document.getElementById('connectorDetailInfo').innerHTML = `<p>${t('connectors.detail_error')}</p>`
+  }
+
+  try {
+    const [agentsRes, connectorsRes] = await Promise.all([
+      fetch('/api/schedules/agents'),
+      fetch('/api/connectors'),
+    ])
+    const allAgents = await agentsRes.json()
+    const allConnectors = await connectorsRes.json()
+    const assignedAgents = new Set()
+    for (const c of allConnectors) {
+      if (c.name === connector.name && c.source === 'agent') {
+        assignedAgents.add(c.scope.replace('agent:', ''))
+      }
+    }
+    const mainAgent = allAgents.find(a => a.name === mainAgentId())
+    const subAgents = allAgents.filter(a => a.name !== mainAgentId())
+
+    const listEl = document.getElementById('connectorAgentList')
+    listEl.innerHTML = ''
+    if (mainAgent) {
+      const item = document.createElement('div')
+      item.className = 'connector-agent-item connector-agent-auto'
+      item.innerHTML = `
+        <input type="checkbox" checked disabled title="${t('connectors.tooltip.global')}">
+        <label>${escapeHtml(mainAgent.label || mainAgent.name)} <span class="tag-auto">automatikus</span></label>
+      `
+      listEl.appendChild(item)
+    }
+    for (const agent of subAgents) {
+      const isAssigned = assignedAgents.has(agent.name)
+      const item = document.createElement('div')
+      item.className = 'connector-agent-item'
+      item.innerHTML = `
+        <input type="checkbox" id="assign-${agent.name}" value="${agent.name}" ${isAssigned ? 'checked' : ''}>
+        <label for="assign-${agent.name}">${escapeHtml(agent.label || agent.name)}</label>
+      `
+      listEl.appendChild(item)
+    }
+    if (subAgents.length === 0 && !mainAgent) {
+      listEl.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('connectors.no_agents')}</p>`
+    }
+  } catch {
+    document.getElementById('connectorAgentList').innerHTML = ''
+  }
+
+  // Delete button
+  document.getElementById('connectorDeleteBtn').onclick = async () => {
+    if (!confirm(`Biztosan torlod: ${connector.name}?`)) return
+    try {
+      await fetch(`/api/connectors/${encodeURIComponent(connector.name)}`, { method: 'DELETE' })
+      closeModal(connectorDetailOverlay)
+      showToast(t('connectors.toast.deleted'))
+      loadConnectors()
+    } catch {
+      showToast(t('common.error_delete'))
+    }
+  }
+
+  // Assign button
+  document.getElementById('connectorAssignBtn').onclick = async () => {
+    const checked = [...document.querySelectorAll('#connectorAgentList input:checked:not(:disabled)')].map(i => i.value)
+    const allVisible = [...document.querySelectorAll('#connectorAgentList input:not(:disabled)')].map(i => i.value)
+    try {
+      await fetch(`/api/connectors/${encodeURIComponent(connector.name)}/assign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agents: checked, allAgents: allVisible }),
+      })
+      showToast(t('connectors.toast.assignment_updated'))
+      closeModal(connectorDetailOverlay)
+      loadConnectors()
+    } catch {
+      showToast(t('connectors.toast.assignment_error'))
+    }
+  }
+
+  openModal(connectorDetailOverlay)
+}
+
+// ENV row management for new connector form
+document.getElementById('connectorEnvAddBtn').addEventListener('click', () => {
+  const list = document.getElementById('connectorEnvList')
+  const row = document.createElement('div')
+  row.className = 'connector-env-row'
+  row.innerHTML = `
+    <input type="text" class="input env-key" placeholder="KULCS" style="flex:1">
+    <span style="color:var(--text-muted)">=</span>
+    <input type="text" class="input env-val" placeholder="${t('connectors.env_val_placeholder')}" style="flex:2">
+    <button type="button" class="btn-link" style="color:var(--danger);padding:2px 6px">&times;</button>
+  `
+  row.querySelector('button').addEventListener('click', () => row.remove())
+  list.appendChild(row)
+})
+
+async function loadNewConnectorAgents() {
+  try {
+    const res = await fetch('/api/schedules/agents')
+    const agents = await res.json()
+    const list = document.getElementById('connectorNewAssignList')
+    list.innerHTML = ''
+    for (const agent of agents) {
+      const item = document.createElement('div')
+      item.className = 'connector-agent-item'
+      item.innerHTML = `
+        <input type="checkbox" id="new-assign-${agent.name}" value="${agent.name}">
+        <label for="new-assign-${agent.name}">${escapeHtml(agent.label || agent.name)}</label>
+      `
+      list.appendChild(item)
+    }
+  } catch { /* ignore */ }
+}
+
+// Save new connector
+document.getElementById('saveConnectorBtn').addEventListener('click', async () => {
+  const name = document.getElementById('connectorName').value.trim()
+  const type = document.getElementById('connectorType').value
+  const scope = document.getElementById('connectorScope').value
+
+  if (!name) { document.getElementById('connectorName').focus(); return }
+
+  const data = { name, type, scope }
+  if (type === 'http' || type === 'sse') {
+    data.url = document.getElementById('connectorUrl').value.trim()
+    if (!data.url) { document.getElementById('connectorUrl').focus(); return }
+  } else {
+    data.command = document.getElementById('connectorCmd').value.trim()
+    data.args = document.getElementById('connectorArgs').value.trim()
+    if (!data.command) { document.getElementById('connectorCmd').focus(); return }
+    const envRows = document.querySelectorAll('#connectorEnvList .connector-env-row')
+    if (envRows.length > 0) {
+      const env = {}
+      for (const row of envRows) {
+        const k = row.querySelector('.env-key').value.trim()
+        const v = row.querySelector('.env-val').value.trim()
+        if (k) env[k] = v
+      }
+      if (Object.keys(env).length > 0) data.env = env
+    }
+  }
+
+  const btn = document.getElementById('saveConnectorBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  try {
+    const res = await fetch('/api/connectors', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    })
+    if (!res.ok) {
+      const err = await res.json()
+      throw new Error(err.error || 'Hiba')
+    }
+    const result = await res.json()
+    const savedName = result.name || name
+
+    const checkedAgents = Array.from(document.querySelectorAll('#connectorNewAssignList input[type=checkbox]:checked')).map(cb => cb.value)
+    const allAgents = Array.from(document.querySelectorAll('#connectorNewAssignList input[type=checkbox]')).map(cb => cb.value)
+    if (checkedAgents.length > 0) {
+      await fetch(`/api/connectors/${encodeURIComponent(savedName)}/assign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agents: checkedAgents, allAgents }),
+      }).catch(() => {})
+    }
+
+    closeModal(connectorModalOverlay)
+    if (result.nameChanged) {
+      showToast(t('connectors.toast.added', { name: savedName }))
+    } else {
+      showToast(t('connectors.toast.created'))
+    }
+    loadConnectors()
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+// === Helpers ===
+function escapeHtml(str) {
+  const d = document.createElement('div')
+  d.textContent = str
+  // textContent->innerHTML escapes & < > but NOT quotes. Encode quotes too so
+  // the result is safe in ATTRIBUTE contexts as well as text nodes -- several
+  // renderers interpolate escapeHtml() output into data-*/title/value="..."
+  // attributes, where a surviving " would allow an attribute breakout.
+  return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+// ============================================================
+// === Status ===
+// ============================================================
+
+// Statuspage component status -> short label for non-operational states.
+const STATUS_COMPONENT_LABELS = {
+  operational: () => t('status.comp.operational'),
+  degraded_performance: () => t('status.comp.degraded'),
+  partial_outage: () => t('status.comp.partial_outage'),
+  major_outage: () => t('status.comp.major_outage'),
+  under_maintenance: () => t('status.comp.maintenance'),
+}
+
+document.getElementById('refreshStatusBtn').addEventListener('click', loadStatus)
+
+async function loadStatus() {
+  const overallEl = document.getElementById('statusOverall')
+  const gridEl = document.getElementById('statusServiceGrid')
+  const listEl = document.getElementById('statusIncidentList')
+
+  overallEl.className = 'status-overall unknown'
+  overallEl.textContent = t('status.loading')
+  gridEl.innerHTML = ''
+  listEl.innerHTML = ''
+
+  try {
+    const res = await fetch('/api/status')
+    const data = await res.json()
+
+    // Overall status
+    const overallLabels = {
+      operational: () => t('status.overall.operational'),
+      degraded: () => t('status.overall.degraded'),
+      unknown: () => t('status.overall.unknown'),
+    }
+    overallEl.className = `status-overall ${data.overall}`
+    const overallLabelRaw = overallLabels[data.overall]
+    overallEl.textContent = overallLabelRaw ? (typeof overallLabelRaw === 'function' ? overallLabelRaw() : overallLabelRaw) : data.overall
+
+    // Services grid: real per-service status from the Statuspage components API
+    // (data.components). No more inventing a service list and substring-matching
+    // incident text -- if the components feed is unavailable we say so honestly
+    // instead of rendering a fake all-green grid.
+    const components = Array.isArray(data.components) ? data.components : []
+    if (components.length === 0) {
+      gridEl.innerHTML = `<div class="status-service-empty" style="color:var(--text-muted);font-size:13px">${t('status.no_components')}</div>`
+    } else {
+      for (const c of components) {
+        const ok = c.status === 'operational'
+        const div = document.createElement('div')
+        div.className = 'status-service'
+        div.innerHTML = `
+          <div class="status-service-dot ${ok ? 'operational' : 'degraded'}"></div>
+          <span class="status-service-name">${escapeHtml(c.name)}</span>
+          ${ok ? '' : `<span class="status-service-state" style="margin-left:auto;font-size:11px;color:var(--text-muted)">${escapeHtml((typeof STATUS_COMPONENT_LABELS[c.status] === 'function' ? STATUS_COMPONENT_LABELS[c.status]() : STATUS_COMPONENT_LABELS[c.status]) || c.status)}</span>`}
+        `
+        gridEl.appendChild(div)
+      }
+    }
+
+    // Incidents
+    if (data.incidents.length === 0) {
+      listEl.innerHTML = `<div class="status-loading">${t('status.no_incidents')}</div>`
+    } else {
+      for (const inc of data.incidents) {
+        const statusLabels = {
+          resolved: () => t('status.incident.resolved'),
+          monitoring: () => t('status.incident.monitoring'),
+          identified: () => t('status.incident.identified'),
+          investigating: () => t('status.incident.investigating'),
+        }
+        const div = document.createElement('div')
+        div.className = `status-incident ${inc.status}`
+        const date = new Date(inc.pubDate).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' })
+        div.innerHTML = `
+          <div class="status-incident-header">
+            <span class="status-incident-title">${escapeHtml(inc.title)}</span>
+            <span class="status-incident-badge ${inc.status}">${(typeof statusLabels[inc.status] === 'function' ? statusLabels[inc.status]() : statusLabels[inc.status]) || inc.status}</span>
+          </div>
+          <div class="status-incident-desc">${escapeHtml(inc.description.slice(0, 300))}</div>
+          <div class="status-incident-date">${date}</div>
+        `
+        listEl.appendChild(div)
+      }
+    }
+  } catch (err) {
+    overallEl.className = 'status-overall unknown'
+    overallEl.textContent = 'Nem sikerult betolteni a statuszt'
+  }
+}
+
+// ============================================================
+// === CostOps (v0.1, PR #524): local cost ledger summary ===
+// ============================================================
+
+document.getElementById('refreshCostsBtn').addEventListener('click', loadCosts)
+
+async function loadCosts() {
+  const el = document.getElementById('costsContent')
+  const mutedStyle = 'color:var(--text-muted);font-size:13px'
+  el.innerHTML = `<div style="${mutedStyle}">${t('costs.loading')}</div>`
+  try {
+    const res = await fetch('/api/costs/summary')
+    const s = await res.json()
+    if (!res.ok) throw new Error(s?.error || 'request failed')
+
+    const fmtMoney = (n) => (typeof n === 'number' ? n.toLocaleString('hu-HU') : '—') + ' ' + escapeHtml(s.currency || '')
+
+    let html = ''
+
+    if (!s.config_present) {
+      html += `<div style="${mutedStyle};margin-bottom:12px">${t('costs.no_config')}</div>`
+    }
+
+    html += `<div class="overview-stats">
+      <div class="overview-stat"><div class="overview-stat-value">${fmtMoney(s.current_spend)}</div><div class="overview-stat-label">${t('costs.current_spend')}</div></div>
+      <div class="overview-stat"><div class="overview-stat-value">${fmtMoney(s.forecast_month_end)}</div><div class="overview-stat-label">${t('costs.forecast')}</div></div>
+      <div class="overview-stat"><div class="overview-stat-value">${escapeHtml(s.month || '—')}</div><div class="overview-stat-label">${t('costs.month')}</div></div>
+    </div>`
+
+    if (s.budget) {
+      const pct = Math.round((s.budget.used_pct || 0) * 100)
+      const color = s.budget.status === 'hard' ? 'var(--danger,#e74c3c)' : s.budget.status === 'warning' ? 'var(--warn,#e0a800)' : 'var(--text-muted)'
+      html += `<div style="margin-top:16px;padding:12px 16px;border:1px solid var(--border,#333);border-radius:8px">
+        <div style="font-weight:600;margin-bottom:6px">${t('costs.budget_title')}: ${escapeHtml(s.budget.id)} (${fmtMoney(s.budget.amount)})</div>
+        <div style="${mutedStyle}">${t('costs.budget_used')}: <strong style="color:${color}">${pct}%</strong></div>
+      </div>`
+    }
+
+    const sources = Array.isArray(s.all_sources) ? s.all_sources : []
+    if (sources.length === 0) {
+      html += `<div style="${mutedStyle};margin-top:12px">${t('costs.no_sources')}</div>`
+    } else {
+      html += `<div style="overflow-x:auto;margin-top:16px"><table style="width:100%;border-collapse:collapse">
+        <thead><tr style="text-align:left;border-bottom:1px solid var(--border,#333)">
+          <th style="padding:6px 8px">${t('costs.source_name')}</th><th style="padding:6px 8px">${t('costs.source_provider')}</th><th style="padding:6px 8px">${t('costs.source_spend')}</th>
+        </tr></thead>
+        <tbody>${sources.map((src) => `<tr style="border-bottom:1px solid var(--border,#222)">
+          <td style="padding:6px 8px">${escapeHtml(src.name)}</td>
+          <td style="padding:6px 8px;${mutedStyle}">${escapeHtml(src.provider)}</td>
+          <td style="padding:6px 8px">${fmtMoney(src.spend)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>`
+    }
+
+    html += `<p style="${mutedStyle};margin-top:16px">${t('costs.token_usage_note')} (${(s.token_usage?.calls ?? 0)} ${t('costs.calls')}, ${(s.token_usage?.input_tokens ?? 0) + (s.token_usage?.output_tokens ?? 0)} tokens)</p>`
+
+    el.innerHTML = html
+  } catch (err) {
+    el.innerHTML = `<div style="${mutedStyle}">${t('costs.load_failed')}</div>`
+  }
+}
+
+// ============================================================
+// === Memory Import ===
+// ============================================================
+
+const memImportOverlay = document.getElementById('memImportOverlay')
+const memImportFileInput = document.getElementById('memImportFile')
+const memImportFileArea = document.getElementById('memImportFileArea')
+const memImportFileNames = document.getElementById('memImportFileNames')
+const memImportSaveBtn = document.getElementById('memImportSaveBtn')
+const memImportProgress = document.getElementById('memImportProgress')
+const memImportStatus = document.getElementById('memImportStatus')
+const memImportResult = document.getElementById('memImportResult')
+let memImportFiles = []
+
+// Open import modal
+document.getElementById('memImportOpenBtn').addEventListener('click', () => {
+  memImportFiles = []
+  memImportFileInput.value = ''
+  memImportFileNames.textContent = ''
+  memImportProgress.hidden = true
+  memImportResult.hidden = true
+  memImportSaveBtn.querySelector('.btn-text').hidden = false
+  memImportSaveBtn.querySelector('.btn-loading').hidden = true
+  memImportSaveBtn.disabled = false
+
+  // Populate agent dropdown from existing agents
+  const importAgentSel = document.getElementById('memImportAgent')
+  const memAgentSel = document.getElementById('memAgent')
+  importAgentSel.innerHTML = memAgentSel.innerHTML
+  openModal(memImportOverlay)
+})
+
+// Close import modal
+document.getElementById('memImportClose').addEventListener('click', () => closeModal(memImportOverlay))
+memImportOverlay.addEventListener('click', (e) => { if (e.target === memImportOverlay) closeModal(memImportOverlay) })
+
+// File area click -> trigger file input
+memImportFileArea.addEventListener('click', () => memImportFileInput.click())
+
+// Drag and drop
+memImportFileArea.addEventListener('dragover', (e) => {
+  e.preventDefault()
+  memImportFileArea.style.borderColor = 'var(--accent)'
+})
+memImportFileArea.addEventListener('dragleave', () => {
+  memImportFileArea.style.borderColor = ''
+})
+memImportFileArea.addEventListener('drop', (e) => {
+  e.preventDefault()
+  memImportFileArea.style.borderColor = ''
+  const files = Array.from(e.dataTransfer.files).filter(f =>
+    f.name.endsWith('.md') || f.name.endsWith('.txt') || f.name.endsWith('.json')
+  )
+  if (files.length) {
+    memImportFiles = files
+    memImportFileNames.textContent = files.map(f => f.name).join(', ')
+  }
+})
+
+// File input change
+memImportFileInput.addEventListener('change', () => {
+  memImportFiles = Array.from(memImportFileInput.files)
+  memImportFileNames.textContent = memImportFiles.map(f => f.name).join(', ')
+})
+
+// Parse file into chunks (client-side)
+async function parseFileToChunks(file) {
+  const text = await file.text()
+  const ext = file.name.split('.').pop().toLowerCase()
+
+  if (ext === 'json') {
+    try {
+      const data = JSON.parse(text)
+      if (Array.isArray(data)) {
+        return data.map(item => {
+          if (typeof item === 'object' && item !== null) return item.content || item.text || item.value || JSON.stringify(item)
+          return String(item)
+        }).filter(s => s.length > 20).map(s => s.slice(0, 2000))
+      }
+      return Object.entries(data).map(([k, v]) => `${k}: ${v}`).filter(s => s.length > 20).map(s => s.slice(0, 2000))
+    } catch { return [text.slice(0, 2000)] }
+  }
+
+  if (ext === 'md') {
+    return text.split(/\n(?=##?\s)/).map(s => s.trim()).filter(s => s.length > 20).map(s => s.slice(0, 2000))
+  }
+
+  // txt: split by paragraphs
+  return text.split(/\n\n+/).map(s => s.trim()).filter(s => s.length > 20).map(s => s.slice(0, 2000))
+}
+
+// Import button click
+memImportSaveBtn.addEventListener('click', async () => {
+  if (!memImportFiles.length) {
+    showToast(t('memories.toast.select_files'))
+    return
+  }
+
+  memImportSaveBtn.querySelector('.btn-text').hidden = true
+  memImportSaveBtn.querySelector('.btn-loading').hidden = false
+  memImportSaveBtn.disabled = true
+  memImportProgress.hidden = false
+  memImportResult.hidden = true
+  memImportStatus.textContent = t('memories.import.processing')
+
+  try {
+    // Parse all files into chunks
+    let allChunks = []
+    for (const file of memImportFiles) {
+      const chunks = await parseFileToChunks(file)
+      allChunks = allChunks.concat(chunks)
+    }
+
+    if (allChunks.length === 0) {
+      memImportProgress.hidden = true
+      memImportSaveBtn.querySelector('.btn-text').hidden = false
+      memImportSaveBtn.querySelector('.btn-loading').hidden = true
+      memImportSaveBtn.disabled = false
+      showToast(t('memories.toast.no_content'))
+      return
+    }
+
+    memImportStatus.textContent = t('memories.import.importing', { n: allChunks.length })
+
+    const agentId = document.getElementById('memImportAgent').value || mainAgentId()
+    const resp = await fetch('/api/memories/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: agentId, chunks: allChunks }),
+    })
+    const data = await resp.json()
+
+    memImportProgress.hidden = true
+
+    if (data.ok) {
+      const s = data.stats || {}
+      memImportResult.hidden = false
+      memImportResult.innerHTML = `
+        <div style="color:var(--text-primary);font-weight:600;margin-bottom:8px">${t('memories.import.done_title')}</div>
+        <div style="font-size:13px;color:var(--text-secondary)">
+          ${t('memories.import.done_sub', { n: `<strong>${data.imported}</strong>` })}<br>
+          Hot: ${s.hot || 0} | Warm: ${s.warm || 0} | Cold: ${s.cold || 0} | Shared: ${s.shared || 0}
+        </div>
+      `
+      showToast(t('memories.toast.imported', { n: data.imported }))
+      loadMemories()
+      loadMemStats()
+    } else {
+      showToast('Hiba: ' + (data.error || 'Ismeretlen'))
+    }
+  } catch (err) {
+    memImportProgress.hidden = true
+    showToast(t('memories.toast.import_error'))
+  }
+
+  memImportSaveBtn.querySelector('.btn-text').hidden = false
+  memImportSaveBtn.querySelector('.btn-loading').hidden = true
+  memImportSaveBtn.disabled = false
+})
+
+// ============================================================
+// === Költöztetés (Migration) ===
+// ============================================================
+
+let migrateFindings = []
+
+async function loadMigrateAgents() {
+  try {
+    const res = await fetch('/api/schedules/agents')
+    const agents = await res.json()
+    const sel = document.getElementById('migrateAgent')
+    sel.innerHTML = ''
+    for (const a of agents) {
+      const opt = document.createElement('option')
+      opt.value = a.name
+      opt.textContent = a.label || a.name
+      sel.appendChild(opt)
+    }
+  } catch {}
+}
+
+// Step 1: Scan
+document.getElementById('migrateScanBtn').addEventListener('click', async () => {
+  const path = document.getElementById('migratePath').value.trim()
+  if (!path) { document.getElementById('migratePath').focus(); return }
+
+  const btn = document.getElementById('migrateScanBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  try {
+    const res = await fetch('/api/migrate/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourcePath: path }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Hiba')
+
+    migrateFindings = data.findings
+    renderMigrateFindings(data)
+
+    document.getElementById('migrateStep1').hidden = true
+    document.getElementById('migrateStep2').hidden = false
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+function renderMigrateFindings(data) {
+  const findingsEl = document.getElementById('migrateFindings')
+  const summaryEl = document.getElementById('migrateSummary')
+
+  const typeIcons = {
+    'personality': '\uD83C\uDFAD',
+    'profile': '\uD83D\uDC64',
+    'memory': '\uD83E\uDDE0',
+    'memory-hot': '\uD83D\uDD25',
+    'memory-warm': '\uD83C\uDF21\uFE0F',
+    'memory-cold': '\u2744\uFE0F',
+    'heartbeat': '\uD83D\uDC93',
+    'config': '\u2699\uFE0F',
+    'daily-log': '\uD83D\uDCCB',
+    'schedule': '\u23F0',
+  }
+  const typeLabels = {
+    'personality': () => t('migrate.type.personality'),
+    'profile': () => t('migrate.type.profile'),
+    'memory': () => t('migrate.type.memory'),
+    'memory-hot': () => t('migrate.type.memory_hot'),
+    'memory-warm': () => t('migrate.type.memory_warm'),
+    'memory-cold': () => t('migrate.type.memory_cold'),
+    'heartbeat': () => t('migrate.type.heartbeat'),
+    'config': () => t('migrate.type.config'),
+    'daily-log': () => t('migrate.type.daily_log'),
+    'schedule': () => t('migrate.type.schedule'),
+  }
+
+  findingsEl.innerHTML = ''
+  for (const f of data.findings) {
+    const div = document.createElement('div')
+    div.className = 'migrate-finding'
+    const sizeKB = Math.round(f.size / 1024 * 10) / 10
+    div.innerHTML = `
+      <span class="migrate-finding-icon">${typeIcons[f.type] || '\uD83D\uDCC4'}</span>
+      <div class="migrate-finding-info">
+        <div class="migrate-finding-name">${escapeHtml(f.name)}</div>
+        <div class="migrate-finding-type">${(typeof typeLabels[f.type] === 'function' ? typeLabels[f.type]() : typeLabels[f.type]) || f.type}</div>
+      </div>
+      <span class="migrate-finding-size">${sizeKB} KB</span>
+    `
+    findingsEl.appendChild(div)
+  }
+
+  if (data.findings.length === 0) {
+    findingsEl.innerHTML = `<div style="color:var(--text-muted);padding:20px;text-align:center">${t('migrate.empty')}</div>`
+  }
+
+  const s = data.summary
+  summaryEl.innerHTML = `
+    <div class="stat-card"><div class="stat-value">${s.total}</div><div class="stat-label">${t('migrate.stat.total')}</div></div>
+    <div class="stat-card"><div class="stat-value">${s.memory}</div><div class="stat-label">${t('migrate.stat.memory')}</div></div>
+    <div class="stat-card"><div class="stat-value">${s.personality + s.profile}</div><div class="stat-label">${t('migrate.stat.profile')}</div></div>
+    <div class="stat-card"><div class="stat-value">${s.config + s.heartbeat}</div><div class="stat-label">${t('migrate.stat.config')}</div></div>
+  `
+}
+
+// Back button
+document.getElementById('migrateBackBtn').addEventListener('click', () => {
+  document.getElementById('migrateStep1').hidden = false
+  document.getElementById('migrateStep2').hidden = true
+})
+
+// Step 2: Run migration
+document.getElementById('migrateRunBtn').addEventListener('click', async () => {
+  const agentId = document.getElementById('migrateAgent').value
+  const btn = document.getElementById('migrateRunBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  try {
+    const res = await fetch('/api/migrate/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ findings: migrateFindings, agentId }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Hiba')
+
+    // Show results
+    document.getElementById('migrateStep2').hidden = true
+    document.getElementById('migrateStep3').hidden = false
+
+    const resultEl = document.getElementById('migrateResult')
+    resultEl.innerHTML = `
+      <h4>${t('migrate.result.title')}</h4>
+      <div class="migrate-result-stats">
+        <div class="migrate-result-stat"><div class="migrate-result-stat-value">${data.imported}</div><div class="migrate-result-stat-label">${t('migrate.result.imported')}</div></div>
+        <div class="migrate-result-stat"><div class="migrate-result-stat-value" style="color:#dc3c3c">${data.stats.hot}</div><div class="migrate-result-stat-label">Hot</div></div>
+        <div class="migrate-result-stat"><div class="migrate-result-stat-value" style="color:#d97757">${data.stats.warm}</div><div class="migrate-result-stat-label">Warm</div></div>
+        <div class="migrate-result-stat"><div class="migrate-result-stat-value" style="color:#6a9bcc">${data.stats.cold}</div><div class="migrate-result-stat-label">Cold</div></div>
+        <div class="migrate-result-stat"><div class="migrate-result-stat-value" style="color:#9a8a30">${data.stats.shared}</div><div class="migrate-result-stat-label">Shared</div></div>
+      </div>
+      ${data.details ? '<div class="migrate-result-details">' + data.details.map(d => escapeHtml(d)).join('<br>') + '</div>' : ''}
+    `
+  } catch (err) {
+    showToast(`Hiba: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+// New migration
+document.getElementById('migrateNewBtn').addEventListener('click', () => {
+  document.getElementById('migrateStep1').hidden = false
+  document.getElementById('migrateStep2').hidden = true
+  document.getElementById('migrateStep3').hidden = true
+})
+
+// ============================================================
+// === Fleet Migration ===
+// ============================================================
+
+// Holds the last successfully parsed fleet JSON text (for apply after dry-run)
+let fleetLastBody = null
+
+document.getElementById('fleetExportBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('fleetExportBtn')
+  const password = document.getElementById('fleetExportPassword').value.trim()
+
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  try {
+    const headers = {}
+    if (password) headers['X-Vault-Password'] = password
+
+    const res = await fetch('/api/fleet/export', { headers })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      showToast(data.error || t('fleet.export.error'))
+      return
+    }
+
+    const blob = await res.blob()
+    const cd = res.headers.get('Content-Disposition') || ''
+    const nameMatch = cd.match(/filename="?([^";\s]+)"?/)
+    const filename = nameMatch ? nameMatch[1] : `fleet-export-${new Date().toISOString().slice(0, 10)}.json`
+
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+
+    showToast(t('fleet.export.success'))
+  } catch (err) {
+    showToast(`${t('fleet.export.error')}: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+document.getElementById('fleetDryRunBtn').addEventListener('click', async () => {
+  const fileInput = document.getElementById('fleetImportFile')
+  if (!fileInput.files.length) {
+    showToast(t('fleet.import.no_file'))
+    return
+  }
+
+  const btn = document.getElementById('fleetDryRunBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  const applyBtn = document.getElementById('fleetApplyBtn')
+  applyBtn.disabled = true
+  fleetLastBody = null
+
+  const resultEl = document.getElementById('fleetDryRunResult')
+  resultEl.hidden = true
+  resultEl.innerHTML = ''
+
+  try {
+    const text = await fileInput.files[0].text()
+    // Validate JSON client-side first
+    try { JSON.parse(text) } catch { showToast(t('fleet.import.invalid_json')); return }
+
+    const password = document.getElementById('fleetImportPassword').value.trim()
+    const headers = { 'Content-Type': 'application/json' }
+    if (password) headers['X-Vault-Password'] = password
+
+    const res = await fetch('/api/fleet/import', { method: 'POST', headers, body: text })
+    const data = await res.json()
+
+    const wc = data.wouldCreate || {}
+    const hasErrors = data.errors && data.errors.length > 0
+    const hasWarnings = data.warnings && data.warnings.length > 0
+
+    resultEl.className = `fleet-dry-run-result ${hasErrors ? 'has-errors' : 'ok'}`
+    resultEl.hidden = false
+
+    const agentNames = Array.isArray(wc.agents) ? wc.agents : []
+    const agentLabel = agentNames.length
+      ? `${agentNames.length} (${agentNames.join(', ')})`
+      : '0'
+
+    resultEl.innerHTML = `
+      <div class="fleet-dry-run-title">${hasErrors ? '❌ ' + t('fleet.import.dryrun_errors') : '✅ ' + t('fleet.import.dryrun_ok')}</div>
+      ${!hasErrors ? `
+      <div class="fleet-dry-run-grid">
+        <div class="fleet-dry-run-stat">
+          <div class="fleet-dry-run-stat-value">${wc.mainAgent ? '✓' : '—'}</div>
+          <div class="fleet-dry-run-stat-label">${t('fleet.stat.main_agent')}</div>
+        </div>
+        <div class="fleet-dry-run-stat">
+          <div class="fleet-dry-run-stat-value">${agentNames.length}</div>
+          <div class="fleet-dry-run-stat-label">${t('fleet.stat.agents')}</div>
+        </div>
+        <div class="fleet-dry-run-stat">
+          <div class="fleet-dry-run-stat-value">${wc.memories ?? 0}</div>
+          <div class="fleet-dry-run-stat-label">${t('fleet.stat.memories')}</div>
+        </div>
+        <div class="fleet-dry-run-stat">
+          <div class="fleet-dry-run-stat-value">${wc.kanbanCards ?? 0}</div>
+          <div class="fleet-dry-run-stat-label">${t('fleet.stat.kanban')}</div>
+        </div>
+        <div class="fleet-dry-run-stat">
+          <div class="fleet-dry-run-stat-value">${wc.globalSkills ?? 0}</div>
+          <div class="fleet-dry-run-stat-label">${t('fleet.stat.skills')}</div>
+        </div>
+        <div class="fleet-dry-run-stat">
+          <div class="fleet-dry-run-stat-value">${wc.scheduledTasks ?? 0}</div>
+          <div class="fleet-dry-run-stat-label">${t('fleet.stat.tasks')}</div>
+        </div>
+      </div>
+      ${agentNames.length ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">${t('fleet.stat.agent_names')}: ${escapeHtml(agentNames.join(', '))}</div>` : ''}
+      ` : ''}
+      ${hasErrors ? `<div class="fleet-dry-run-errors">${data.errors.map(e => escapeHtml(e)).join('<br>')}</div>` : ''}
+      ${hasWarnings ? `<div class="fleet-dry-run-warnings">⚠️ ${data.warnings.map(w => escapeHtml(w)).join('<br>')}</div>` : ''}
+    `
+
+    if (!hasErrors) {
+      fleetLastBody = text
+      applyBtn.disabled = false
+    }
+  } catch (err) {
+    showToast(`${t('fleet.import.error')}: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+document.getElementById('fleetApplyBtn').addEventListener('click', async () => {
+  if (!fleetLastBody) return
+
+  if (!confirm(t('fleet.import.apply_confirm'))) return
+
+  const btn = document.getElementById('fleetApplyBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  const resultEl = document.getElementById('fleetDryRunResult')
+
+  try {
+    const password = document.getElementById('fleetImportPassword').value.trim()
+    const headers = { 'Content-Type': 'application/json' }
+    if (password) headers['X-Vault-Password'] = password
+
+    const res = await fetch('/api/fleet/import?apply=true', { method: 'POST', headers, body: fleetLastBody })
+    const data = await res.json()
+
+    if (!res.ok) throw new Error(data.error || t('fleet.import.error'))
+
+    const imp = data.imported || {}
+    const agentNames = Array.isArray(imp.agents) ? imp.agents : []
+
+    resultEl.className = 'fleet-apply-result'
+    resultEl.hidden = false
+    resultEl.innerHTML = `
+      <div class="fleet-apply-result-title">✅ ${t('fleet.import.apply_success')}</div>
+      <div>
+        ${imp.mainAgent ? `<div>${t('fleet.stat.main_agent')}: ✓</div>` : ''}
+        ${agentNames.length ? `<div>${t('fleet.stat.agents')}: ${escapeHtml(agentNames.join(', '))}</div>` : ''}
+        <div>${t('fleet.stat.memories')}: ${imp.memories ?? 0}</div>
+        <div>${t('fleet.stat.kanban')}: ${imp.kanbanCards ?? 0}</div>
+        <div>${t('fleet.stat.skills')}: ${imp.globalSkills ?? 0}</div>
+        <div>${t('fleet.stat.tasks')}: ${imp.scheduledTasks ?? 0}</div>
+      </div>
+    `
+
+    fleetLastBody = null
+    btn.disabled = true
+  } catch (err) {
+    showToast(`${t('fleet.import.error')}: ${err.message}`)
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  } finally {
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+// ============================================================
+// === Skills Page ===
+// ============================================================
+
+const skillsGrid = document.getElementById('skillsGrid')
+const skillsStats = document.getElementById('skillsStats')
+const skillsEmpty = document.getElementById('skillsEmpty')
+const skillDetailOverlay = document.getElementById('skillDetailOverlay')
+
+let globalSkills = []
+let localAgentSkills = []
+let skillsActiveFilter = 'all'
+let skillsSearchQuery = ''
+let skillsActiveCategory = 'all'
+
+function deriveSkillCategory(name) {
+  // Use the first dash-separated segment as the category group.
+  // "fleet-dashboard-api" -> "fleet", "morning-chain" -> "morning",
+  // "handoff" -> "handoff"
+  const seg = name.split(':').pop() || name  // strip plugin prefix
+  return seg.split('-')[0] || seg
+}
+
+function formatMtime(ms) {
+  if (!ms) return ''
+  const d = new Date(ms)
+  const pad = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}.${pad(d.getMonth() + 1)}.${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+document.getElementById('skillDetailClose').addEventListener('click', () => closeModal(skillDetailOverlay))
+skillDetailOverlay.addEventListener('click', (e) => { if (e.target === skillDetailOverlay) closeModal(skillDetailOverlay) })
+
+// Scope for the next skill create/import action. 'global' means the
+// Skills page opened the modal (write to ~/.claude/skills/); any other
+// value (or null) falls back to the legacy per-agent flow keyed off
+// `currentAgent`. Reset on modal close so a subsequent per-agent open
+// cannot inherit the global scope.
+let skillModalScope = null
+
+// Wire the Skills-page "Új skill" button to reuse the same skillModalOverlay
+// the per-agent Skill list uses. The save/import handlers branch on
+// skillModalScope so we don't have to duplicate the modal markup.
+const skillsPageNewBtn = document.getElementById('skillsPageNewBtn')
+if (skillsPageNewBtn) {
+  skillsPageNewBtn.addEventListener('click', () => {
+    skillModalScope = 'global'
+    document.getElementById('skillName').value = ''
+    document.getElementById('skillDescription').value = ''
+    skillFile = null
+    document.getElementById('skillFileName').textContent = ''
+    document.querySelectorAll('.skill-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.skillTab === 'create'))
+    document.getElementById('skillTabCreate').hidden = false
+    document.getElementById('skillTabImport').hidden = true
+    openModal(skillModalOverlay)
+    setTimeout(() => document.getElementById('skillName').focus(), 200)
+  })
+}
+
+async function loadGlobalSkills() {
+  skillsGrid.innerHTML = `<div class="connector-loading"><span class="spinner"></span> ${t('skills.loading')}</div>`
+  skillsStats.innerHTML = ''
+  try {
+    const [globalRes, localRes] = await Promise.all([
+      fetch('/api/skills'),
+      fetch('/api/skills/local'),
+    ])
+    globalSkills = await globalRes.json()
+    localAgentSkills = localRes.ok ? await localRes.json() : []
+    renderGlobalSkills()
+  } catch (err) {
+    console.error('Skills betoltes hiba:', err)
+    skillsGrid.innerHTML = `<div class="connector-loading">${t('skills.error')}</div>`
+  }
+}
+
+// Wire search, filter, and export controls once DOM is ready
+;(() => {
+  const searchEl = document.getElementById('skillsSearch')
+  if (searchEl) {
+    searchEl.addEventListener('input', () => {
+      skillsSearchQuery = searchEl.value.toLowerCase().trim()
+      renderSkillsSidebar()
+      renderGlobalSkillsGrid()
+    })
+  }
+
+  const filterBtns = document.getElementById('skillsFilterBtns')
+  if (filterBtns) {
+    filterBtns.addEventListener('click', (e) => {
+      const btn = e.target.closest('.skills-filter-btn')
+      if (!btn) return
+      filterBtns.querySelectorAll('.skills-filter-btn').forEach(b => b.classList.remove('active'))
+      btn.classList.add('active')
+      skillsActiveFilter = btn.dataset.filter || 'all'
+      skillsActiveCategory = 'all'
+      renderSkillsSidebar()
+      renderGlobalSkillsGrid()
+    })
+  }
+
+  const exportBtn = document.getElementById('skillsExportBtn')
+  if (exportBtn) {
+    exportBtn.addEventListener('click', () => {
+      const a = document.createElement('a')
+      a.href = '/api/skills/export'
+      a.download = 'skills-export.zip'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+    })
+  }
+})()
+
+function getSkillIcon(name) {
+  if (name.includes('factory') || name.includes('creator')) return '\u{1F3ED}'
+  if (name.includes('blog') || name.includes('post')) return '\u{1F4DD}'
+  if (name.includes('image') || name.includes('thumbnail') || name.includes('fal')) return '\u{1F3A8}'
+  if (name.includes('frontend') || name.includes('design')) return '\u{1F58C}\uFE0F'
+  if (name.includes('youtube') || name.includes('video') || name.includes('seo')) return '\u{1F3AC}'
+  if (name.includes('docx') || name.includes('doc')) return '\u{1F4C4}'
+  if (name.includes('skool')) return '\u{1F393}'
+  if (name.includes('skill')) return '\u{1F9E9}'
+  return '\u2699\uFE0F'
+}
+
+function renderSkillsSidebar() {
+  const sidebar = document.getElementById('skillsCategorySidebar')
+  if (!sidebar) return
+
+  // For the 'agent' filter, category counts come from localAgentSkills so the
+  // sidebar stays populated. All other filters draw from globalSkills as before.
+  const sourceFiltered = skillsActiveFilter === 'agent'
+    ? localAgentSkills
+    : skillsActiveFilter === 'all'
+      ? globalSkills
+      : globalSkills.filter(s => s.source === skillsActiveFilter)
+
+  const catCounts = new Map()
+  for (const s of sourceFiltered) {
+    const cat = deriveSkillCategory(s.name)
+    catCounts.set(cat, (catCounts.get(cat) || 0) + 1)
+  }
+
+  const cats = [...catCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+
+  sidebar.innerHTML = `
+    <div class="skills-cat-title">${t('skills.category.title')}</div>
+    <button class="skills-cat-btn${skillsActiveCategory === 'all' ? ' active' : ''}" data-cat="all">
+      ${t('skills.filter.all')} <span class="skills-cat-count">${sourceFiltered.length}</span>
+    </button>
+    ${cats.map(([cat, count]) => `
+      <button class="skills-cat-btn${skillsActiveCategory === cat ? ' active' : ''}" data-cat="${escapeHtml(cat)}">
+        ${escapeHtml(cat)} <span class="skills-cat-count">${count}</span>
+      </button>
+    `).join('')}
+  `
+
+  sidebar.addEventListener('click', (e) => {
+    const btn = e.target.closest('.skills-cat-btn')
+    if (!btn) return
+    skillsActiveCategory = btn.dataset.cat || 'all'
+    renderSkillsSidebar()
+    renderGlobalSkillsGrid()
+  })
+}
+
+function renderGlobalSkills() {
+  const userCount = globalSkills.filter(s => s.source === 'user').length
+  const pluginCount = globalSkills.filter(s => s.source === 'plugin').length
+
+  skillsStats.innerHTML = `
+    <div class="stat-card"><div class="stat-value">${globalSkills.length}</div><div class="stat-label">${t('skills.stat.total')}</div></div>
+    <div class="stat-card"><div class="stat-value" style="color:var(--info)">${userCount}</div><div class="stat-label">${t('skills.stat.user')}</div></div>
+    ${pluginCount ? `<div class="stat-card"><div class="stat-value" style="color:var(--accent)">${pluginCount}</div><div class="stat-label">${t('skills.stat.plugin')}</div></div>` : ''}
+    ${localAgentSkills.length ? `<div class="stat-card"><div class="stat-value" style="color:var(--warning)">${localAgentSkills.length}</div><div class="stat-label">${t('skills.stat.agent_local')}</div></div>` : ''}
+  `
+
+  skillsActiveCategory = 'all'
+  renderSkillsSidebar()
+  renderGlobalSkillsGrid()
+}
+
+function renderGlobalSkillsGrid() {
+  skillsGrid.innerHTML = ''
+
+  const isAgentFilter = skillsActiveFilter === 'agent'
+
+  // When 'agent' filter is active, show only local agent skills; otherwise show global/plugin.
+  const filteredGlobal = isAgentFilter ? [] : globalSkills.filter(s => {
+    if (skillsActiveFilter !== 'all' && s.source !== skillsActiveFilter) return false
+    if (skillsActiveCategory !== 'all' && deriveSkillCategory(s.name) !== skillsActiveCategory) return false
+    if (!skillsSearchQuery) return true
+    const haystack = [s.name, s.label, s.description, ...(s.keywords || [])].join(' ').toLowerCase()
+    return haystack.includes(skillsSearchQuery)
+  })
+
+  // Local agent skills: always merged in for 'all' or filtered to 'agent'.
+  const filteredLocal = (skillsActiveFilter === 'all' || isAgentFilter) ? localAgentSkills.filter(s => {
+    if (skillsActiveCategory !== 'all' && deriveSkillCategory(s.name) !== skillsActiveCategory) return false
+    if (!skillsSearchQuery) return true
+    const haystack = [s.name, s.label, s.description, s.agentId, ...(s.keywords || [])].join(' ').toLowerCase()
+    return haystack.includes(skillsSearchQuery)
+  }) : []
+
+  const allFiltered = [...filteredGlobal, ...filteredLocal]
+
+  if (allFiltered.length === 0) {
+    skillsEmpty.hidden = false
+    return
+  }
+  skillsEmpty.hidden = true
+
+  const sourceLabels = { user: 'user', plugin: 'plugin', agent: t('skills.filter.agent') }
+
+  const renderCard = (skill, isLocal) => {
+    const card = document.createElement('div')
+    card.className = isLocal ? 'skills-card skills-card--local' : 'skills-card'
+    const icon = getSkillIcon(skill.name)
+    const sourceBadge = isLocal
+      ? `<span class="connector-source-badge skills-badge--agent">${escapeHtml(skill.agentId)}</span>`
+      : (skill.source ? `<span class="connector-source-badge">${escapeHtml(sourceLabels[skill.source] || skill.source)}</span>` : '')
+
+    const hasDesc = !!skill.description
+    const healthClass = hasDesc ? 'skill-health-ok' : 'skill-health-warn'
+    const healthTitle = hasDesc ? t('skills.health.ok') : t('skills.health.nodesc')
+
+    const kws = (skill.keywords || []).slice(0, 3)
+    const kwTags = kws.map(k => `<span class="skill-keyword-tag">${escapeHtml(k)}</span>`).join('')
+
+    const agents = skill.agents || []
+    const agentBadges = agents.length > 0
+      ? `<span class="skills-agent-badge skill-agent-count" title="${escapeHtml(agents.join(', '))}">&#x1F916; ${agents.length} ${t('skills.agents.count')}</span>`
+      : ''
+
+    const mtimeStr = skill.mtime ? formatMtime(skill.mtime) : ''
+
+    const displayName = skill.label || skill.name
+    card.innerHTML = `
+      <div class="skills-card-header">
+        <div class="skills-card-icon">${icon}</div>
+        <div class="skills-card-info">
+          <div class="skills-card-name">
+            ${escapeHtml(displayName)} ${sourceBadge}
+            <span class="skill-health-dot ${healthClass}" title="${escapeHtml(healthTitle)}"></span>
+          </div>
+          <div class="skills-card-desc">${escapeHtml(skill.description || t('skills.no_description'))}</div>
+        </div>
+      </div>
+      ${(kwTags || agentBadges || mtimeStr) ? `
+      <div class="skills-card-footer">
+        ${kwTags}
+        ${agentBadges}
+        ${mtimeStr ? `<span class="skill-card-mtime" title="${t('skills.mtime.title')}">${escapeHtml(mtimeStr)}</span>` : ''}
+      </div>` : ''}
+    `
+    card.addEventListener('click', () => openSkillDetail(skill.name, skill.label, skill.agentId || null))
+    skillsGrid.appendChild(card)
+  }
+
+  for (const skill of filteredGlobal) renderCard(skill, false)
+  for (const skill of filteredLocal) renderCard(skill, true)
+}
+
+let _skillDetailCurrentName = null
+let _skillDetailCurrentAgentId = null
+let _skillDetailIsPlugin = false
+
+function _skillDetailExitEdit() {
+  const editor = document.getElementById('skillDetailEditor')
+  const contentEl = document.getElementById('skillDetailContent')
+  const editActions = document.getElementById('skillDetailEditActions')
+  const editBtn = document.getElementById('skillDetailEditBtn')
+  editor.hidden = true
+  contentEl.hidden = false
+  editActions.hidden = true
+  editBtn.disabled = false
+}
+
+async function openSkillDetail(skillName, displayLabel, agentId = null) {
+  _skillDetailCurrentName = skillName
+  _skillDetailCurrentAgentId = agentId
+  _skillDetailExitEdit()
+
+  document.getElementById('skillDetailTitle').textContent = displayLabel || skillName
+
+  const editBtn = document.getElementById('skillDetailEditBtn')
+  if (editBtn) {
+    editBtn.hidden = false
+    editBtn.disabled = false
+  }
+
+  try {
+    const detailUrl = agentId
+      ? `/api/skills/${encodeURIComponent(skillName)}?agent=${encodeURIComponent(agentId)}`
+      : `/api/skills/${encodeURIComponent(skillName)}`
+    const res = await fetch(detailUrl)
+    if (!res.ok) throw new Error('Failed to fetch skill detail')
+    const detail = await res.json()
+    _skillDetailIsPlugin = detail.source === 'plugin'
+
+    // Hide edit button for plugin skills
+    if (editBtn) editBtn.hidden = _skillDetailIsPlugin
+
+    // Description
+    const descEl = document.getElementById('skillDetailDesc')
+    descEl.textContent = detail.description || t('skills.no_description')
+
+    // Meta: source + mtime
+    const metaEl = document.getElementById('skillDetailMeta')
+    if (metaEl) {
+      const sourceLabel = detail.source === 'plugin'
+        ? `plugin${detail.pluginPackage ? ' (' + escapeHtml(detail.pluginPackage) + ')' : ''}`
+        : detail.source === 'user'
+        ? t('skills.source.user')
+        : t('skills.source.unknown')
+      const mtimeStr = detail.mtime ? formatMtime(detail.mtime) : ''
+      metaEl.innerHTML = `
+        <div class="skill-detail-source">${t('skills.detail.source_label')} <strong>${sourceLabel}</strong>${mtimeStr ? ` &middot; <span title="${escapeHtml(t('skills.mtime.title'))}">${escapeHtml(mtimeStr)}</span>` : ''}</div>
+        <div class="skill-detail-note">${t('skills.detail.auto_available')}</div>
+      `
+    }
+
+    // Keywords
+    const kwEl = document.getElementById('skillDetailKeywords')
+    if (kwEl) {
+      const kws = detail.keywords || []
+      if (kws.length > 0) {
+        kwEl.hidden = false
+        kwEl.innerHTML = `<span class="skill-kw-label">${t('skills.keywords.label')}</span> ` +
+          kws.map(k => `<span class="skill-keyword-tag">${escapeHtml(k)}</span>`).join(' ')
+      } else {
+        kwEl.hidden = true
+      }
+    }
+
+    // Agent coverage
+    const agentsEl = document.getElementById('skillDetailAgentsCoverage')
+    if (agentsEl) {
+      const agents = detail.agents || []
+      if (agents.length > 0) {
+        agentsEl.hidden = false
+        agentsEl.innerHTML = `<span class="skill-kw-label">${t('skills.agents.label')}</span> ` +
+          agents.map(a => `<span class="skills-agent-badge">${escapeHtml(a)}</span>`).join(' ')
+      } else {
+        agentsEl.hidden = true
+      }
+    }
+
+    // Health indicator
+    const healthEl = document.getElementById('skillDetailHealth')
+    if (healthEl) {
+      const hasDesc = !!detail.description
+      const hasContent = !!detail.content
+      if (hasDesc && hasContent) {
+        healthEl.className = 'skill-health-label skill-health-ok'
+        healthEl.textContent = t('skills.health.ok')
+      } else if (hasContent) {
+        healthEl.className = 'skill-health-label skill-health-warn'
+        healthEl.textContent = t('skills.health.nodesc')
+      } else {
+        healthEl.className = 'skill-health-label skill-health-err'
+        healthEl.textContent = t('skills.health.empty')
+      }
+    }
+
+    // Content: render as markdown
+    const contentEl = document.getElementById('skillDetailContent')
+    const rawContent = detail.content || t('skills.content_not_found')
+    contentEl.innerHTML = renderMarkdown(rawContent)
+
+    // Prefill editor
+    const editor = document.getElementById('skillDetailEditor')
+    if (editor) editor.value = rawContent
+
+  } catch (err) {
+    console.error('Skill detail hiba:', err)
+    document.getElementById('skillDetailDesc').textContent = t('connectors.error_list')
+    document.getElementById('skillDetailContent').innerHTML = ''
+    const metaEl = document.getElementById('skillDetailMeta')
+    if (metaEl) metaEl.innerHTML = ''
+    if (editBtn) editBtn.hidden = true
+  }
+
+  openModal(skillDetailOverlay)
+}
+
+// Inline edit wiring
+;(() => {
+  const editBtn = document.getElementById('skillDetailEditBtn')
+  const saveBtn = document.getElementById('skillDetailSaveBtn')
+  const cancelBtn = document.getElementById('skillDetailCancelEditBtn')
+  const editor = document.getElementById('skillDetailEditor')
+  const contentEl = document.getElementById('skillDetailContent')
+  const editActions = document.getElementById('skillDetailEditActions')
+
+  if (editBtn) {
+    editBtn.addEventListener('click', () => {
+      if (_skillDetailIsPlugin) return
+      contentEl.hidden = true
+      editor.hidden = false
+      editActions.hidden = false
+      editBtn.disabled = true
+      editor.focus()
+    })
+  }
+
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', _skillDetailExitEdit)
+  }
+
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async () => {
+      if (!_skillDetailCurrentName || _skillDetailIsPlugin) return
+      const newContent = editor.value
+      saveBtn.disabled = true
+      try {
+        const putUrl = _skillDetailCurrentAgentId
+          ? `/api/skills/${encodeURIComponent(_skillDetailCurrentName)}?agent=${encodeURIComponent(_skillDetailCurrentAgentId)}`
+          : `/api/skills/${encodeURIComponent(_skillDetailCurrentName)}`
+        const res = await fetch(putUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: newContent }),
+        })
+        if (!res.ok) throw new Error('PUT failed: ' + res.status)
+        contentEl.innerHTML = renderMarkdown(newContent)
+        _skillDetailExitEdit()
+        showToast(t('skills.toast.saved'))
+        // Refresh list to pick up new description/keywords
+        loadGlobalSkills()
+      } catch (err) {
+        console.error('Skill mentés hiba:', err)
+        showToast(t('skills.toast.save_error'))
+      } finally {
+        saveBtn.disabled = false
+      }
+    })
+  }
+})()
+
+// === Team org-chart (now embedded in Agents page, tree view) ===
+async function loadTeamGraph() {
+  const container = document.getElementById('teamGraph')
+  if (!container) return
+  container.innerHTML = '<div class="team-empty">' + t('team.loading') + '</div>'
+  try {
+    const res = await fetch('/api/team/graph')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    renderTeamGraph(container, data, { editable: true })
+  } catch (err) {
+    container.innerHTML = `<div class="team-empty">${t('team.error', { msg: err.message || err })}</div>`
+  }
+}
+
+// Persist a drag-and-drop reporting change: `childId` now reports to `parentId`.
+// Guards (also enforced server-side) keep the caller from creating a cycle or
+// writing a no-op. On success the graph is reloaded so the tree re-lays-out.
+async function saveTeamReportsTo(childId, parentId, ctx) {
+  const { byId, parentOf, descendantsOf, mainAgentId } = ctx
+  if (!childId || childId === parentId || childId === mainAgentId) return
+  if (parentOf.get(childId) === parentId) return  // already the parent
+  if (descendantsOf(childId).has(parentId)) { showToast(t('team.drop.cycle')); return }
+  try {
+    const r = await fetch(`/api/agents/${encodeURIComponent(childId)}/team`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reportsTo: parentId }),
+    })
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    const result = await r.json().catch(() => ({}))
+    if (result.cycleRejected) { showToast(t('team.drop.cycle')); return }
+    const childLabel = (byId.get(childId) || {}).label || childId
+    const parentLabel = (byId.get(parentId) || {}).label || parentId
+    showToast(t('team.drop.saved', { child: childLabel, parent: parentLabel }))
+    loadTeamGraph()
+  } catch {
+    showToast(t('team.drop.error'))
+  }
+}
+
+function renderTeamGraph(container, data, opts = {}) {
+  const editable = !!opts.editable
+  const { nodes, edges, mainAgentId } = data
+  container.innerHTML = ''
+  const byId = new Map(nodes.map(n => [n.id, n]))
+  const childrenOf = new Map()
+  const parentOf = new Map()
+  for (const n of nodes) childrenOf.set(n.id, [])
+  for (const e of edges) {
+    if (childrenOf.has(e.from)) childrenOf.get(e.from).push(e.to)
+    parentOf.set(e.to, e.from)
+  }
+  // Transitive reports of `id` (its whole subtree). Used to reject dropping a
+  // manager onto one of its own reports, which would orphan the subtree.
+  const descendantsOf = (id) => {
+    const out = new Set()
+    const walk = (x) => {
+      for (const c of (childrenOf.get(x) || [])) {
+        if (!out.has(c)) { out.add(c); walk(c) }
+      }
+    }
+    walk(id)
+    return out
+  }
+  const dropCtx = { byId, parentOf, descendantsOf, mainAgentId }
+  // A single dragged id shared across all nodes' dragover handlers so they can
+  // validate the target (dataTransfer payload is unreadable during dragover).
+  let draggingId = null
+  const renderNode = (node) => {
+    const div = document.createElement('div')
+    div.className = 'team-node'
+    if (node.role === 'main') div.classList.add('main')
+    else if (node.role === 'leader') div.classList.add('leader')
+    const roleLabel = node.role === 'main' ? t('team.role.main') : (node.role === 'leader' ? t('team.role.leader') : t('team.role.member'))
+    const running = node.running ? t('team.running') : t('team.stopped')
+    const avatarUrl = node.id === mainAgentId
+      ? `/api/wraith/avatar${avatarBust()}`
+      : `/api/agents/${encodeURIComponent(node.id)}/avatar${avatarBust()}`
+    div.innerHTML = `
+      <div class="team-node-avatar"><img src="${avatarUrl}" alt="${escapeHtml(node.label || node.id)}" onerror="this.style.display='none'"></div>
+      <div class="team-node-name">${escapeHtml(node.label || node.id)}</div>
+      <div class="team-node-meta">${escapeHtml(roleLabel)}</div>
+      <div class="team-node-meta">${running}</div>
+    `
+    if (node.id !== mainAgentId) {
+      div.addEventListener('click', () => openAgentDetail(node.id))
+    }
+    // Drag-and-drop reporting edit (Team page only). Any agent except the main
+    // one can be dragged; any node can be a drop target (dropping onto the main
+    // agent makes the report a direct report of it).
+    if (editable) {
+      if (node.id !== mainAgentId) {
+        div.draggable = true
+        div.classList.add('team-draggable')
+        div.addEventListener('dragstart', (e) => {
+          draggingId = node.id
+          e.dataTransfer.setData('text/plain', node.id)
+          e.dataTransfer.effectAllowed = 'move'
+          div.classList.add('team-dragging')
+        })
+        div.addEventListener('dragend', () => {
+          draggingId = null
+          div.classList.remove('team-dragging')
+        })
+      }
+      const isValidTarget = () =>
+        draggingId && draggingId !== node.id &&
+        parentOf.get(draggingId) !== node.id &&
+        !descendantsOf(draggingId).has(node.id)
+      div.addEventListener('dragover', (e) => {
+        if (!isValidTarget()) return  // no preventDefault -> shows "no drop"
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'move'
+        div.classList.add('team-drop-target')
+      })
+      div.addEventListener('dragleave', () => div.classList.remove('team-drop-target'))
+      div.addEventListener('drop', (e) => {
+        e.preventDefault()
+        div.classList.remove('team-drop-target')
+        const childId = e.dataTransfer.getData('text/plain') || draggingId
+        saveTeamReportsTo(childId, node.id, dropCtx)
+      })
+    }
+    return div
+  }
+  // Render as a nested tree so each report sits directly under its own
+  // manager. A flat BFS-by-row layout made a leader's reports look like they
+  // belonged to whichever node happened to be above them in the row.
+  const seen = new Set([mainAgentId])
+  const renderSubtree = (id) => {
+    const node = byId.get(id)
+    if (!node) return null
+    const col = document.createElement('div')
+    col.className = 'team-subtree'
+    col.appendChild(renderNode(node))
+    const kids = (childrenOf.get(id) || []).filter(c => !seen.has(c) && byId.has(c))
+    for (const c of kids) seen.add(c)
+    if (kids.length) {
+      const conn = document.createElement('div')
+      conn.className = 'team-connector'
+      col.appendChild(conn)
+      const row = document.createElement('div')
+      row.className = 'team-children'
+      for (const c of kids) {
+        const sub = renderSubtree(c)
+        if (sub) row.appendChild(sub)
+      }
+      col.appendChild(row)
+    }
+    return col
+  }
+  // Main on top, then a row of its direct reports (each carrying its own
+  // subtree beneath it).
+  const mainNode = byId.get(mainAgentId)
+  if (mainNode) {
+    const mainRow = document.createElement('div')
+    mainRow.className = 'team-level'
+    mainRow.appendChild(renderNode(mainNode))
+    container.appendChild(mainRow)
+  }
+  const directs = (childrenOf.get(mainAgentId) || []).filter(c => !seen.has(c) && byId.has(c))
+  for (const c of directs) seen.add(c)
+  if (directs.length) {
+    const conn = document.createElement('div')
+    conn.className = 'team-connector'
+    container.appendChild(conn)
+    const row = document.createElement('div')
+    row.className = 'team-children team-roots'
+    for (const c of directs) {
+      const sub = renderSubtree(c)
+      if (sub) row.appendChild(sub)
+    }
+    container.appendChild(row)
+  }
+  // Orphans (nodes not reachable from main, shouldn't happen with the auto
+  // fallback on the backend but guard just in case) go to a trailing row.
+  const orphans = nodes.filter(n => !seen.has(n.id))
+  if (orphans.length) {
+    const row = document.createElement('div')
+    row.className = 'team-level'
+    for (const n of orphans) row.appendChild(renderNode(n))
+    container.appendChild(row)
+  }
+  if (nodes.length === 1) {
+    const empty = document.createElement('div')
+    empty.className = 'team-empty'
+    empty.textContent = t('team.empty')
+    container.appendChild(empty)
+  }
+}
+
+// === Agents page: grid / org-chart view toggle ===
+// Persists the chosen view for the session so navigating away and back keeps
+// the last selection. Defaults to 'grid'.
+let _agentsActiveView = 'grid'
+
+function _setAgentsView(view) {
+  _agentsActiveView = view
+  const gridView = document.getElementById('agentsGridView')
+  const treeView = document.getElementById('agentsTreeView')
+  const gridBtn  = document.getElementById('agentsViewGrid')
+  const treeBtn  = document.getElementById('agentsViewTree')
+  if (!gridView || !treeView) return
+  const showGrid = view === 'grid'
+  gridView.hidden = !showGrid
+  treeView.hidden = showGrid
+  if (gridBtn) gridBtn.classList.toggle('active', showGrid)
+  if (treeBtn) treeBtn.classList.toggle('active', !showGrid)
+  if (!showGrid) loadTeamGraph()
+}
+
+const _agentsViewGridBtn = document.getElementById('agentsViewGrid')
+const _agentsViewTreeBtn = document.getElementById('agentsViewTree')
+if (_agentsViewGridBtn) _agentsViewGridBtn.addEventListener('click', () => _setAgentsView('grid'))
+if (_agentsViewTreeBtn) _agentsViewTreeBtn.addEventListener('click', () => _setAgentsView('tree'))
+
+// === Team: inter-agent message log + compose ===
+// View the /api/messages queue and let the operator send a message to an agent
+// from the dashboard. Targets come from /api/schedules/agents (the same allowed
+// agent list the scheduler uses) -- never a free-text target. The sender is the
+// owner (resolved by type from /api/kanban/assignees), so the receiving agent
+// sees a message from Gábor, not a spoofable string. /api/messages sits behind
+// the dashboard bearer token + Cloudflare Access.
+const MSG_STATUS_META = {
+  pending: { label: () => t('messages.status.pending'), cls: 'badge-warm' },
+  delivered: { label: () => t('messages.status.delivered'), cls: 'badge-active' },
+  done: { label: () => t('messages.status.done'), cls: 'badge-active' },
+  failed: { label: () => t('messages.status.failed'), cls: 'badge-paused' },
+}
+async function resolveOwnerName() {
+  try {
+    const res = await fetch('/api/kanban/assignees')
+    if (res.ok) {
+      const list = await res.json()
+      const owner = Array.isArray(list) ? list.find(a => a.type === 'owner') : null
+      if (owner && owner.name) return owner.name
+    }
+  } catch { /* fall through */ }
+  return 'owner'
+}
+
+// === Messages page ===
+// chatAgentHasAvatar: populated from /api/agents during loadChatAgentList
+const chatAgentHasAvatar = new Map() // name -> true|false
+let chatSelectedAgent = null
+
+function chatMonogramEl(agentName, size) {
+  const letter = agentName.charAt(0).toUpperCase()
+  const colors = ['#d97757','#00C2A8','#818cf8','#22c55e','#f59e0b','#ec4899']
+  const color = colors[agentName.split('').reduce((a,c)=>a+c.charCodeAt(0),0) % colors.length]
+  return `<div class="chat-avatar chat-avatar-mono" style="width:${size}px;height:${size}px;background:${color};font-size:${Math.round(size*0.4)}px">${letter}</div>`
+}
+
+// Global onerror handler — avoids HTML-in-attribute escaping issues
+window.chatImgError = function(img) {
+  const name = img.getAttribute('data-agent-name') || img.alt || '?'
+  const size = parseInt(img.width) || 32
+  const letter = name.charAt(0).toUpperCase()
+  const colors = ['#d97757','#00C2A8','#818cf8','#22c55e','#f59e0b','#ec4899']
+  const color = colors[name.split('').reduce((a,c)=>a+c.charCodeAt(0),0) % colors.length]
+  const div = document.createElement('div')
+  div.className = 'chat-avatar chat-avatar-mono'
+  div.style.cssText = `width:${size}px;height:${size}px;background:${color};font-size:${Math.round(size*0.4)}px`
+  div.textContent = letter
+  img.replaceWith(div)
+}
+
+function chatAvatarHtml(agentName, size = 32) {
+  const lower = agentName.toLowerCase()
+  const hasAvatar = chatAgentHasAvatar.get(lower)
+  if (!hasAvatar) return chatMonogramEl(agentName, size)
+  const src = lower === mainAgentId().toLowerCase()
+    ? `/api/wraith/avatar${avatarBust()}`
+    : `/api/agents/${encodeURIComponent(lower)}/avatar${avatarBust()}`
+  return `<img class="chat-avatar" src="${src}" width="${size}" height="${size}" alt="${escapeHtml(agentName)}" data-agent-name="${escapeHtml(agentName)}" onerror="chatImgError(this)">`
+}
+
+// Guard against the boot race: the Messages page can be opened before the
+// initial /api/wraith fetch resolves window._wraith. Until it does,
+// mainAgentId() returns the literal 'wraith' FALLBACK, which IS a real agent
+// id on a default install but is NOT one wherever the main agent was renamed
+// -- composing to it creates a phantom "wraith" thread that sits pending
+// forever and shows up as a duplicate of the true main agent (whatever id this
+// install actually uses). Resolve _wraith before rendering any chat target.
+async function ensureWraithLoaded() {
+  if (window._wraith?.agentId) return
+  try {
+    const r = await fetch('/api/wraith')
+    if (r.ok) window._wraith = { ...(window._wraith || {}), ...(await r.json()) }
+  } catch { /* sidebar falls back to the literal id -- best effort */ }
+}
+
+async function loadMessagesPage() {
+  await ensureWraithLoaded()
+  await loadChatAgentList()
+}
+
+const CHAT_SYSTEM_AGENTS = new Set(['heartbeat','telegram-coordinator','channel-coordinator'])
+// The owner's own message thread is pinned to the top and labelled "<name> (te)".
+// The owner display name comes from the backend (OWNER_NAME via /api/wraith ->
+// window._wraith.ownerName), not a hardcoded literal, so a renamed install
+// recognizes its real owner. Empty until _wraith resolves (no false match).
+function chatOwnerName() { return window._wraith?.ownerName || '' }
+
+// The main agent's display name (BOT_NAME). mainAgentId() is the routing id
+// (e.g. "wraith") used for matching, avatar lookups and API calls; this is
+// what the user should SEE. Sourced from the backend (/api/wraith -> name,
+// mirrored into _brandTokens.bot by initSidebarBrand), so a renamed install
+// shows its real bot name. Falls back to the id before _wraith resolves.
+// Regression #519/#520: keep the four Messages-view display points routing the
+// main agent id through chatDisplayName -- a later refactor once stripped this
+// and leaked the raw routing id again. Guarded by messages-view-display-name.test.ts.
+function mainAgentDisplayName() {
+  return window._wraith?.name || window._brandTokens?.bot || mainAgentId()
+}
+// Map a routing agent id to its user-facing label: the main agent's id becomes
+// its BOT_NAME display name; every other agent already carries a human name as
+// its id, so it passes through unchanged.
+function chatDisplayName(name) {
+  return name === mainAgentId() ? mainAgentDisplayName() : name
+}
+
+function chatLastSeenKey(agentName) { return 'chat_last_seen_' + agentName }
+function chatGetLastSeen(agentName) { return parseInt(localStorage.getItem(chatLastSeenKey(agentName)) || '0', 10) }
+function chatMarkSeen(agentName, maxId) {
+  if (maxId > chatGetLastSeen(agentName)) localStorage.setItem(chatLastSeenKey(agentName), String(maxId))
+}
+function chatIsUnread(agentName, threadInfo) {
+  const owner = chatOwnerName()
+  if (!owner || agentName !== owner) return false
+  if (!threadInfo?.lastMsg) return false
+  return threadInfo.lastMsg.id > chatGetLastSeen(agentName)
+}
+
+async function loadChatAgentList() {
+  const sidebar = document.getElementById('chatAgentList')
+  if (!sidebar) return
+  try {
+    // Load fleet agents + threads in parallel (the federation status fetch is
+    // failure-proof: it must never take down the Messages page)
+    const [agentsRes, threadsRes, fedStatus] = await Promise.all([
+      fetch('/api/agents'),
+      fetch('/api/messages/threads'),
+      fetch('/api/federation/status').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ])
+    const agentsRaw = agentsRes.ok ? await agentsRes.json() : []
+    const threads = threadsRes.ok ? await threadsRes.json() : []
+    if (fedStatus && Array.isArray(fedStatus.peers)) federatedPeerStatus = fedStatus.peers
+
+    // Build fleet list: API agents + wraith, minus system agents; plus
+    // federated agents from the poller cache so a remote conversation can be
+    // STARTED without prior history. The system-agent filter runs on the
+    // unqualified segment too ('teodor/heartbeat' is just as much noise).
+    const fleetNames = [mainAgentId(), ...agentsRaw.map(a => a.name || a)]
+      .filter(n => !CHAT_SYSTEM_AGENTS.has(n))
+      .filter((n, i, arr) => arr.indexOf(n) === i)
+    for (const fa of federatedAgentEntries()) {
+      if (!fleetNames.includes(fa.qualified) && !CHAT_SYSTEM_AGENTS.has(fa.qualified.split('/').pop())) {
+        fleetNames.push(fa.qualified)
+      }
+    }
+
+    // Populate avatar map from API data
+    chatAgentHasAvatar.clear()
+    chatAgentHasAvatar.set(mainAgentId(), true)
+    for (const a of agentsRaw) {
+      if (a.name) chatAgentHasAvatar.set(a.name, !!a.hasAvatar)
+    }
+
+    // Build index from /api/messages/threads (per-agent, no global-window bug)
+    const threadIndex = new Map() // agentName -> {lastMessage, count}
+    for (const t of threads) {
+      if (t.agent) threadIndex.set(t.agent, { lastMsg: t.lastMessage, count: t.count || 0 })
+    }
+    // Also include thread agents not in fleet (e.g. the owner's own direct msgs).
+    // Suppress the literal 'wraith' fallback id when it is NOT the real main
+    // agent: a stale phantom thread (from the boot-race bug) would otherwise
+    // render as a duplicate of the true main agent.
+    for (const t of threads) {
+      if (t.agent === 'wraith' && mainAgentId() !== 'wraith') continue
+      if (t.agent && !fleetNames.includes(t.agent) && !CHAT_SYSTEM_AGENTS.has(t.agent)) {
+        fleetNames.push(t.agent)
+      }
+    }
+
+    // Sort: owner pinned first, then agents with messages by recency, rest alphabetical
+    const owner = chatOwnerName()
+    const sorted = [...fleetNames].sort((a, b) => {
+      if (owner && a === owner) return -1
+      if (owner && b === owner) return 1
+      const aHas = threadIndex.has(a), bHas = threadIndex.has(b)
+      if (aHas && !bHas) return -1
+      if (!aHas && bHas) return 1
+      if (aHas && bHas) {
+        const aTime = threadIndex.get(a).lastMsg?.created_at || 0
+        const bTime = threadIndex.get(b).lastMsg?.created_at || 0
+        return bTime - aTime
+      }
+      return a.localeCompare(b)
+    })
+
+    sidebar.innerHTML = sorted.map(name => {
+      const info = threadIndex.get(name)
+      const lm = info?.lastMsg
+      const when = lm?.created_at ? new Date(lm.created_at * 1000).toLocaleTimeString('hu-HU', {hour:'2-digit',minute:'2-digit'}) : ''
+      const preview = lm ? (lm.content || '').replace(/\n/g,' ').slice(0, 60) : t('messages.empty')
+      const isSelected = name === chatSelectedAgent ? ' selected' : ''
+      const dimmed = info ? '' : ' style="opacity:0.5"'
+      const unread = chatIsUnread(name, info)
+      const displayName = owner && name === owner ? owner + ' (te)' : chatDisplayName(name)
+      return `<div class="chat-agent-item${isSelected}${unread ? ' unread' : ''}" data-agent="${escapeHtml(name)}"${dimmed}>
+        <div class="chat-agent-avatar">${chatAvatarHtml(name, 40)}</div>
+        <div class="chat-agent-info">
+          <div class="chat-agent-name">${escapeHtml(displayName)}${unread ? '<span class="chat-unread-dot"></span>' : ''}</div>
+          <div class="chat-agent-preview ${unread ? 'unread-preview' : ''}">${escapeHtml(preview)}</div>
+        </div>
+        <div class="chat-agent-time">${when}</div>
+      </div>`
+    }).join('')
+
+    sidebar.querySelectorAll('.chat-agent-item').forEach(el => {
+      el.addEventListener('click', () => {
+        sidebar.querySelectorAll('.chat-agent-item').forEach(x => x.classList.remove('selected'))
+        el.classList.add('selected')
+        chatSelectedAgent = el.dataset.agent
+        loadChatThread(chatSelectedAgent)
+      })
+    })
+
+    if (chatSelectedAgent && chatThreadState.agent !== chatSelectedAgent) {
+      // Preselected target (e.g. the federated card's message button): open
+      // its thread. Direct loadChatThread fallback covers targets with no
+      // sidebar entry yet (composer + history render for any id).
+      const el = sidebar.querySelector(`.chat-agent-item[data-agent="${CSS.escape(chatSelectedAgent)}"]`)
+      if (el) el.click()
+      else loadChatThread(chatSelectedAgent)
+    } else if (!chatSelectedAgent) {
+      const first = sidebar.querySelector('.chat-agent-item')
+      if (first) first.click()
+    }
+  } catch (e) {
+    sidebar.innerHTML = `<div class="chat-sidebar-empty">${t('messages.sidebar_error', { msg: escapeHtml(String(e.message||e)) })}</div>`
+  }
+}
+
+// Pagination state for the open thread
+const chatThreadState = { agent: null, minLoadedId: null, hasMore: true, loading: false }
+const CHAT_PAGE_SIZE = 10
+const CHAT_LOAD_MORE = 20
+
+async function loadChatThread(agentName) {
+  const panel = document.getElementById('chatThreadPanel')
+  if (!panel) return
+
+  chatThreadState.agent = agentName
+  chatThreadState.minLoadedId = null
+  chatThreadState.hasMore = true
+  chatThreadState.loading = false
+
+  const owner = chatOwnerName()
+  const threadDisplayName = owner && agentName === owner ? owner + ' (te)' : chatDisplayName(agentName)
+
+  panel.innerHTML = `
+    <div class="chat-thread-header">
+      ${chatAvatarHtml(agentName, 32)}
+      <span class="chat-thread-title">${escapeHtml(threadDisplayName)}</span>
+      <button class="btn-secondary btn-compact" style="margin-left:auto" onclick="loadChatThread('${escapeHtml(agentName)}')">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      </button>
+    </div>
+    <div class="chat-bubbles" id="chatBubbles"><div class="chat-loading-indicator" id="chatLoadingTop" style="display:none;text-align:center;padding:8px;font-size:11px;color:var(--text-muted)">${t('messages.loading')}</div></div>
+    <div class="chat-compose">
+      <div class="chat-compose-row">
+        <textarea id="chatComposeText" class="chat-compose-input" rows="2" placeholder="${t('messages.placeholder', { agent: escapeHtml(chatDisplayName(agentName)) })}"></textarea>
+        <button class="btn-primary btn-compact chat-send-btn" id="chatSendBtn">${t('messages.send_btn')}</button>
+      </div>
+    </div>
+  `
+
+  document.getElementById('chatSendBtn')?.addEventListener('click', () => sendChatMessage(agentName))
+  document.getElementById('chatComposeText')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChatMessage(agentName) }
+  })
+
+  // Initial load
+  await fetchChatPage(agentName, null, CHAT_PAGE_SIZE, 'replace')
+  // Mark thread as read (localStorage last-seen)
+  const threadData = (await fetch('/api/messages/threads').then(r => r.ok ? r.json() : []).catch(() => []))
+    .find(t => t.agent === agentName)
+  if (threadData?.lastMessage?.id) {
+    chatMarkSeen(agentName, threadData.lastMessage.id)
+    // Remove unread indicator from sidebar item
+    document.querySelector(`.chat-agent-item[data-agent="${CSS.escape(agentName)}"]`)?.classList.remove('unread')
+    const dot = document.querySelector(`.chat-agent-item[data-agent="${CSS.escape(agentName)}"] .chat-unread-dot`)
+    if (dot) dot.remove()
+    const preview = document.querySelector(`.chat-agent-item[data-agent="${CSS.escape(agentName)}"] .unread-preview`)
+    if (preview) preview.classList.remove('unread-preview')
+  }
+
+  // Scroll-up pagination handler
+  const bubbles = document.getElementById('chatBubbles')
+  if (bubbles) {
+    bubbles.addEventListener('scroll', () => {
+      if (bubbles.scrollTop < 80 && chatThreadState.hasMore && !chatThreadState.loading
+          && chatThreadState.agent === agentName) {
+        fetchChatPage(agentName, chatThreadState.minLoadedId, CHAT_LOAD_MORE, 'prepend')
+      }
+    })
+  }
+}
+
+function buildBubbleHtml(m) {
+  const isOutgoing = m.from_agent === mainAgentId()
+  // senderName stays the routing id (avatar lookup keys off it); senderLabel is
+  // what the user sees, so the main agent reads as its BOT_NAME, not "wraith".
+  const senderName = isOutgoing ? mainAgentId() : m.from_agent
+  const senderLabel = chatDisplayName(senderName)
+  const when = m.created_at ? new Date(m.created_at * 1000).toLocaleString('hu-HU', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''
+  const statusMetaRaw = MSG_STATUS_META[m.status] || { label: m.status || '', cls: 'badge' }
+  const statusMeta = { ...statusMetaRaw, label: typeof statusMetaRaw.label === 'function' ? statusMetaRaw.label() : statusMetaRaw.label }
+  return `<div class="chat-bubble-row ${isOutgoing ? 'outgoing' : 'incoming'}" data-msg-id="${m.id}">
+    ${!isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml(senderName, 28)}</div>` : ''}
+    <div class="chat-bubble ${isOutgoing ? 'bubble-out' : 'bubble-in'}">
+      <div class="bubble-meta">
+        ${!isOutgoing ? `<span class="bubble-sender">${escapeHtml(senderLabel)}</span>` : ''}
+        <span class="bubble-id-chip">#${m.id}</span>
+        <span class="badge ${statusMeta.cls}" style="font-size:10px">${escapeHtml(statusMeta.label)}</span>
+        ${m.status === 'pending' && m.to_agent === mainAgentId() ? `<span style="font-size:10px;color:var(--text-muted)">${escapeHtml(t('messages.pending_main_hint'))}</span>` : ''}
+        ${m.origin_note ? `<span class="badge" style="font-size:10px" title="Self-declared by the sender, not verified (card 06f062e4)">origin: ${escapeHtml(m.origin_note)}</span>` : ''}
+      </div>
+      <div class="bubble-text">${escapeHtml(m.content || '')}</div>
+      <div class="bubble-time">${when}</div>
+    </div>
+    ${isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml(mainAgentId(), 28)}</div>` : ''}
+  </div>`
+}
+
+async function fetchChatPage(agentName, beforeId, limit, mode) {
+  if (chatThreadState.loading) return
+  chatThreadState.loading = true
+  const container = document.getElementById('chatBubbles')
+  const loadingIndicator = document.getElementById('chatLoadingTop')
+  if (!container) { chatThreadState.loading = false; return }
+  if (loadingIndicator && mode === 'prepend') loadingIndicator.style.display = 'block'
+  try {
+    let url = `/api/messages?agent=${encodeURIComponent(agentName)}&limit=${limit}`
+    if (beforeId) url += `&before=${beforeId}`
+    const res = await fetch(url)
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const msgs = await res.json()
+    const sorted = Array.isArray(msgs) ? [...msgs].sort((a, b) => (a.created_at || 0) - (b.created_at || 0)) : []
+
+    if (mode === 'replace') {
+      if (sorted.length === 0) {
+        container.innerHTML = '<p class="activity-empty">' + t('messages.empty_thread') + '</p>'
+      } else {
+        container.innerHTML = '<div class="chat-loading-indicator" id="chatLoadingTop" style="display:none;text-align:center;padding:8px;font-size:11px;color:var(--text-muted)">' + t('messages.loading') + '</div>'
+        container.insertAdjacentHTML('beforeend', sorted.map(buildBubbleHtml).join(''))
+        container.scrollTop = container.scrollHeight
+      }
+      if (sorted.length < limit) chatThreadState.hasMore = false
+    } else { // prepend
+      if (loadingIndicator) loadingIndicator.style.display = 'none'
+      if (!sorted.length) { chatThreadState.hasMore = false; chatThreadState.loading = false; return }
+      if (sorted.length < limit) chatThreadState.hasMore = false
+      const prevHeight = container.scrollHeight
+      const indicator = document.getElementById('chatLoadingTop')
+      const html = sorted.map(buildBubbleHtml).join('')
+      if (indicator) {
+        indicator.insertAdjacentHTML('afterend', html)
+      } else {
+        container.insertAdjacentHTML('afterbegin', html)
+      }
+      // Restore scroll position so view doesn't jump
+      container.scrollTop = container.scrollHeight - prevHeight
+    }
+
+    if (sorted.length > 0) {
+      const minId = Math.min(...sorted.map(m => m.id))
+      if (chatThreadState.minLoadedId === null || minId < chatThreadState.minLoadedId) {
+        chatThreadState.minLoadedId = minId
+      }
+    }
+  } catch (e) {
+    if (loadingIndicator) loadingIndicator.style.display = 'none'
+    if (mode === 'replace') {
+      container.innerHTML = `<p class="activity-empty">Hiba: ${escapeHtml(String(e.message||e))}</p>`
+    }
+  } finally {
+    chatThreadState.loading = false
+  }
+}
+
+function renderChatBubbles(msgs, agentName) {
+  const container = document.getElementById('chatBubbles')
+  if (!container) return
+  if (!msgs || msgs.length === 0) {
+    container.innerHTML = '<p class="activity-empty">' + t('messages.empty_thread') + '</p>'
+    return
+  }
+  const sorted = [...msgs].sort((a,b) => (a.created_at||0) - (b.created_at||0))
+  container.innerHTML = sorted.map(buildBubbleHtml).join('')
+  container.scrollTop = container.scrollHeight
+}
+
+async function sendChatMessage(toAgent) {
+  const textarea = document.getElementById('chatComposeText')
+  const btn = document.getElementById('chatSendBtn')
+  const content = textarea?.value?.trim()
+  if (!content) { textarea?.focus(); return }
+  if (btn) btn.disabled = true
+  try {
+    const from = await resolveOwnerName()
+    const res = await fetch('/api/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to: toAgent, content }),
+    })
+    if (!res.ok) { const err = await res.json(); throw new Error(err.error || 'Hiba') }
+    if (textarea) textarea.value = ''
+    showToast(t('messages.sent'))
+    await loadChatThread(toAgent)
+    await loadChatAgentList()
+  } catch (e) {
+    showToast(t('messages.error_send', { msg: e.message || e }))
+  } finally {
+    if (btn) btn.disabled = false
+  }
+}
+
+document.getElementById('chatRefreshBtn')?.addEventListener('click', () => {
+  loadChatAgentList()
+  if (chatSelectedAgent) loadChatThread(chatSelectedAgent)
+})
+
+function renderTeamEditor(agent, allAgents) {
+  const team = agent.team || { role: 'member', reportsTo: null, delegatesTo: [], autoDelegation: false, trustFrom: [] }
+  document.getElementById('editTeamRole').value = team.role || 'member'
+  const reportsSel = document.getElementById('editTeamReportsTo')
+  reportsSel.innerHTML = ''
+  const emptyOpt = document.createElement('option')
+  emptyOpt.value = ''
+  emptyOpt.textContent = t('team.reports_to_empty')
+  reportsSel.appendChild(emptyOpt)
+  for (const other of allAgents) {
+    if (other.name === agent.name) continue
+    const opt = document.createElement('option')
+    opt.value = other.name
+    opt.textContent = other.displayName || other.name
+    if (team.reportsTo === other.name) opt.selected = true
+    reportsSel.appendChild(opt)
+  }
+  const buildCheckboxList = (boxId, selected) => {
+    const box = document.getElementById(boxId)
+    box.innerHTML = ''
+    for (const other of allAgents) {
+      if (other.name === agent.name) continue
+      const label = document.createElement('label')
+      label.style.cssText = 'display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px'
+      const cb = document.createElement('input')
+      cb.type = 'checkbox'
+      cb.value = other.name
+      cb.checked = !!(selected && selected.includes(other.name))
+      label.appendChild(cb)
+      const span = document.createElement('span')
+      span.textContent = other.displayName || other.name
+      label.appendChild(span)
+      box.appendChild(label)
+    }
+  }
+  buildCheckboxList('editTeamDelegatesList', team.delegatesTo)
+  buildCheckboxList('editTeamTrustFromList', team.trustFrom)
+  document.getElementById('editTeamAutoDelegation').checked = !!team.autoDelegation
+  // Only leaders make sense to delegate from -- hide the lists for members.
+  const updateLeaderVisibility = () => {
+    const isLeader = document.getElementById('editTeamRole').value === 'leader'
+    document.getElementById('editTeamDelegatesGroup').style.display = isLeader ? '' : 'none'
+    document.getElementById('editTeamAutoGroup').style.display = isLeader ? '' : 'none'
+  }
+  document.getElementById('editTeamRole').onchange = updateLeaderVisibility
+  updateLeaderVisibility()
+}
+
+document.getElementById('saveTeamBtn').addEventListener('click', async () => {
+  if (!currentAgent || currentAgent.role === 'main') return
+  const btn = document.getElementById('saveTeamBtn')
+  const role = document.getElementById('editTeamRole').value
+  const reportsToRaw = document.getElementById('editTeamReportsTo').value
+  const delegates = Array.from(document.querySelectorAll('#editTeamDelegatesList input[type=checkbox]:checked')).map(cb => cb.value)
+  const trustFrom = Array.from(document.querySelectorAll('#editTeamTrustFromList input[type=checkbox]:checked')).map(cb => cb.value)
+  const autoDelegation = document.getElementById('editTeamAutoDelegation').checked
+  const originalText = btn.textContent
+  btn.disabled = true
+  btn.textContent = t('team.save_saving')
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/team`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        role,
+        reportsTo: reportsToRaw || null,
+        delegatesTo: role === 'leader' ? delegates : [],
+        trustFrom,
+        autoDelegation: role === 'leader' ? autoDelegation : false,
+      }),
+    })
+    if (!res.ok) throw new Error()
+    // The server sanitizes the team config (strips self-references and
+    // unknown agent ids) and reports what it dropped in `warnings`. Surface
+    // that to the operator so a mistyped name isn't silently lost.
+    let warningMsg = ''
+    try {
+      const body = await res.json()
+      const w = body && body.warnings
+      if (w) {
+        const parts = []
+        if (Array.isArray(w.droppedSelf) && w.droppedSelf.length) {
+          parts.push(`${t('team.dropped_self')}: ${w.droppedSelf.join(', ')}`)
+        }
+        if (Array.isArray(w.droppedUnknown) && w.droppedUnknown.length) {
+          parts.push(`${t('team.dropped_unknown')}: ${w.droppedUnknown.join(', ')}`)
+        }
+        if (parts.length) warningMsg = parts.join(' · ')
+      }
+    } catch { /* body already consumed or not JSON -- OK, no warnings to show */ }
+    showToast(warningMsg ? t('team.save_warning', { detail: warningMsg }) : t('team.save_ok'))
+    btn.textContent = t('team.save_done')
+    setTimeout(() => { btn.textContent = originalText; btn.disabled = false }, 1800)
+    loadAgents()
+  } catch {
+    showToast(t('team.save_error'))
+    btn.textContent = originalText
+    btn.disabled = false
+  }
+})
+
+// === Overview page ===
+function formatRelative(ts) {
+  const diff = Math.max(0, Date.now() - ts)
+  const min = Math.floor(diff / 60000)
+  if (min < 1) return t('common.time.now_abbr')
+  if (min < 60) return t('common.time.min_abbr', { n: min })
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return t('common.time.hour_abbr', { h: hr })
+  const day = Math.floor(hr / 24)
+  return t('common.time.day_abbr', { n: day })
+}
+
+async function loadOverview() {
+  try {
+    const res = await fetch('/api/overview')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const d = await res.json()
+    // Stats
+    document.getElementById('statAgents').textContent = d.agents.running
+    document.getElementById('statAgentsSub').textContent = t('overview.stat.agents_sub', { n: d.agents.total })
+    document.getElementById('statTasks').textContent = d.tasksToday
+    const taskDiff = d.tasksToday - d.tasksYesterday
+    document.getElementById('statTasksSub').textContent = taskDiff === 0 ? t('overview.stat.same_as_yesterday') : (taskDiff > 0 ? '+' + taskDiff + ' ' + t('overview.stat.change', { n: '' }).trim() : taskDiff + ' ' + t('overview.stat.change', { n: '' }).trim())
+    document.getElementById('statMemories').textContent = d.memories.count.toLocaleString('hu-HU').replace(/,/g, ' ')
+    document.getElementById('statMemoriesSub').textContent = `${t('overview.stat.sub.memories')} · ${d.memories.categories} category`
+    document.getElementById('statSkills').textContent = d.skills.count
+    document.getElementById('statSkillsSub').textContent = d.skills.today > 0 ? t('overview.stat.skills_today', { n: d.skills.today }) : ''
+    // Team: reuse the hierarchy graph renderer so the overview card shows
+    // exactly what the Csapat page does (avatars + reports-to tree).
+    try {
+      const tg = await fetch('/api/team/graph')
+      if (tg.ok) {
+        const graph = await tg.json()
+        renderTeamGraph(document.getElementById('overviewTeamGrid'), graph)
+      }
+    } catch {}
+    // Activity
+    const act = document.getElementById('overviewActivity')
+    act.innerHTML = ''
+    if (!d.activity || d.activity.length === 0) {
+      act.innerHTML = '<div style="color:var(--text-muted);font-size:13px">' + t('overview.no_activity') + '</div>'
+    } else {
+      for (const a of d.activity) {
+        const icon = a.icon === 'delegate'
+          ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>'
+          : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3C7.5 3 4 6.5 4 11v4l-2 3h4v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3v-2h4l-2-3v-4c0-4.5-3.5-8-8-8z"/></svg>'
+        const item = document.createElement('div')
+        item.className = 'overview-activity-item'
+        item.innerHTML = `
+          <div class="overview-activity-icon">${icon}</div>
+          <div class="overview-activity-body">
+            <div class="overview-activity-title">${escapeHtml(a.text)}</div>
+            <div class="overview-activity-time">${formatRelative(a.at)}</div>
+          </div>
+        `
+        act.appendChild(item)
+      }
+    }
+  } catch (err) {
+    document.getElementById('overviewActivity').innerHTML = '<div style="color:var(--text-muted);font-size:13px">' + t('overview.error', { msg: escapeHtml(String(err.message || err)) }) + '</div>'
+  }
+}
+
+// Brand mark + product-brand chrome: pull the configured brand from
+// /api/wraith and apply it to the dashboard chrome (tab title, mobile topbar,
+// sidebar name, updates subtitle). brandName is the product/system name and is
+// distinct from the main agent's display name; the backend defaults brandName to
+// BOT_NAME, so a brand-unaware install keeps showing the agent name. If the
+// field is absent (legacy backend) the existing HTML default text is kept.
+async function initSidebarBrand() {
+  try {
+    const img = document.createElement('img')
+    img.src = '/api/wraith/avatar' + avatarBust()
+    img.onload = () => {
+      const mark = document.getElementById('sidebarBrandMark')
+      if (mark) { mark.textContent = ''; mark.appendChild(img) }
+    }
+    const res = await fetch('/api/wraith')
+    if (res.ok) {
+      const m = await res.json()
+      const brand = m.brandName || m.name
+      // Publish the brand tokens so every t() call ({brand}/{bot}/{agentId})
+      // renders the configured names, then re-apply the static i18n so any
+      // label painted before this fetch resolved picks up the real brand.
+      window._brandTokens = {
+        brand: brand || 'Wraith',
+        bot: m.name || brand || 'Wraith',
+        agentId: m.agentId || 'wraith',
+      }
+      if (typeof renderStaticI18n === 'function') renderStaticI18n()
+      if (brand) {
+        document.title = brand
+        const appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]')
+        if (appleTitle) appleTitle.setAttribute('content', brand)
+        const topbar = document.getElementById('mobileTopbarTitle')
+        if (topbar) topbar.textContent = brand
+        const name = document.getElementById('sidebarBrandName')
+        if (name) name.textContent = brand
+        const subtitle = document.getElementById('updatesSubtitle')
+        if (subtitle) subtitle.textContent = `${brand} ` + t('overview.updates_subtitle')
+      }
+    }
+  } catch {}
+}
+initSidebarBrand()
+
+// In an installed (standalone) PWA, lock the zoom: iOS otherwise auto-zooms when
+// a small-text input is focused and allows stray pinch-zoom, neither of which
+// suits an app-like control panel. Left untouched in a normal browser tab so
+// page zoom / accessibility still work there.
+if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
+  const vp = document.querySelector('meta[name="viewport"]')
+  if (vp) vp.setAttribute('content', 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover')
+}
+
+// === Updates page ===
+function escapeHtmlUpdates(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+function renderUpdatesBadge(status) {
+  const badge = document.getElementById('updatesBadge')
+  if (!badge) return
+  // Version-centric: show the number of NEW VERSIONS, not raw commits. Fall back
+  // to the behind count only in the rare pre-release state (unreleased commits
+  // but no new version tag yet).
+  const versionCount = status && Array.isArray(status.releases)
+    ? status.releases.filter((r) => r.version).length : 0
+  const count = versionCount > 0 ? versionCount : ((status && status.behind) || 0)
+  if (count > 0) {
+    badge.textContent = String(count)
+    badge.hidden = false
+  } else {
+    badge.hidden = true
+  }
+}
+
+// === Branch-drift warning ===
+// Installs that landed on a non-main branch (e.g. a branchless clone before
+// the --branch main pin) keep receiving unreleased code from update.sh, which
+// pulls the tracked branch. Two surfaces, both non-blocking: a dismissible
+// top banner (dismissal persists per browser AND per branch, so a later switch
+// to yet another branch re-warns) and a permanent notice on the Updates page.
+// Dev machines follow develop on purpose; one dismissal silences the banner
+// for them while the Updates-page notice stays as the quiet ground truth.
+const BRANCH_DRIFT_DISMISS_PREFIX = 'wraith.branch-drift-dismissed.'
+const BRANCH_HEAL_COMMAND = 'git checkout main && bash update.sh'
+
+function branchDriftDismissed(branch) {
+  try { return localStorage.getItem(BRANCH_DRIFT_DISMISS_PREFIX + branch) === '1' } catch { return false }
+}
+
+function updateBranchDriftUI(status) {
+  const banner = document.getElementById('branchDriftBanner')
+  if (!banner) return
+  const branch = status && status.branch
+  const drifted = !!branch && branch !== 'main'
+  if (!drifted || branchDriftDismissed(branch)) {
+    banner.hidden = true
+    return
+  }
+  const textEl = document.getElementById('branchDriftBannerText')
+  if (textEl) {
+    textEl.innerHTML =
+      `${t('branch_drift.banner.text', { branch: `<strong>${escapeHtmlUpdates(branch)}</strong>` })} ` +
+      `<code>${BRANCH_HEAL_COMMAND}</code>`
+  }
+  banner.hidden = false
+}
+
+function wireBranchDriftBanner() {
+  const dismiss = document.getElementById('branchDriftDismiss')
+  if (!dismiss) return
+  dismiss.addEventListener('click', () => {
+    const banner = document.getElementById('branchDriftBanner')
+    const branch = (window._updatesStatus && window._updatesStatus.branch) || ''
+    try { if (branch) localStorage.setItem(BRANCH_DRIFT_DISMISS_PREFIX + branch, '1') } catch { /* storage blocked */ }
+    if (banner) banner.hidden = true
+  })
+}
+
+function renderBranchNotice(status) {
+  const el = document.getElementById('updatesBranchNotice')
+  if (!el) return
+  const branch = status && status.branch
+  if (!branch) { el.hidden = true; return }
+  if (branch === 'main') {
+    el.className = 'updates-branch-notice ok'
+    el.innerHTML = `${t('branch_drift.notice.on_main')} (<code>main</code>)`
+  } else {
+    el.className = 'updates-branch-notice warn'
+    el.innerHTML =
+      `${t('branch_drift.notice.off_main', { branch: `<code>${escapeHtmlUpdates(branch)}</code>` })}<br>` +
+      `${t('branch_drift.notice.heal')} <code>${BRANCH_HEAL_COMMAND}</code>`
+  }
+  el.hidden = false
+}
+
+async function pollUpdatesBadge() {
+  try {
+    const res = await fetch('/api/updates')
+    if (!res.ok) return
+    const data = await res.json()
+    window._updatesStatus = data
+    renderUpdatesBadge(data)
+    updateBranchDriftUI(data)
+  } catch {}
+}
+
+async function loadUpdates() {
+  const summary = document.getElementById('updatesSummary')
+  const list = document.getElementById('updatesCommitList')
+  const applyBtn = document.getElementById('updatesApplyBtn')
+  summary.textContent = t('updates.checking')
+  summary.className = 'updates-summary'
+  list.innerHTML = ''
+  try {
+    const res = await fetch('/api/updates')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    window._updatesStatus = data
+    renderUpdatesBadge(data)
+    updateBranchDriftUI(data)
+    renderBranchNotice(data)
+    const cur = (data.current || '').slice(0, 7) || '–'
+    const lat = (data.latest || '').slice(0, 7) || '–'
+    if (data.error) {
+      summary.className = 'updates-summary error'
+      summary.innerHTML = `<strong>${t('updates.check_failed')}:</strong> ${escapeHtmlUpdates(data.error)}<br>${t('updates.current_label')} <code>${cur}</code>`
+      applyBtn.hidden = true
+    } else if (data.behind === 0) {
+      summary.className = 'updates-summary up-to-date'
+      summary.innerHTML = `<strong>${t('updates.up_to_date_html')}</strong> (<code>${cur}</code>). ${t('updates.no_changes')}`
+      applyBtn.hidden = true
+    } else {
+      summary.className = 'updates-summary behind'
+      const versions = (data.releases || []).filter((r) => r.version)
+      if (versions.length > 0) {
+        // Version-centric: "N uj verzio elerheto (v1.21.0)".
+        summary.innerHTML = `<strong>${t('updates.versions_available', { n: versions.length })}</strong> <code>${escapeHtmlUpdates(versions[0].version)}</code>`
+      } else {
+        // Pre-release: unreleased commits but no new version tag yet.
+        summary.innerHTML = `<strong>${t('updates.changes_available')}</strong> ${t('updates.available_on', { remote: `<code>${escapeHtmlUpdates(data.remote)}</code>` })}`
+      }
+      applyBtn.hidden = false
+    }
+    const commitCard = (c) => `
+        <div class="updates-commit">
+          <div class="updates-commit-head">
+            <span>${escapeHtmlUpdates(c.short)} · ${escapeHtmlUpdates(c.author)}</span>
+            <span>${escapeHtmlUpdates((c.date || '').slice(0, 10))}</span>
+          </div>
+          <div class="updates-commit-msg">${escapeHtmlUpdates(c.message)}</div>
+        </div>`
+    if (data.releases && data.releases.length) {
+      // Version-centric: the human-language summary per version is the primary
+      // content; the raw commit list (SHAs, conventional-commit prefixes, author
+      // names) is tucked behind a collapsed "details" so it is never the first
+      // thing the operator sees.
+      list.innerHTML = data.releases.map((rel) => {
+        const isUpcoming = !rel.version
+        const label = isUpcoming ? t('updates.group.upcoming') : escapeHtmlUpdates(rel.version)
+        const human = rel.summary
+          ? escapeHtmlUpdates(rel.summary)
+          : (isUpcoming ? t('updates.upcoming_note') : '')
+        return `
+        <div class="updates-version">
+          <div class="updates-version-tag">${label}</div>
+          ${human ? `<div class="updates-version-summary">${human}</div>` : ''}
+          <details class="updates-version-details">
+            <summary>${t('updates.details', { n: rel.commits.length })}</summary>
+            <div class="updates-commit-list">${rel.commits.map(commitCard).join('')}</div>
+          </details>
+        </div>`
+      }).join('')
+    } else if (data.commits && data.commits.length) {
+      list.innerHTML = data.commits.map(commitCard).join('')
+    } else if (data.behind === 0) {
+      list.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('updates.no_changes')}</p>`
+    }
+  } catch (err) {
+    summary.className = 'updates-summary error'
+    summary.textContent = 'Hiba: ' + (err.message || err)
+    applyBtn.hidden = true
+  }
+  renderDiagnoseOffer()
+}
+
+// Post-rollback diagnosis offer (PR-D). Reads /api/updates/status: if the last
+// update failed/rolled-back and this host can run a Claude agent, offer the
+// opt-in fixer; if it cannot (AVX), show a manual-intervention note instead.
+async function renderDiagnoseOffer() {
+  const box = document.getElementById('updatesDiagnose')
+  if (!box) return
+  let data
+  try { data = await (await fetch('/api/updates/status')).json() } catch { box.hidden = true; return }
+  if (data.needsHuman) {
+    box.hidden = false
+    box.className = 'updates-diagnose needs-human'
+    box.innerHTML = `<strong>${escapeHtmlUpdates(t('updates.diagnose.title'))}</strong><p>${escapeHtmlUpdates(t('updates.diagnose.needs_human'))}</p>`
+    return
+  }
+  if (!data.canDiagnose) { box.hidden = true; box.innerHTML = ''; return }
+  box.hidden = false
+  box.className = 'updates-diagnose'
+  box.innerHTML = `<strong>${escapeHtmlUpdates(t('updates.diagnose.title'))}</strong>`
+    + `<p>${escapeHtmlUpdates(t('updates.diagnose.body'))}</p>`
+    + `<button class="btn-secondary btn-compact" id="updatesDiagnoseBtn">${escapeHtmlUpdates(t('updates.diagnose.btn'))}</button>`
+  document.getElementById('updatesDiagnoseBtn').addEventListener('click', runDiagnose)
+}
+
+async function runDiagnose() {
+  if (!confirm(t('updates.diagnose.consent'))) return
+  const btn = document.getElementById('updatesDiagnoseBtn')
+  if (btn) btn.disabled = true
+  try {
+    const res = await fetch('/api/updates/diagnose', { method: 'POST' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      if (btn) btn.disabled = false
+      showToast(t('updates.diagnose.failed', { msg: data.error || ('HTTP ' + res.status) }))
+      return
+    }
+    showToast(data.already ? t('updates.diagnose.already') : t('updates.diagnose.started'))
+    if (btn) { btn.hidden = true }
+  } catch (err) {
+    if (btn) btn.disabled = false
+    showToast(t('updates.diagnose.failed', { msg: err.message || err }))
+  }
+}
+
+document.getElementById('updatesCheckBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('updatesCheckBtn')
+  btn.disabled = true
+  try { await fetch('/api/updates/check', { method: 'POST' }) } catch {}
+  await loadUpdates()
+  btn.disabled = false
+})
+
+async function runUpdate(autoStash) {
+  const btn = document.getElementById('updatesApplyBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+  const resetBtn = () => {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+  try {
+    const res = await fetch('/api/updates/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ autoStash: autoStash === true }),
+    })
+    // Parse the body regardless of status so preflight reasons
+    // (not-on-main / dirty-tree / detached-head returned as 409 by
+    // the backend) land in the toast instead of a bare "HTTP 409".
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      resetBtn()
+      // dirty-tree without autoStash: offer the auto-stash retry inline.
+      if (data.reason === 'dirty-tree' && !autoStash) {
+        if (confirm(t('updates.confirm.stash'))) {
+          await runUpdate(true)
+        }
+        return
+      }
+      showToast(t('updates.toast.not_started', { msg: data.error || ('HTTP ' + res.status) }))
+      return
+    }
+    showToast(t('updates.toast.applying'))
+    // Poll the real outcome instead of a blind timed reload. update.sh (and its
+    // detached finalizer) write store/update.last-result on exit, so we surface
+    // success / rolled-back / failed rather than a false "done" that reloads
+    // into an unchanged (or dead) dashboard.
+    await pollUpdateOutcome(resetBtn)
+  } catch (err) {
+    resetBtn()
+    showToast(t('updates.toast.error', {msg: err.message || err}))
+  }
+}
+
+// Poll /api/updates/status until the run finishes (pidfile gone AND a fresh
+// result is present), then show the true outcome. Reload only on success.
+async function pollUpdateOutcome(resetBtn) {
+  const startedAt = Date.now()
+  const deadline = startedAt + 5 * 60_000   // hard cap: 5 min
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 3000))
+    let data
+    try {
+      const res = await fetch('/api/updates/status')
+      data = await res.json()
+    } catch {
+      // Dashboard is mid-restart (expected): keep polling.
+      continue
+    }
+    const result = data && data.result
+    const fresh = result && typeof result.ts === 'number' && result.ts * 1000 >= startedAt - 5000
+    if (data && !data.running && fresh) {
+      const st = result.status
+      if (st === 'success') {
+        showToast(t('updates.toast.success', { old: result.old || '', new: result.new || '' }))
+        setTimeout(() => window.location.reload(), 2000)
+        return
+      }
+      if (st === 'rolled-back') {
+        if (resetBtn) resetBtn()
+        showToast(t('updates.toast.rolled_back', { old: result.old || '', msg: result.message || '' }))
+        renderDiagnoseOffer()
+        return
+      }
+      // failed
+      if (resetBtn) resetBtn()
+      showToast(t('updates.toast.failed', { phase: result.phase || '?', msg: result.message || ('code ' + result.code) }))
+      renderDiagnoseOffer()
+      return
+    }
+  }
+  if (resetBtn) resetBtn()
+  showToast(t('updates.toast.status_timeout'))
+}
+
+document.getElementById('updatesApplyBtn').addEventListener('click', async () => {
+  if (!confirm(t('updates.confirm.apply'))) return
+  await runUpdate(false)
+})
+
+// Poll the badge on startup and every 5 min so the nav link reflects
+// the cached status even on tabs other than the Updates page.
+pollUpdatesBadge()
+setInterval(pollUpdatesBadge, 5 * 60_000)
+
+// === First-run onboarding wizard ===
+// Full-screen overlay shown when /api/onboarding/status reports the install
+// still needs setup (pre-install-now / configure-later flow). Steps 2-3 reuse
+// the existing channel-setup + pairing backend endpoints.
+async function fetchOnboardingStatus() {
+  try { return await (await fetch('/api/onboarding/status')).json() } catch { return null }
+}
+function onboardingCurrentStep(s) {
+  if (!s.identityConfirmed) return 1
+  if (!s.claudeAuthPresent || !s.agentsRunning) return 2
+  if (!s.channelConfigured) return 3
+  if (!s.paired) return 4
+  return 0
+}
+// Operator can dismiss the wizard (skip/close). A false positive must never
+// lock the dashboard, so the choice persists across reloads; normal UI still
+// covers any real setup that remains.
+const ONBOARDING_DISMISS_KEY = 'mvOnboardingDismissed'
+function onboardingDismissed() {
+  try { return localStorage.getItem(ONBOARDING_DISMISS_KEY) === '1' } catch { return false }
+}
+function dismissOnboarding() {
+  try { localStorage.setItem(ONBOARDING_DISMISS_KEY, '1') } catch { /* private mode */ }
+  const overlay = document.getElementById('onboardingOverlay')
+  if (overlay) { overlay.classList.remove('active'); overlay.hidden = true }
+  document.body.style.overflow = ''
+}
+async function initOnboarding() {
+  if (onboardingDismissed()) return
+  const s = await fetchOnboardingStatus()
+  if (!s || !s.needsOnboarding) return
+  renderOnboarding(s)
+}
+async function refreshOnboarding() {
+  const s = await fetchOnboardingStatus()
+  if (s) renderOnboarding(s)
+}
+function renderOnboarding(s) {
+  if (onboardingDismissed()) return
+  const overlay = document.getElementById('onboardingOverlay')
+  if (!overlay) return
+  const step = onboardingCurrentStep(s)
+  if (step === 0) { overlay.classList.remove('active'); overlay.hidden = true; document.body.style.overflow = ''; return }
+  overlay.hidden = false
+  overlay.classList.add('active')
+  document.body.style.overflow = 'hidden'
+  document.querySelectorAll('#onboardingSteps .onboarding-step').forEach((el) => {
+    const n = Number(el.dataset.ostep)
+    el.classList.toggle('active', n === step)
+    el.classList.toggle('done', n < step)
+  })
+  // The steps build on each other and the system only comes alive at the end
+  // of step 4 -- say so, or a fresh installer reads step 2's "saved" as "done"
+  // and every later "bot token not found" as a failure (BK bootcamp, 07-28).
+  const flowNote = document.getElementById('onbFlowNote')
+  if (flowNote) flowNote.textContent = step === 4 ? t('onboarding.flow_note_last') : t('onboarding.flow_note')
+  const body = document.getElementById('onboardingBody')
+  if (step === 1) body.innerHTML = onbIdentityHtml(s)
+  else if (step === 2) body.innerHTML = onbStep1Html(s)
+  else if (step === 3) body.innerHTML = onbStep2Html()
+  else body.innerHTML = onbStep3Html(s)
+  wireOnboarding(step)
+}
+function onbMsg(text, isErr) {
+  const el = document.getElementById('onbMsg')
+  if (el) { el.textContent = text; el.className = 'onb-msg' + (isErr ? ' err' : ' ok') }
+}
+function onbIdentityHtml(s) {
+  return `<p>${escapeHtml(t('onboarding.identity.desc'))}</p>`
+    + `<label class="form-label-sm">${escapeHtml(t('onboarding.identity.agent_label'))}</label>`
+    + `<input id="onbAgentName" type="text" class="onb-input" maxlength="40" value="${escapeHtml(s.currentAgentName || '')}" autocomplete="off">`
+    + `<label class="form-label-sm">${escapeHtml(t('onboarding.identity.owner_label'))}</label>`
+    + `<input id="onbOwnerName" type="text" class="onb-input" maxlength="60" value="${escapeHtml(s.currentOwnerName || '')}" autocomplete="off">`
+    + `<div class="onb-hint">${escapeHtml(t('onboarding.identity.hint'))}</div>`
+    + `<button class="btn-primary btn-compact" id="onbIdentityBtn">${escapeHtml(t('onboarding.identity.save_btn'))}</button>`
+    + `<div id="onbMsg" class="onb-msg"></div>`
+}
+function onbStep1Html(s) {
+  return `<p>${escapeHtml(t('onboarding.step1.desc'))}</p>`
+    + (s.claudeAuthPresent
+      ? `<p class="onb-ok-line">${escapeHtml(t('onboarding.step1.auth_done'))}</p>`
+      : `<label class="form-label-sm">${escapeHtml(t('onboarding.step1.token_label'))}</label>`
+        + `<input id="onbToken" type="password" class="onb-input" placeholder="sk-ant-oat01-..." autocomplete="off">`
+        + `<div class="onb-hint">${escapeHtml(t('onboarding.step1.token_hint'))}</div>`
+        + `<button class="btn-primary btn-compact" id="onbAuthBtn">${escapeHtml(t('onboarding.step1.save_btn'))}</button>`)
+    + (s.claudeAuthPresent && !s.agentsRunning
+      ? `<button class="btn-primary btn-compact" id="onbLaunchBtn">${escapeHtml(t('onboarding.step1.launch_btn'))}</button>`
+      : '')
+    + `<div id="onbMsg" class="onb-msg"></div>`
+}
+function onbStep2Html() {
+  return `<p>${escapeHtml(t('onboarding.step2.desc'))}</p>`
+    + `<label class="form-label-sm">${escapeHtml(t('onboarding.step2.token_label'))}</label>`
+    + `<input id="onbBotToken" type="password" class="onb-input" placeholder="123456:ABC..." autocomplete="off">`
+    + `<div class="onb-hint">${escapeHtml(t('onboarding.step2.token_hint'))}</div>`
+    + `<button class="btn-primary btn-compact" id="onbBotBtn">${escapeHtml(t('onboarding.step2.save_btn'))}</button>`
+    + `<div id="onbMsg" class="onb-msg"></div>`
+}
+function onbStep3Html(s) {
+  // Pairing needs the channels session up (the wizard restarted it after the
+  // bot-token save) -- show its state so a not-yet-up service reads as
+  // "starting", not as the user's failure.
+  const svcLine = s && s.agentsRunning
+    ? `<p class="onb-ok-line">${escapeHtml(t('onboarding.step3.svc_up'))}</p>`
+    : `<p class="onb-hint">${escapeHtml(t('onboarding.step3.svc_starting'))}</p>`
+  return `<p>${escapeHtml(t('onboarding.step3.desc'))}</p>`
+    + svcLine
+    + `<ol class="onb-list"><li>${escapeHtml(t('onboarding.step3.li1'))}</li><li>${escapeHtml(t('onboarding.step3.li2'))}</li></ol>`
+    + `<div id="onbPending" class="onb-pending"></div>`
+    + `<button class="btn-secondary btn-compact" id="onbRefreshBtn">${escapeHtml(t('onboarding.step3.refresh_btn'))}</button>`
+    + `<div id="onbMsg" class="onb-msg"></div>`
+}
+function wireOnboarding(step) {
+  if (step === 1) {
+    const idBtn = document.getElementById('onbIdentityBtn')
+    if (idBtn) idBtn.addEventListener('click', async () => {
+      const agentName = (document.getElementById('onbAgentName').value || '').trim()
+      const ownerName = (document.getElementById('onbOwnerName').value || '').trim()
+      if (!agentName || !ownerName) { onbMsg(t('onboarding.identity.empty'), true); return }
+      idBtn.disabled = true; onbMsg(t('onboarding.saving'))
+      try {
+        const res = await fetch('/api/onboarding/identity', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentName, ownerName }) })
+        const d = await res.json().catch(() => ({}))
+        if (!res.ok) { idBtn.disabled = false; onbMsg(d.error || t('onboarding.error'), true); return }
+        // The name is live in the .env now -- repaint the chrome from
+        // /api/wraith so the sidebar/title reflect it immediately, and
+        // surface the automatic channels restart (same pattern as the
+        // claude-auth step) instead of silently advancing.
+        if (typeof initSidebarBrand === 'function') initSidebarBrand()
+        if (d.restartError) { idBtn.disabled = false; onbMsg(t('onboarding.identity.saved_restart_failed'), true); setTimeout(refreshOnboarding, 6000); return }
+        if (d.restarted) { onbMsg(t('onboarding.identity.saved_restarted')); setTimeout(refreshOnboarding, 2500); return }
+        if (d.restartNeeded) { onbMsg(t('onboarding.identity.saved_restart_needed')); await refreshOnboarding(); return }
+        onbMsg(t('onboarding.identity.saved'))
+        await refreshOnboarding()
+      } catch (e) { idBtn.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
+    })
+    return
+  }
+  if (step === 2) {
+    const authBtn = document.getElementById('onbAuthBtn')
+    if (authBtn) authBtn.addEventListener('click', async () => {
+      const token = (document.getElementById('onbToken').value || '').trim()
+      if (!token) { onbMsg(t('onboarding.step1.token_empty'), true); return }
+      authBtn.disabled = true; onbMsg(t('onboarding.saving'))
+      try {
+        const res = await fetch('/api/onboarding/claude-auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })
+        const d = await res.json().catch(() => ({}))
+        if (!res.ok) { authBtn.disabled = false; onbMsg(d.error || t('onboarding.error'), true); return }
+        // Fresh-install path: the server restarts the (previously
+        // unauthenticated) channels session right after the first auth save --
+        // surface that, and on failure show the manual restart step instead of
+        // silently advancing.
+        if (d.restartError) { authBtn.disabled = false; onbMsg(t('onboarding.step1.saved_restart_failed'), true); setTimeout(refreshOnboarding, 6000); return }
+        if (d.restarted) { onbMsg(t('onboarding.step1.saved_restarted')); setTimeout(refreshOnboarding, 2500); return }
+        onbMsg(d.verified ? t('onboarding.step1.saved_verified') : t('onboarding.step1.saved_unverified'))
+        await refreshOnboarding()
+      } catch (e) { authBtn.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
+    })
+    const launchBtn = document.getElementById('onbLaunchBtn')
+    if (launchBtn) launchBtn.addEventListener('click', async () => {
+      launchBtn.disabled = true; onbMsg(t('onboarding.step1.launching'))
+      try {
+        const res = await fetch('/api/onboarding/launch', { method: 'POST' })
+        const d = await res.json().catch(() => ({}))
+        if (!res.ok) { launchBtn.disabled = false; onbMsg(d.error || t('onboarding.error'), true); return }
+        onbMsg(t('onboarding.step1.launched'))
+        // On a fresh install the session is CREATED here (ONBTMUX1) and takes a
+        // ~minute cold start via channels.sh. Poll until it is up so the wizard
+        // advances on its own instead of stranding the user on step 2 after a
+        // single 2.5s re-check. Bounded so a genuinely failed start still hands
+        // control back rather than spinning forever.
+        let up = false
+        for (let i = 0; i < 40 && !up; i++) {  // ~40 x 3s = 2 min
+          await new Promise((r) => setTimeout(r, 3000))
+          const st = await fetchOnboardingStatus()
+          if (st && st.agentsRunning) { up = true; break }
+        }
+        if (up) { await refreshOnboarding() }
+        // Timeout is NOT success: on a slow machine the cold start can outlast
+        // the 2-min bound while still being healthy, so the message must say
+        // "still starting, check back / refresh" -- repeating the launched
+        // message here would also mask a genuinely dead start (PR #779 review).
+        else { launchBtn.disabled = false; onbMsg(t('onboarding.step1.launch_slow'), true) }
+      } catch (e) { launchBtn.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
+    })
+  } else if (step === 3) {
+    const botBtn = document.getElementById('onbBotBtn')
+    if (botBtn) botBtn.addEventListener('click', async () => {
+      const botToken = (document.getElementById('onbBotToken').value || '').trim()
+      if (!botToken) { onbMsg(t('onboarding.step2.token_empty'), true); return }
+      botBtn.disabled = true; onbMsg(t('onboarding.saving'))
+      try {
+        const res = await fetch(`/api/agents/${encodeURIComponent(mainAgentId())}/channels/telegram`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botToken }) })
+        const d = await res.json().catch(() => ({}))
+        if (!res.ok) { botBtn.disabled = false; onbMsg(d.error || t('onboarding.error'), true); return }
+        // The server restarts the channels session so the new bot token goes
+        // live -- say so, and give the respawn a beat before advancing so the
+        // pairing step starts against the restarted service.
+        onbMsg(d.restarted ? t('onboarding.step2.saved_restarted') : t('onboarding.step2.saved'))
+        setTimeout(refreshOnboarding, d.restarted ? 4000 : 2000)
+      } catch (e) { botBtn.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
+    })
+  } else if (step === 4) {
+    const refreshBtn = document.getElementById('onbRefreshBtn')
+    // One sink for both failure paths. The box alone was not enough: it renders
+    // in the same muted onb-hint slot as "no pending", so the very distinction
+    // this fix is about -- "nobody is waiting" vs "I could not ask" -- stayed
+    // invisible. onbMsg is the error channel this function already uses for the
+    // approve step a few lines below.
+    const showPendingError = (msg) => {
+      const box = document.getElementById('onbPending')
+      if (box) box.innerHTML = `<span class="onb-hint">${escapeHtml(msg)}</span>`
+      onbMsg(msg, true)
+    }
+    const loadPending = async () => {
+      try {
+        // Same boot race the Messages page already guards against (see
+        // ensureWraithLoaded): until /api/wraith resolves window._wraith,
+        // mainAgentId() returns the literal 'wraith' fallback. On a renamed
+        // install that is not the main agent, so the backend takes the
+        // sub-agent branch, finds no such agent dir and answers 404 -- and the
+        // wizard rendered that as "no pending pairing" while the Channel view,
+        // which uses the selected agent, listed the very same request.
+        await ensureWraithLoaded()
+        const res = await fetch(`/api/agents/${encodeURIComponent(mainAgentId())}/channels/telegram/pending`)
+        // Surface the failure instead of rendering it as an empty list. This is
+        // a separate defect from the id race: without it a 404 or an auth error
+        // reads as "nobody is waiting for approval", which is the one answer the
+        // user cannot act on. A NETWORK failure does not land here at all -- the
+        // fetch rejects -- so the outer catch carries the same message; see the
+        // end of this function. The two together are what make the comment true.
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}))
+          showPendingError(d.error || t('onboarding.error'))
+          return
+        }
+        const p = await res.json()
+        // Backend contract: [{code, senderId, chatId, createdAt, expiresAt}].
+        // `code` is the approve key (the same code the bot sent the user) --
+        // POSTing anything else gets a 400 and the pairing never completes.
+        const now = Date.now()
+        const list = (Array.isArray(p) ? p : (p.pending || [])).filter((x) => x && x.code && (!x.expiresAt || x.expiresAt > now))
+        const box = document.getElementById('onbPending')
+        if (!box) return
+        if (!list.length) { box.innerHTML = `<span class="onb-hint">${escapeHtml(t('onboarding.step3.no_pending'))}</span>`; return }
+        box.innerHTML = list.map((x) => {
+          const code = escapeHtml(String(x.code))
+          const label = escapeHtml(String(x.senderId || x.chatId || '?')) + ' · ' + code
+          return `<div class="onb-pending-row"><span>${label}</span><button class="btn-primary btn-compact onb-approve" data-code="${code}">${escapeHtml(t('onboarding.step3.approve_btn'))}</button></div>`
+        }).join('')
+        box.querySelectorAll('.onb-approve').forEach((b) => b.addEventListener('click', async () => {
+          b.disabled = true
+          try {
+            const res = await fetch(`/api/agents/${encodeURIComponent(mainAgentId())}/channels/telegram/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: b.dataset.code }) })
+            const d = await res.json().catch(() => ({}))
+            if (!res.ok) { b.disabled = false; onbMsg(d.error || t('onboarding.error'), true); return }
+            onbMsg(t('onboarding.step3.approved'))
+            setTimeout(refreshOnboarding, 1500)
+          } catch (e) { b.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
+        }))
+      } catch (e) {
+        // Network-level failure: the fetch rejected, so the !res.ok branch never
+        // ran. Without this the box stays empty and the user reads it as "nobody
+        // is waiting" -- the exact defect this change is about.
+        showPendingError((e && e.message) || t('onboarding.error'))
+      }
+    }
+    if (refreshBtn) refreshBtn.addEventListener('click', () => { refreshOnboarding() })
+    loadPending()
+  }
+}
+
+// === Init ===
+populateAvatarGrid()
+loadMemAgents()
+loadOverview()
+loadAvailableModels()
+{
+  const onbClose = document.getElementById('onboardingClose')
+  if (onbClose) onbClose.addEventListener('click', dismissOnboarding)
+}
+initOnboarding()
+
+// "DeepSeek API kulcs hozzáadása" link az agent edit panel-en --
+// a Vault page-re visz, ahol a felhasználó egy DEEPSEEK_API_KEY
+// secret-et tud felvenni, és visszatérve frissítjük a model listát.
+document.getElementById('deepseekConfigLink')?.addEventListener('click', (e) => {
+  e.preventDefault()
+  location.hash = 'vault'
+})
+
+// === Sudo modal for managed-settings.json (Slack setup pre-flight) ===
+function showSudoModal(sudoCommand) {
+  let overlay = document.getElementById('sudoModalOverlay')
+  if (overlay) overlay.remove()
+  overlay = document.createElement('div')
+  overlay.id = 'sudoModalOverlay'
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center'
+  const card = document.createElement('div')
+  card.style.cssText = 'background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:560px;width:90%'
+  card.innerHTML = `
+    <h3 style="margin:0 0 12px">${t('channel.sudo_modal.title')}</h3>
+    <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px">${t('channel.sudo_modal.desc')}</p>
+    <div style="position:relative">
+      <pre id="sudoCmdPre" style="background:var(--bg-main);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;overflow-x:auto;white-space:pre-wrap;word-break:break-all">${escapeHtml(sudoCommand)}</pre>
+      <button id="sudoCopyBtn" style="position:absolute;top:6px;right:6px;padding:4px 10px;font-size:11px;border-radius:6px;border:1px solid var(--border);background:var(--bg-card);cursor:pointer">${t('common.copy')}</button>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+      <button id="sudoCancelBtn" class="btn btn-secondary" style="padding:6px 16px;font-size:13px">${t('channel.sudo_modal.cancel')}</button>
+      <button id="sudoDoneBtn" class="btn btn-primary" style="padding:6px 16px;font-size:13px">${t('channel.sudo_modal.retry')}</button>
+    </div>
+  `
+  overlay.appendChild(card)
+  document.body.appendChild(overlay)
+
+  document.getElementById('sudoCopyBtn').addEventListener('click', () => {
+    navigator.clipboard.writeText(sudoCommand).then(() => {
+      document.getElementById('sudoCopyBtn').textContent = t('common.copied')
+      setTimeout(() => { document.getElementById('sudoCopyBtn').textContent = t('common.copy') }, 1500)
+    })
+  })
+  document.getElementById('sudoCancelBtn').addEventListener('click', () => overlay.remove())
+  document.getElementById('sudoDoneBtn').addEventListener('click', () => {
+    overlay.remove()
+    document.getElementById('chConnectBtn').click()
+  })
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove() })
+}
+
+// === Clipboard fallback (non-secure context / legacy browser) ===
+function fallbackCopyToClipboard(text, btn) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.cssText = 'position:fixed;left:-9999px'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    const ok = document.execCommand('copy')
+    if (ok) {
+      btn.textContent = t('common.copied')
+      setTimeout(() => { btn.textContent = t('common.copy') }, 1500)
+    } else {
+      showToast(t('common.toast.copy_failed'))
+    }
+  } catch {
+    showToast(t('common.toast.copy_failed'))
+  }
+  document.body.removeChild(ta)
+}
+
+// === Slack App manifest modal ===
+function showSlackManifestModal(manifest, instructions) {
+  let overlay = document.getElementById('slackManifestOverlay')
+  if (overlay) overlay.remove()
+  overlay = document.createElement('div')
+  overlay.id = 'slackManifestOverlay'
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center'
+  const card = document.createElement('div')
+  card.style.cssText = 'background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:640px;width:95%;max-height:85vh;overflow-y:auto'
+
+  const stepsHtml = instructions.map((s, i) => `<li style="margin-bottom:6px">${escapeHtml(s)}</li>`).join('')
+
+  card.innerHTML = `
+    <h3 style="margin:0 0 16px">${t('channel.slack_manifest.title')}</h3>
+    <p style="font-size:13px;color:var(--text-muted);margin:0 0 12px">${t('channel.slack_manifest.desc')}</p>
+    <div style="position:relative;margin-bottom:16px">
+      <pre id="slackManifestPre" style="background:var(--bg-main);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;max-height:240px;overflow-y:auto">${escapeHtml(manifest)}</pre>
+      <button id="slackManifestCopyBtn" style="position:absolute;top:6px;right:6px;padding:4px 10px;font-size:11px;border-radius:6px;border:1px solid var(--border);background:var(--bg-card);cursor:pointer">${t('common.copy')}</button>
+    </div>
+    <h4 style="margin:0 0 8px;font-size:14px">${t('channel.slack_manifest.steps_title')}</h4>
+    <ol style="font-size:13px;padding-left:20px;margin:0 0 16px">${stepsHtml}</ol>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button id="slackManifestCloseBtn" class="btn btn-secondary" style="padding:6px 16px;font-size:13px">${t('common.btn.close')}</button>
+      <a href="https://api.slack.com/apps" target="_blank" rel="noopener" class="btn btn-primary" style="padding:6px 16px;font-size:13px;text-decoration:none;display:inline-flex;align-items:center;gap:4px">
+        ${t('channel.slack_manifest.open_btn')}
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+      </a>
+    </div>
+  `
+  overlay.appendChild(card)
+  document.body.appendChild(overlay)
+
+  document.getElementById('slackManifestCopyBtn').addEventListener('click', () => {
+    const copyBtn = document.getElementById('slackManifestCopyBtn')
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(manifest).then(() => {
+        copyBtn.textContent = t('common.copied')
+        setTimeout(() => { copyBtn.textContent = t('common.copy') }, 1500)
+      }).catch(() => {
+        fallbackCopyToClipboard(manifest, copyBtn)
+      })
+    } else {
+      fallbackCopyToClipboard(manifest, copyBtn)
+    }
+  })
+  document.getElementById('slackManifestCloseBtn').addEventListener('click', () => overlay.remove())
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove() })
+}
+
+document.getElementById('chSlackManifestBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const btn = document.getElementById('chSlackManifestBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/channels/slack/manifest`)
+    if (!res.ok) throw new Error()
+    const data = await res.json()
+    showSlackManifestModal(data.manifest, data.instructions)
+  } catch {
+    showToast(t('channel.toast.manifest_failed'))
+  } finally {
+    btn.disabled = false
+  }
+})
+
+// ============================================================
+// === Recall / Napló ===
+// ============================================================
+
+let recallInitialized = false
+let recallSortDesc = true
+
+async function loadRecallPage() {
+  if (!recallInitialized) {
+    recallInitialized = true
+    const today = new Date().toISOString().split('T')[0]
+    document.getElementById('recallDate').value = today
+
+    try {
+      // /api/schedules/agents includes the main agent (jarvis); /api/agents lists sub-agents only
+      const res = await fetch('/api/schedules/agents')
+      if (res.ok) {
+        const agents = await res.json()
+        const sel = document.getElementById('recallAgent')
+        agents.forEach(a => {
+          const opt = document.createElement('option')
+          opt.value = a.name
+          opt.textContent = a.label || a.name
+          sel.appendChild(opt)
+        })
+      }
+    } catch {}
+
+    document.getElementById('recallBtn').addEventListener('click', doRecall)
+    document.getElementById('recallExpr').addEventListener('keydown', e => { if (e.key === 'Enter') doRecall() })
+    document.getElementById('recallSearch').addEventListener('keydown', e => { if (e.key === 'Enter') doRecall() })
+    // Re-fetch per-agent log dates when the agent filter changes; without this
+    // the date hint stayed stuck on the agent active at first page load.
+    document.getElementById('recallAgent').addEventListener('change', loadRecallDates)
+    // #53: sort order toggle
+    document.getElementById('recallSortToggle').addEventListener('click', () => {
+      recallSortDesc = !recallSortDesc
+      const btn = document.getElementById('recallSortToggle')
+      btn.textContent = recallSortDesc ? '↓' : '↑'
+      btn.title = recallSortDesc ? t('recall.sort.tooltip.desc') : t('recall.sort.tooltip.asc')
+      doRecall()
+    })
+
+    loadRecallDates()
+  }
+  doRecall()
+}
+
+async function loadRecallDates() {
+  try {
+    const agentVal = document.getElementById('recallAgent').value
+    const params = agentVal ? `?agent=${encodeURIComponent(agentVal)}&limit=90` : '?limit=90'
+    const res = await fetch('/api/recall/dates' + params)
+    if (!res.ok) return
+    const dates = await res.json()
+    const dateInput = document.getElementById('recallDate')
+    if (dates.length && !dateInput.value) {
+      dateInput.value = dates[0]
+    }
+    dateInput.setAttribute('title', t('recall.date.n_days', { n: dates.length }))
+  } catch {}
+}
+
+async function doRecall() {
+  const dateInput = document.getElementById('recallDate').value
+  const exprInput = document.getElementById('recallExpr').value.trim()
+  const searchInput = document.getElementById('recallSearch').value.trim()
+  const agentInput = document.getElementById('recallAgent').value
+
+  const params = new URLSearchParams()
+  if (exprInput) {
+    params.set('date', exprInput)
+  } else if (dateInput) {
+    params.set('date', dateInput)
+  }
+  if (searchInput) params.set('q', searchInput)
+  if (agentInput) params.set('agent', agentInput)
+
+  const timeline = document.getElementById('recallTimeline')
+  const summary = document.getElementById('recallSummary')
+  timeline.innerHTML = `<p class="recall-loading">${t('recall.loading')}</p>`
+  summary.innerHTML = ''
+
+  try {
+    const res = await fetch('/api/recall?' + params.toString())
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      timeline.innerHTML = `<p class="recall-error">${esc(err.error || t('recall.error'))}</p>`
+      return
+    }
+    const data = await res.json()
+    renderRecallSummary(summary, data)
+    renderRecallTimeline(timeline, data)
+  } catch (err) {
+    timeline.innerHTML = `<p style="color:var(--danger)">${t('recall.load_error')}</p>`
+  }
+}
+
+function renderRecallSummary(el, data) {
+  const { dateRange, summary: s } = data
+  const parts = []
+  if (dateRange.from === dateRange.to) {
+    parts.push(`<strong>${esc(dateRange.from)}</strong>`)
+  } else if (dateRange.from && dateRange.to) {
+    parts.push(`<strong>${esc(dateRange.from)}</strong> &ndash; <strong>${esc(dateRange.to)}</strong>`)
+  }
+  parts.push(t('recall.summary.log_count', { n: s.logCount }))
+  parts.push(t('recall.summary.memory_count', { n: s.memoryCount }))
+  if (s.agents.length) parts.push(`${t('recall.summary.agents')}: ${s.agents.map(esc).join(', ')}`)
+  el.innerHTML = `<div class="recall-summary-row">${parts.map(p => `<span>${p}</span>`).join('')}</div>`
+}
+
+function renderRecallTimeline(el, data) {
+  const { logs, memories } = data
+  if (!logs.length && !memories.length) {
+    el.innerHTML = `<p class="recall-empty">${t('recall.empty_period')}</p>`
+    return
+  }
+
+  const items = []
+  logs.forEach(l => items.push({ type: 'log', ts: l.created_at, agent: l.agent_id, date: l.date, content: l.content, label: l.created_label }))
+  memories.forEach(m => items.push({ type: 'memory', ts: m.created_at, agent: m.agent_id, category: m.category, content: m.content, keywords: m.keywords, label: m.created_label }))
+  // #52/#53: apply sort order (desc = newest first, default)
+  items.sort((a, b) => recallSortDesc ? b.ts - a.ts : a.ts - b.ts)
+
+  let currentDate = ''
+  let html = ''
+  for (const item of items) {
+    const dateStr = item.date || new Date(item.ts * 1000).toISOString().split('T')[0]
+    if (dateStr !== currentDate) {
+      currentDate = dateStr
+      html += `<div class="recall-date-header">${esc(dateStr)}</div>`
+    }
+    if (item.type === 'log') {
+      html += `<div class="recall-item recall-log">
+        <div class="recall-item-header">
+          <span class="recall-item-label">${esc(item.label)}</span>
+          <div class="recall-item-badges">
+            <span class="recall-badge recall-badge-agent">${esc(item.agent)}</span>
+          </div>
+        </div>
+        <div class="recall-item-content">${esc(item.content)}</div>
+      </div>`
+    } else {
+      const cat = item.category || 'warm'
+      html += `<div class="recall-item recall-memory" data-cat="${esc(cat)}">
+        <div class="recall-item-header">
+          <span class="recall-item-label">${esc(item.label)}</span>
+          <div class="recall-item-badges">
+            <span class="recall-badge recall-badge-cat" data-cat="${esc(cat)}">${esc(item.category)}</span>
+            <span class="recall-badge recall-badge-agent">${esc(item.agent)}</span>
+          </div>
+        </div>
+        <div class="recall-item-content">${esc(item.content)}</div>
+        ${item.keywords ? `<div class="recall-item-keywords">Kulcsszavak: ${esc(item.keywords)}</div>` : ''}
+      </div>`
+    }
+  }
+  el.innerHTML = html
+}
+
+function esc(s) {
+  if (!s) return ''
+  const d = document.createElement('div')
+  d.textContent = String(s)
+  return d.innerHTML
+}
+
+// ============================================================
+// === Background Tasks ===
+// ============================================================
+
+let bgInitialized = false
+let bgRefreshTimer = null
+
+async function loadBgTasksPage() {
+  if (!bgInitialized) {
+    bgInitialized = true
+    try {
+      // Use /api/schedules/agents (not /api/agents) so the main agent is a
+      // selectable background-task target too -- /api/agents lists sub-agents
+      // only, while the backend (spawnBackgroundTask) accepts any agent_id.
+      const res = await fetch('/api/schedules/agents')
+      if (res.ok) {
+        const agents = await res.json()
+        const sel = document.getElementById('bgAgent')
+        agents.forEach(a => {
+          const opt = document.createElement('option')
+          opt.value = a.name
+          opt.textContent = a.label || a.name
+          sel.appendChild(opt)
+        })
+        if (agents.length === 1) sel.value = agents[0].name
+      }
+    } catch {}
+
+    document.getElementById('bgStartBtn').addEventListener('click', startBgTask)
+    document.getElementById('bgPrompt').addEventListener('keydown', e => { if (e.key === 'Enter') startBgTask() })
+    document.getElementById('bgShowAll').addEventListener('change', loadBgTasks)
+  }
+  loadBgTasks()
+  if (bgRefreshTimer) clearInterval(bgRefreshTimer)
+  bgRefreshTimer = setInterval(loadBgTasks, 10000)
+}
+
+async function startBgTask() {
+  const agent = document.getElementById('bgAgent').value
+  const prompt = document.getElementById('bgPrompt').value.trim()
+  if (!agent) { showToast(t('bgTasks.select_agent')); return }
+  if (!prompt) { showToast(t('bgTasks.enter_task')); return }
+
+  const btn = document.getElementById('bgStartBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch('/api/background-tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: agent, prompt }),
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      showToast(data.error || t('common.error'))
+      return
+    }
+    document.getElementById('bgPrompt').value = ''
+    showToast(t('bgTasks.toast.started'))
+    loadBgTasks()
+  } catch {
+    showToast(t('bgTasks.toast.start_error'))
+  } finally {
+    btn.disabled = false
+  }
+}
+
+async function loadBgTasks() {
+  const list = document.getElementById('bgTasksList')
+  const showAll = document.getElementById('bgShowAll').checked
+  const agentVal = document.getElementById('bgAgent')?.value || ''
+
+  try {
+    const params = new URLSearchParams()
+    if (agentVal) params.set('agent', agentVal)
+    if (showAll) params.set('all', 'true')
+    const res = await fetch('/api/background-tasks?' + params.toString())
+    if (!res.ok) { list.innerHTML = `<p style="color:var(--danger)">${t('bgTasks.error')}</p>`; return }
+    const tasks = await res.json()
+
+    if (!tasks.length) {
+      list.innerHTML = `<p style="color:var(--text-muted)">${t('bgTasks.empty')}</p>`
+      return
+    }
+
+    list.innerHTML = tasks.map(t => {
+      const statusColors = { running: '#f59e0b', done: '#22c55e', failed: '#ef4444', timeout: '#6b7280' }
+      const statusLabels = { running: () => t('bgTasks.status.running'), done: () => t('bgTasks.status.done'), failed: () => t('bgTasks.status.failed'), timeout: () => t('bgTasks.status.timeout') }
+      const color = statusColors[t.status] || '#6b7280'
+      const labelRaw = statusLabels[t.status]; const label = labelRaw ? (typeof labelRaw === 'function' ? labelRaw() : labelRaw) : t.status
+      const output = t.output ? `<pre style="margin-top:8px;padding:8px;background:var(--bg);border-radius:6px;font-size:12px;max-height:200px;overflow:auto;white-space:pre-wrap;">${esc(t.output.slice(-2000))}</pre>` : ''
+      return `<div style="margin-bottom:12px;padding:12px 16px;border-radius:8px;background:var(--surface);border:1px solid var(--border);border-left:3px solid ${color};">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <div style="display:flex;gap:8px;align-items:center;">
+            <span style="font-weight:600;font-size:13px;">${esc(t.id)}</span>
+            <span class="badge" style="font-size:11px;background:${color};color:#fff;padding:2px 8px;border-radius:12px;">${label}</span>
+            <span class="badge" style="font-size:11px;background:var(--primary);color:#fff;padding:2px 8px;border-radius:12px;">${esc(t.agent_id)}</span>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <span style="font-size:12px;color:var(--text-muted)">${esc(t.started_label)}</span>
+            ${t.status === 'running' ? `<button class="btn btn-sm" onclick="viewBgTask('${esc(t.id)}')" style="font-size:11px;padding:2px 8px;">${t('bgTasks.output_btn')}</button><button class="btn btn-sm" onclick="cancelBgTask('${esc(t.id)}')" style="font-size:11px;padding:2px 8px;color:var(--danger)">${t('bgTasks.stop_btn')}</button>` : ''}
+          </div>
+        </div>
+        <div style="font-size:13px;color:var(--text-primary);margin-bottom:4px;">${esc(t.prompt)}</div>
+        ${t.finished_label ? `<div style="font-size:12px;color:var(--text-muted);">${t('bgTasks.finished_label')} ${esc(t.finished_label)}</div>` : ''}
+        ${output}
+      </div>`
+    }).join('')
+  } catch {
+    list.innerHTML = `<p style="color:var(--danger)">${t('bgTasks.load_error')}</p>`
+  }
+}
+
+async function viewBgTask(id) {
+  try {
+    const res = await fetch(`/api/background-tasks/${id}`)
+    if (!res.ok) { showToast(t('bgTasks.load_error')); return }
+    const task = await res.json()
+    const output = task.liveOutput || task.output || t('bgTasks.no_output')
+    const modal = document.createElement('div')
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center;'
+    modal.innerHTML = `<div style="background:var(--surface);border-radius:12px;padding:20px;max-width:800px;width:90%;max-height:80vh;overflow:auto;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:12px;">
+        <h3 style="margin:0;">${t('bgTasks.modal.title', { id: esc(id) })}</h3>
+        <button class="btn btn-sm" id="bgModalClose" style="font-size:13px;">${t('bgTasks.modal.close_btn')}</button>
+      </div>
+      <pre style="white-space:pre-wrap;font-size:12px;line-height:1.4;">${esc(output)}</pre>
+    </div>`
+    document.body.appendChild(modal)
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
+    document.getElementById('bgModalClose').addEventListener('click', () => modal.remove())
+  } catch {
+    showToast('Hiba')
+  }
+}
+
+async function cancelBgTask(id) {
+  if (!confirm(t('bgTasks.cancel.confirm'))) return
+  try {
+    const res = await fetch(`/api/background-tasks/${id}`, { method: 'DELETE' })
+    if (res.ok) {
+      showToast(t('bgTasks.toast.stopped'))
+      loadBgTasks()
+    } else {
+      showToast(t('bgTasks.toast.stop_error'))
+    }
+  } catch {
+    showToast('Hiba')
+  }
+}
+
+// ============================================================
+// === Autonomy ===
+// ============================================================
+
+async function renderAutonomyContent(gridEl, footerEl) {
+  gridEl.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('autonomy.loading')}</p>`
+
+  try {
+    const res = await fetch('/api/autonomy')
+    if (!res.ok) throw new Error('fetch failed')
+    const config = await res.json()
+
+    gridEl.innerHTML = ''
+    for (const cat of config.categories) {
+      const isCapped = !cat.locked && cat.maxLevel < 3
+      const row = document.createElement('div')
+      row.className = 'autonomy-row' + (cat.locked ? ' locked' : '') + (isCapped ? ' capped' : '')
+
+      const label = document.createElement('div')
+      label.className = 'autonomy-row-label'
+      label.textContent = cat.label
+
+      const levels = document.createElement('div')
+      levels.className = 'autonomy-levels'
+
+      for (let l = 1; l <= 3; l++) {
+        const btn = document.createElement('button')
+        const isOver = l > cat.maxLevel
+        btn.className = 'autonomy-level-btn' + (l === cat.level ? ' active' : '') + (isOver ? ' over-cap' : '')
+        btn.dataset.level = String(l)
+        btn.textContent = String(l)
+        btn.disabled = cat.locked || isOver
+        if (!cat.locked && !isOver) {
+          btn.addEventListener('click', () => setAutonomyLevel(cat.key, l))
+        }
+        levels.appendChild(btn)
+      }
+
+      row.appendChild(label)
+      if (cat.locked) {
+        const lock = document.createElement('div')
+        lock.className = 'autonomy-row-lock'
+        lock.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> ${t('autonomy.lock_label')}`
+        row.appendChild(lock)
+      } else if (isCapped) {
+        const cap = document.createElement('div')
+        cap.className = 'autonomy-row-cap'
+        cap.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg> ${t('autonomy.cap_label', { n: cat.maxLevel })}`
+        row.appendChild(cap)
+      }
+      row.appendChild(levels)
+      gridEl.appendChild(row)
+    }
+
+    if (footerEl) {
+      if (config.updated_at > 0) {
+        const d = new Date(config.updated_at * 1000)
+        footerEl.textContent = t('autonomy.last_modified', { date: d.toLocaleString('hu-HU') })
+      } else {
+        footerEl.textContent = t('autonomy.not_modified')
+      }
+    }
+  } catch (err) {
+    gridEl.innerHTML = `<p style="color:var(--danger)">${t('autonomy.error')}</p>`
+    if (footerEl) footerEl.textContent = ''
+  }
+}
+
+async function setAutonomyLevel(key, level) {
+  try {
+    const res = await fetch('/api/autonomy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, level }),
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      showToast(data.error || 'Hiba')
+      return
+    }
+    // Refresh the settings tab autonomy grid if it is visible
+    const tabGrid = document.getElementById('settingsAutonomyGrid')
+    const tabFooter = document.getElementById('settingsAutonomyUpdatedAt')
+    if (tabGrid) renderAutonomyContent(tabGrid, tabFooter)
+  } catch {
+    showToast(t('kanban.toast.save_error'))
+  }
+}
+
+// ============================================================
+// === Approvals ===
+// ============================================================
+
+const APPROVALS_PAGE_LIMIT = 50
+
+let _approvalsCountdownInterval = null
+const _approvalsState = { status: '', agent: '', category: '', offset: 0 }
+
+document.getElementById('refreshApprovalsBtn').addEventListener('click', loadApprovalsPage)
+document.getElementById('approvalsFilterStatus').addEventListener('change', (e) => {
+  _approvalsState.status = e.target.value
+  _approvalsState.offset = 0
+  _renderApprovalsTable()
+})
+document.getElementById('approvalsFilterAgent').addEventListener('input', (e) => {
+  _approvalsState.agent = e.target.value.trim()
+  _approvalsState.offset = 0
+  _renderApprovalsTable()
+})
+document.getElementById('approvalsFilterCategory').addEventListener('input', (e) => {
+  _approvalsState.category = e.target.value.trim()
+  _approvalsState.offset = 0
+  _renderApprovalsTable()
+})
+
+let _approvalsAll = []
+
+async function loadApprovalsPage() {
+  const tbody = document.getElementById('approvalsTbody')
+  const statsEl = document.getElementById('approvalsStats')
+  tbody.innerHTML = `<tr><td colspan="7" style="color:var(--text-muted);padding:24px;text-align:center">${t('approvals.loading')}</td></tr>`
+  statsEl.innerHTML = ''
+  if (_approvalsCountdownInterval) { clearInterval(_approvalsCountdownInterval); _approvalsCountdownInterval = null }
+
+  try {
+    const res = await fetch('/api/approvals?limit=500')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    _approvalsAll = await res.json()
+    _renderApprovalsStats()
+    _renderApprovalsTable()
+    _approvalsCountdownInterval = setInterval(_updateCountdowns, 1000)
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="7" style="color:var(--danger);padding:24px;text-align:center">${t('approvals.error')}</td></tr>`
+  }
+}
+
+function _renderApprovalsStats() {
+  const counts = { pending: 0, approved: 0, rejected: 0, timeout: 0 }
+  for (const a of _approvalsAll) counts[a.status] = (counts[a.status] || 0) + 1
+  const statsEl = document.getElementById('approvalsStats')
+  statsEl.innerHTML = `
+    <div class="stat-card"><div class="stat-value" style="color:var(--warning)">${counts.pending}</div><div class="stat-label">${t('approvals.stat.pending')}</div></div>
+    <div class="stat-card"><div class="stat-value" style="color:var(--success)">${counts.approved}</div><div class="stat-label">${t('approvals.stat.approved')}</div></div>
+    <div class="stat-card"><div class="stat-value" style="color:var(--danger)">${counts.rejected}</div><div class="stat-label">${t('approvals.stat.rejected')}</div></div>
+    <div class="stat-card"><div class="stat-value" style="color:var(--text-muted)">${counts.timeout}</div><div class="stat-label">${t('approvals.stat.timeout')}</div></div>
+  `
+
+  // Sidebar badge: show pending count, hidden when zero
+  const badge = document.getElementById('approvalsPendingBadge')
+  if (badge) {
+    badge.textContent = counts.pending
+    badge.hidden = counts.pending === 0
+  }
+
+  // Pending notice banner above stat cards
+  const banner = document.getElementById('approvalsPendingBanner')
+  if (banner) {
+    if (counts.pending === 0) {
+      banner.hidden = true
+    } else {
+      const pendingRows = _approvalsAll.filter(a => a.status === 'pending')
+      const oldest = pendingRows.reduce((min, a) => a.requested_at < min.requested_at ? a : min, pendingRows[0])
+      const ageMin = Math.round((Date.now() / 1000 - oldest.requested_at) / 60)
+      const timeoutMin = oldest.timeout_at ? Math.max(0, Math.round((oldest.timeout_at - Date.now() / 1000) / 60)) : null
+      const timeoutPart = timeoutMin !== null ? ` ${t('approvals.banner.timeout', { n: timeoutMin })}` : ''
+      banner.hidden = false
+      banner.textContent = `${t('approvals.banner.notice', { n: counts.pending, age: ageMin, agent: oldest.agent_id, category: oldest.category })}${timeoutPart}`
+    }
+  }
+}
+
+function _filterApprovals() {
+  const { status, agent, category } = _approvalsState
+  return _approvalsAll.filter(a => {
+    if (status && a.status !== status) return false
+    if (agent && !a.agent_id.includes(agent)) return false
+    if (category && !a.category.includes(category)) return false
+    return true
+  })
+}
+
+function _renderApprovalsTable() {
+  const filtered = _filterApprovals()
+  const { offset } = _approvalsState
+  const page = filtered.slice(offset, offset + APPROVALS_PAGE_LIMIT)
+  const tbody = document.getElementById('approvalsTbody')
+
+  if (!page.length) {
+    tbody.innerHTML = `<tr><td colspan="7" style="color:var(--text-muted);padding:24px;text-align:center">${t('approvals.empty')}</td></tr>`
+    _renderApprovalsPagination(filtered.length)
+    return
+  }
+
+  tbody.innerHTML = page.map(a => {
+    const isPending = a.status === 'pending'
+    const rowStyle = isPending ? 'background:color-mix(in srgb, var(--warning) 8%, transparent)' : ''
+    const time = a.requested_at ? new Date(a.requested_at * 1000).toLocaleString('hu-HU', { dateStyle: 'short', timeStyle: 'short' }) : '-'
+    const badge = _approvalBadge(a.status)
+    const countdown = isPending && a.timeout_at ? `<span class="approvals-countdown" data-timeout="${a.timeout_at}" id="cd-${a.id}"></span>` : (a.timeout_at ? '-' : '')
+    const actions = isPending
+      ? `<div style="display:flex;gap:4px">
+           <button class="btn-primary btn-compact approvals-decide" data-id="${escapeAttr(a.id)}" data-decision="approved" style="font-size:11px">${t('approvals.btn.approve')}</button>
+           <button class="btn-danger btn-compact approvals-decide" data-id="${escapeAttr(a.id)}" data-decision="rejected" style="font-size:11px">${t('approvals.btn.reject')}</button>
+         </div>`
+      : (() => {
+          const resolvedBy = escapeHtml(a.resolved_by || '')
+          if (!a.resolved_at) return `<span style="font-size:12px;color:var(--text-muted)">${resolvedBy}</span>`
+          const resolvedDate = new Date(a.resolved_at * 1000)
+          const requestedDate = a.requested_at ? new Date(a.requested_at * 1000) : null
+          const sameDay = requestedDate && resolvedDate.toDateString() === requestedDate.toDateString()
+          const resolvedStr = resolvedDate.toLocaleString('hu-HU', sameDay ? { timeStyle: 'short' } : { dateStyle: 'short', timeStyle: 'short' })
+          return `<span style="font-size:12px;color:var(--text-muted)">${resolvedBy}<br><span style="font-size:11px;opacity:0.7">${escapeHtml(resolvedStr)}</span></span>`
+        })()
+    return `<tr style="${rowStyle}">
+      <td style="white-space:nowrap;font-size:12px">${escapeHtml(time)}</td>
+      <td><code style="font-size:12px">${escapeHtml(a.agent_id)}</code></td>
+      <td style="font-size:12px">${escapeHtml(a.category)}</td>
+      <td style="max-width:280px;font-size:12px" title="${escapeAttr(a.action_description)}">${escapeHtml(a.action_description.length > 80 ? a.action_description.slice(0, 80) + '...' : a.action_description)}</td>
+      <td>${badge}</td>
+      <td style="font-size:12px;white-space:nowrap">${countdown}</td>
+      <td>${actions}</td>
+    </tr>`
+  }).join('')
+
+  _updateCountdowns()
+  _renderApprovalsPagination(filtered.length)
+
+  tbody.querySelectorAll('.approvals-decide').forEach(btn => {
+    btn.addEventListener('click', () => _resolveApproval(btn.dataset.id, btn.dataset.decision))
+  })
+}
+
+function _approvalBadge(status) {
+  const colors = { pending: 'var(--warning)', approved: 'var(--success)', rejected: 'var(--danger)', timeout: 'var(--text-muted)' }
+  const color = colors[status] || 'var(--text-muted)'
+  return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;background:color-mix(in srgb,${color} 15%,transparent);color:${color}">${t('approvals.status.' + status) || status}</span>`
+}
+
+function _updateCountdowns() {
+  const now = Math.floor(Date.now() / 1000)
+  document.querySelectorAll('.approvals-countdown[data-timeout]').forEach(el => {
+    const timeout = parseInt(el.dataset.timeout, 10)
+    const diff = timeout - now
+    if (diff <= 0) {
+      el.textContent = t('approvals.countdown.expired')
+      el.style.color = 'var(--danger)'
+    } else {
+      const h = Math.floor(diff / 3600)
+      const m = Math.floor((diff % 3600) / 60)
+      const s = diff % 60
+      el.textContent = h > 0 ? `${h}h ${m}m` : `${m}m ${s}s`
+      el.style.color = diff < 300 ? 'var(--danger)' : 'var(--text-muted)'
+    }
+  })
+}
+
+function _renderApprovalsPagination(total) {
+  const pager = document.getElementById('approvalsPagination')
+  if (total <= APPROVALS_PAGE_LIMIT) { pager.innerHTML = ''; return }
+  const { offset } = _approvalsState
+  const hasPrev = offset > 0
+  const hasNext = offset + APPROVALS_PAGE_LIMIT < total
+  pager.innerHTML = `
+    <button class="btn-secondary btn-compact" ${hasPrev ? '' : 'disabled'} id="approvalsPrev">&#8592; Előző</button>
+    <span style="font-size:12px;color:var(--text-muted)">${offset + 1}-${Math.min(offset + APPROVALS_PAGE_LIMIT, total)} / ${total}</span>
+    <button class="btn-secondary btn-compact" ${hasNext ? '' : 'disabled'} id="approvalsNext">Következő &#8594;</button>
+  `
+  pager.querySelector('#approvalsPrev')?.addEventListener('click', () => {
+    _approvalsState.offset = Math.max(0, offset - APPROVALS_PAGE_LIMIT)
+    _renderApprovalsTable()
+  })
+  pager.querySelector('#approvalsNext')?.addEventListener('click', () => {
+    _approvalsState.offset = offset + APPROVALS_PAGE_LIMIT
+    _renderApprovalsTable()
+  })
+}
+
+async function _resolveApproval(id, decision) {
+  try {
+    const res = await fetch(`/api/approvals/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: decision, resolved_by: 'dashboard' }),
+    })
+    const data = await res.json()
+    if (!res.ok) { showToast(t('approvals.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+    showToast(t(decision === 'approved' ? 'approvals.toast.approved' : 'approvals.toast.rejected'))
+    // Update in-place to avoid full reload flicker
+    const idx = _approvalsAll.findIndex(a => a.id === id)
+    if (idx !== -1) _approvalsAll[idx] = data
+    _renderApprovalsStats()
+    _renderApprovalsTable()
+  } catch (err) {
+    showToast(t('approvals.toast.error', { msg: String(err.message || err) }))
+  }
+}
+
+// ============================================================
+// === Settings (central config registry) ===
+// ============================================================
+
+document.getElementById('refreshSettingsBtn').addEventListener('click', loadSettings)
+window.addEventListener('beforeunload', (e) => {
+  if (settingsDirty.size > 0) { e.preventDefault(); e.returnValue = '' }
+})
+
+// Human label for a registry "module" -- falls back to a capitalised key for
+// any future module the UI doesn't know about yet, so adding a registry
+// entry never requires a frontend change just to render a sane heading.
+function settingsModuleLabel(mod) {
+  const key = `settings.module.${mod}`
+  const known = { kanban: true, system: true, heartbeat: true, audit: true, ideabox: true, channels: true, security: true, autonomy: true }
+  return known[mod] ? t(key) : (mod.charAt(0).toUpperCase() + mod.slice(1))
+}
+
+// Track dirty state: key -> { input, originalValue, type, errorEl }
+const settingsDirty = new Map()
+
+function updateSettingsSaveBar() {
+  const bar = document.getElementById('settingsSaveBar')
+  const countEl = document.getElementById('settingsDirtyCount')
+  if (!bar) return
+  const n = settingsDirty.size
+  bar.style.display = n > 0 ? 'flex' : 'none'
+  if (countEl) countEl.textContent = t('settings.dirty_count', {n})
+}
+
+// Read the current editor value in the canonical form the API expects. A
+// boolean setting renders as a checkbox, so its value is derived from .checked
+// as the canonical "1"/"0" string (not the element's .value, which is "on").
+function settingInputValue(input, type) {
+  if (type === 'boolean') return input.checked ? '1' : '0'
+  return input.value
+}
+
+function markSettingDirty(key, input, originalValue, type, errorEl) {
+  const currentVal = settingInputValue(input, type)
+  if (currentVal === String(originalValue)) {
+    settingsDirty.delete(key)
+  } else {
+    settingsDirty.set(key, { input, originalValue, type, errorEl })
+  }
+  updateSettingsSaveBar()
+}
+
+const SETTINGS_ACTIVE_TAB_KEY = 'settings-active-tab'
+
+// === Dashboard browser login (optional) ===
+// The card in the Settings page lets the operator opt into a username+password
+// login (in addition to the always-available access token). All copy is framed
+// around the existing public remote-access surfaces (Tailscale Serve, LAN,
+// mobile QR) -- no other transport is referenced.
+
+async function fetchAuthStatus() {
+  try {
+    const r = await fetch('/api/auth/status')
+    return r.ok ? await r.json() : null
+  } catch {
+    return null
+  }
+}
+
+async function renderAuthCard() {
+  const body = document.getElementById('authCardBody')
+  if (!body) return
+  const status = await fetchAuthStatus()
+  if (!status) { body.innerHTML = `<p class="auth-muted">${t('auth.card.unavailable')}</p>`; return }
+  if (status.setup_required) { renderCreateLoginForm(body) }
+  else if (status.method === 'session') { renderSessionPanel(body, status) }
+  else renderTokenModePanel(body)
+  // Device keys are managed by token/session operators only (a device key
+  // itself gets 403 from the management endpoints, so don't render the panel).
+  if (status.method === 'token' || status.method === 'session') {
+    renderDeviceKeysSection(body)
+    renderBridgeEnrollSection(body)
+  }
+}
+
+// === Bridge pairing (AUTHPLAN1 #2) ===
+// Paste the public-key line shown by the Bridge app -> one confirm -> the
+// server writes the restricted SSH entry + mints a per-device key -> the
+// returned bundle (shown once, copyable) goes back into the Bridge.
+
+function renderBridgeEnrollSection(body) {
+  const wrap = document.createElement('div')
+  wrap.className = 'auth-device-keys auth-bridge-enroll'
+  wrap.id = 'authBridgeEnroll'
+  wrap.innerHTML =
+    `<div class="auth-sessions-title">${t('auth.bridge.title')}</div>` +
+    `<p class="auth-muted">${t('auth.bridge.desc')}</p>` +
+    `<div class="auth-form">` +
+      `<input id="authBridgeKeyLine" type="text" autocapitalize="off" spellcheck="false" placeholder="${t('auth.bridge.key_placeholder')}">` +
+      `<input id="authBridgeName" type="text" autocapitalize="off" spellcheck="false" maxlength="64" placeholder="${t('auth.bridge.name_placeholder')}">` +
+      `<input id="authBridgeHost" type="text" autocapitalize="off" spellcheck="false" maxlength="253" placeholder="${t('auth.bridge.host_placeholder')}">` +
+      `<button class="btn-secondary" id="authBridgeEnrollBtn">${t('auth.bridge.enroll')}</button>` +
+      `<div class="auth-form-msg" id="authBridgeMsg"></div>` +
+      `<div id="authBridgeBundle" hidden></div>` +
+    `</div>`
+  body.appendChild(wrap)
+  document.getElementById('authBridgeEnrollBtn').addEventListener('click', bridgeEnrollFromUi)
+}
+
+async function bridgeEnrollFromUi() {
+  const msg = document.getElementById('authBridgeMsg')
+  const out = document.getElementById('authBridgeBundle')
+  const keyLine = (document.getElementById('authBridgeKeyLine').value || '').trim()
+  const name = (document.getElementById('authBridgeName').value || '').trim()
+  const hostOverride = (document.getElementById('authBridgeHost').value || '').trim()
+  msg.className = 'auth-form-msg'
+  msg.textContent = ''
+  out.hidden = true
+  if (!keyLine || !name) { msg.classList.add('err'); msg.textContent = t('auth.bridge.err_empty'); return }
+  // The confirm step: pairing grants the device SSH-tunnel + dashboard access.
+  if (!confirm(t('auth.bridge.confirm', { name }))) return
+  msg.textContent = t('auth.bridge.working')
+  try {
+    const r = await fetch('/api/security/bridge-enroll', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(hostOverride ? { key_line: keyLine, name, host: hostOverride } : { key_line: keyLine, name }),
+    })
+    const data = await r.json().catch(() => ({}))
+    if (!r.ok) { msg.classList.add('err'); msg.textContent = data.error || t('auth.card.err_generic'); return }
+    msg.classList.add('ok')
+    msg.textContent = (data.action === 'replaced' ? t('auth.bridge.repaired') : t('auth.bridge.paired')) +
+      (data.warnings && data.warnings.length ? ` (${data.warnings.join('; ')})` : '')
+    document.getElementById('authBridgeKeyLine').value = ''
+    document.getElementById('authBridgeName').value = ''
+    document.getElementById('authBridgeHost').value = ''
+    out.hidden = false
+    out.innerHTML =
+      `<p class="auth-muted">${t('auth.bridge.bundle_hint', { host: escapeHtml(data.host || '') })}</p>` +
+      `<div class="auth-form auth-device-minted-row">` +
+        `<input id="authBridgeBundleVal" type="text" readonly value="${escapeHtml(data.bundle)}" onclick="this.select()">` +
+        `<button class="btn-secondary btn-compact" id="authBridgeCopyBtn">${t('auth.devices.copy')}</button>` +
+      `</div>`
+    document.getElementById('authBridgeCopyBtn').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(data.bundle)
+        document.getElementById('authBridgeCopyBtn').textContent = t('auth.devices.copied')
+      } catch { document.getElementById('authBridgeBundleVal').select() }
+    })
+    refreshDeviceKeyList()
+  } catch { msg.classList.add('err'); msg.textContent = t('auth.login.err_network') }
+}
+
+// === Per-device keys (mint/list/revoke) ===
+// A device key is a revocable per-device credential (Bridge, phone). The raw
+// key is displayed exactly once, right after minting.
+
+function renderDeviceKeysSection(body) {
+  const wrap = document.createElement('div')
+  wrap.className = 'auth-device-keys'
+  wrap.id = 'authDeviceKeys'
+  wrap.innerHTML =
+    `<div class="auth-sessions-title">${t('auth.devices.title')}</div>` +
+    `<p class="auth-muted">${t('auth.devices.desc')}</p>` +
+    `<div class="auth-form-msg err auth-device-warn" id="authDeviceKeyWarn" hidden></div>` +
+    `<div id="authDeviceKeyList"></div>` +
+    `<div class="auth-form auth-device-mint">` +
+      `<input id="authDevName" type="text" autocapitalize="off" spellcheck="false" maxlength="64" placeholder="${t('auth.devices.name_placeholder')}">` +
+      `<input id="authDevExpiry" type="number" min="1" max="3650" placeholder="${t('auth.devices.expiry_placeholder')}">` +
+      `<button class="btn-secondary" id="authDevMintBtn">${t('auth.devices.mint')}</button>` +
+      `<div class="auth-form-msg" id="authDevMsg"></div>` +
+      `<div id="authDevMinted" hidden></div>` +
+    `</div>`
+  body.appendChild(wrap)
+  document.getElementById('authDevMintBtn').addEventListener('click', mintDeviceKey)
+  refreshDeviceKeyList()
+}
+
+async function refreshDeviceKeyList() {
+  const el = document.getElementById('authDeviceKeyList')
+  if (!el) return
+  try {
+    const r = await fetch('/api/auth/device-keys')
+    if (!r.ok) { el.innerHTML = ''; return }
+    const { keys } = await r.json()
+    if (!keys || !keys.length) { el.innerHTML = `<p class="auth-muted">${t('auth.devices.empty')}</p>`; return }
+    el.innerHTML = keys.map((k) => {
+      const created = new Date(k.createdAt * 1000).toLocaleDateString()
+      const lastUsed = k.lastUsedAt ? new Date(k.lastUsedAt * 1000).toLocaleString() : t('auth.devices.never_used')
+      const expires = k.expiresAt ? ` &middot; ${t('auth.devices.expires', { date: new Date(k.expiresAt * 1000).toLocaleDateString() })}` : ''
+      const bridge = k.installId ? ` <span class="auth-device-bridge-badge">${t('auth.devices.bridge_badge')}</span>` : ''
+      return `<div class="auth-session-row auth-device-row" data-key-id="${k.id}">` +
+        `<span class="auth-device-name">${escapeHtml(k.name)}${bridge}</span>` +
+        `<span class="auth-device-meta">${created} &middot; ${t('auth.devices.last_used', { date: lastUsed })}${expires}</span>` +
+        `<button class="btn-secondary btn-compact auth-device-revoke" data-key-id="${k.id}">${t('auth.devices.revoke')}</button>` +
+      `</div>`
+    }).join('')
+    el.querySelectorAll('.auth-device-revoke').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (!confirm(t('auth.devices.revoke_confirm'))) return
+        // A Bridge-paired revoke means BOTH halves (dashboard key + ssh line).
+        // The key is dead either way, but ssh_removed:false means the
+        // authorized_keys line survived (fs error) and the device can still
+        // open the tunnel -- the ONE outcome the UI must never hide.
+        const warnBefore = document.getElementById('authDeviceKeyWarn')
+        if (warnBefore) warnBefore.hidden = true
+        let sshWarn = false
+        try {
+          const r = await fetch(`/api/auth/device-keys/${btn.dataset.keyId}`, { method: 'DELETE' })
+          const data = await r.json().catch(() => ({}))
+          if (r.ok && data.ssh_removed === false) sshWarn = true
+        } catch { /* ignore -- the list refresh below shows the real state */ }
+        await refreshDeviceKeyList()
+        const warnEl = document.getElementById('authDeviceKeyWarn')
+        if (warnEl && sshWarn) {
+          warnEl.hidden = false
+          warnEl.textContent = t('auth.devices.revoke_ssh_warning')
+        }
+      })
+    })
+  } catch { el.innerHTML = '' }
+}
+
+async function mintDeviceKey() {
+  const msg = document.getElementById('authDevMsg')
+  const minted = document.getElementById('authDevMinted')
+  const name = (document.getElementById('authDevName').value || '').trim()
+  const expiryRaw = document.getElementById('authDevExpiry').value
+  msg.className = 'auth-form-msg'
+  minted.hidden = true
+  if (!name) { msg.classList.add('err'); msg.textContent = t('auth.devices.err_name'); return }
+  const payload = { name }
+  if (expiryRaw) payload.expires_in_days = Number(expiryRaw)
+  try {
+    const r = await fetch('/api/auth/device-keys', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    const data = await r.json().catch(() => ({}))
+    if (!r.ok) { msg.classList.add('err'); msg.textContent = data.error || t('auth.card.err_generic'); return }
+    document.getElementById('authDevName').value = ''
+    document.getElementById('authDevExpiry').value = ''
+    minted.hidden = false
+    minted.innerHTML =
+      `<p class="auth-muted">${t('auth.devices.minted_hint')}</p>` +
+      `<div class="auth-form auth-device-minted-row">` +
+        `<input id="authDevMintedKey" type="text" readonly value="${escapeHtml(data.key)}" onclick="this.select()">` +
+        `<button class="btn-secondary btn-compact" id="authDevCopyBtn">${t('auth.devices.copy')}</button>` +
+      `</div>`
+    document.getElementById('authDevCopyBtn').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(data.key)
+        document.getElementById('authDevCopyBtn').textContent = t('auth.devices.copied')
+      } catch { document.getElementById('authDevMintedKey').select() }
+    })
+    refreshDeviceKeyList()
+  } catch { msg.classList.add('err'); msg.textContent = t('auth.login.err_network') }
+}
+
+function renderCreateLoginForm(body) {
+  body.innerHTML =
+    `<p class="auth-muted">${t('auth.card.setup_desc')}</p>` +
+    `<div class="auth-form">` +
+      `<input id="authNewUser" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="${t('auth.login.username')}">` +
+      `<input id="authNewPass" type="password" autocomplete="new-password" placeholder="${t('auth.card.new_password')}">` +
+      `<input id="authNewPass2" type="password" autocomplete="new-password" placeholder="${t('auth.card.repeat_password')}">` +
+      `<button class="btn-primary" id="authCreateBtn">${t('auth.card.create')}</button>` +
+      `<div class="auth-form-msg" id="authCreateMsg"></div>` +
+    `</div>`
+  document.getElementById('authCreateBtn').addEventListener('click', async () => {
+    const msg = document.getElementById('authCreateMsg')
+    const username = (document.getElementById('authNewUser').value || '').trim()
+    const p1 = document.getElementById('authNewPass').value || ''
+    const p2 = document.getElementById('authNewPass2').value || ''
+    msg.className = 'auth-form-msg'
+    if (!username || !p1) { msg.classList.add('err'); msg.textContent = t('auth.login.err_empty'); return }
+    if (p1 !== p2) { msg.classList.add('err'); msg.textContent = t('auth.card.err_mismatch'); return }
+    try {
+      const r = await fetch('/api/auth/users', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password: p1 }),
+      })
+      const data = await r.json().catch(() => ({}))
+      if (r.ok) { msg.classList.add('ok'); msg.textContent = t('auth.card.created'); renderAuthCard(); initAuthBanner() }
+      else { msg.classList.add('err'); msg.textContent = data.error || t('auth.card.err_generic') }
+    } catch { msg.classList.add('err'); msg.textContent = t('auth.login.err_network') }
+  })
+}
+
+function renderSessionPanel(body, status) {
+  body.innerHTML =
+    `<p class="auth-muted">${t('auth.card.signed_in_as', { user: escapeHtml(status.user) })}</p>` +
+    `<div class="auth-form">` +
+      `<input id="authCurPass" type="password" autocomplete="current-password" placeholder="${t('auth.card.current_password')}">` +
+      `<input id="authChgPass" type="password" autocomplete="new-password" placeholder="${t('auth.card.new_password')}">` +
+      `<input id="authChgPass2" type="password" autocomplete="new-password" placeholder="${t('auth.card.repeat_password')}">` +
+      `<button class="btn-primary" id="authChgBtn">${t('auth.card.change_password')}</button>` +
+      `<div class="auth-form-msg" id="authChgMsg"></div>` +
+    `</div>` +
+    `<div class="auth-sessions" id="authSessions"></div>` +
+    `<div class="auth-actions">` +
+      `<button class="btn-secondary btn-compact" id="authLogoutAllBtn">${t('auth.card.logout_all')}</button>` +
+      `<button class="btn-secondary btn-compact" id="authLogoutBtn">${t('auth.card.logout')}</button>` +
+    `</div>`
+  document.getElementById('authChgBtn').addEventListener('click', async () => {
+    const msg = document.getElementById('authChgMsg')
+    const cur = document.getElementById('authCurPass').value || ''
+    const p1 = document.getElementById('authChgPass').value || ''
+    const p2 = document.getElementById('authChgPass2').value || ''
+    msg.className = 'auth-form-msg'
+    if (p1 !== p2) { msg.classList.add('err'); msg.textContent = t('auth.card.err_mismatch'); return }
+    try {
+      const r = await fetch('/api/auth/password', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ current_password: cur, new_password: p1 }),
+      })
+      const data = await r.json().catch(() => ({}))
+      if (r.ok) { msg.classList.add('ok'); msg.textContent = t('auth.card.password_changed') }
+      else { msg.classList.add('err'); msg.textContent = data.error || t('auth.card.err_generic') }
+    } catch { msg.classList.add('err'); msg.textContent = t('auth.login.err_network') }
+  })
+  document.getElementById('authLogoutBtn').addEventListener('click', async () => {
+    try { await fetch('/api/auth/logout', { method: 'POST' }) } catch { /* ignore */ }
+    window.location.reload()
+  })
+  document.getElementById('authLogoutAllBtn').addEventListener('click', async () => {
+    try { await fetch('/api/auth/logout-all', { method: 'POST' }) } catch { /* ignore */ }
+    window.location.reload()
+  })
+  renderAuthSessions()
+}
+
+async function renderAuthSessions() {
+  const el = document.getElementById('authSessions')
+  if (!el) return
+  try {
+    const r = await fetch('/api/auth/sessions')
+    if (!r.ok) { el.innerHTML = ''; return }
+    const { sessions } = await r.json()
+    if (!sessions || !sessions.length) { el.innerHTML = ''; return }
+    el.innerHTML = `<div class="auth-sessions-title">${t('auth.card.active_sessions')}</div>` +
+      sessions.map((s) => {
+        const last = new Date(s.lastSeenAt * 1000).toLocaleString()
+        const ua = escapeHtml(s.userAgent || '-')
+        return `<div class="auth-session-row"><code>${escapeHtml(s.idHashPrefix)}</code><span>${last}</span><span class="auth-session-ua">${ua}</span></div>`
+      }).join('')
+  } catch { el.innerHTML = '' }
+}
+
+function renderTokenModePanel(body) {
+  body.innerHTML =
+    `<p class="auth-muted">${t('auth.card.token_mode')}</p>`
+}
+
+// Dismissible setup banner: shown only when the operator is authed via the token
+// and has not yet created a browser login. Dismissal persists per browser.
+const AUTH_BANNER_DISMISS_KEY = 'wraith.auth-banner-dismissed'
+
+async function initAuthBanner() {
+  const banner = document.getElementById('authSetupBanner')
+  if (!banner) return
+  let dismissed = false
+  try { dismissed = localStorage.getItem(AUTH_BANNER_DISMISS_KEY) === '1' } catch { /* storage blocked */ }
+  const status = await fetchAuthStatus()
+  const show = !!status && status.authenticated && status.method === 'token' && status.setup_required && !dismissed
+  banner.hidden = !show
+}
+
+function wireAuthBanner() {
+  const banner = document.getElementById('authSetupBanner')
+  if (!banner) return
+  const dismiss = document.getElementById('authBannerDismiss')
+  const go = document.getElementById('authBannerGoBtn')
+  if (dismiss) dismiss.addEventListener('click', () => {
+    try { localStorage.setItem(AUTH_BANNER_DISMISS_KEY, '1') } catch { /* storage blocked */ }
+    banner.hidden = true
+  })
+  if (go) go.addEventListener('click', () => {
+    // Land on the Security tab, where the auth card lives now.
+    try { localStorage.setItem(SETTINGS_ACTIVE_TAB_KEY, 'security') } catch { /* storage blocked */ }
+    if (typeof switchPage === 'function') switchPage('settings')
+    const link = document.querySelector('.sb-link[data-page="settings"]')
+    if (link) { document.querySelectorAll('.sb-link').forEach((l) => l.classList.remove('active')); link.classList.add('active') }
+  })
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  wireAuthBanner()
+  initAuthBanner()
+  wireBranchDriftBanner()
+})
+
+async function loadSettings() {
+  const tabNav = document.getElementById('settingsTabNav')
+  const tabPanels = document.getElementById('settingsTabPanels')
+  if (!tabNav || !tabPanels) return
+
+  // Park the auth card back outside the panels before wiping them: a previous
+  // loadSettings run moved it INTO the Security panel, and clearing
+  // tabPanels.innerHTML with the card still inside would destroy the node.
+  const parkedAuthCard = document.getElementById('authCard')
+  if (parkedAuthCard) {
+    parkedAuthCard.hidden = true
+    tabNav.parentElement.insertBefore(parkedAuthCard, tabNav)
+  }
+
+  tabNav.innerHTML = `<span style="color:var(--text-muted);font-size:13px;padding:12px 0;display:inline-block">${t('settings.loading')}</span>`
+  tabPanels.innerHTML = ''
+  settingsDirty.clear()
+  updateSettingsSaveBar()
+
+  renderAuthCard()
+
+  try {
+    const res = await fetch('/api/settings')
+    if (!res.ok) throw new Error('fetch failed')
+    const { settings } = await res.json()
+
+    const byModule = new Map()
+    for (const s of settings) {
+      if (!byModule.has(s.module)) byModule.set(s.module, [])
+      byModule.get(s.module).push(s)
+    }
+
+    tabNav.innerHTML = ''
+    tabPanels.innerHTML = ''
+
+    if (byModule.size === 0) {
+      tabPanels.innerHTML = `<p style="padding:24px;color:var(--text-muted);font-size:13px">${t('settings.empty')}</p>`
+      // No tabs to host the Security panel: fall back to showing the auth card
+      // in its static spot above the (empty) tab area.
+      const orphanAuthCard = document.getElementById('authCard')
+      if (orphanAuthCard) orphanAuthCard.hidden = false
+      return
+    }
+
+    // Registry keys declared with module:'security' render inside the synthetic
+    // Security tab (below the auth card) instead of getting their own tab.
+    const securityDefs = byModule.get('security') ?? []
+    byModule.delete('security')
+
+    const allModules = [...byModule.keys(), 'security', 'autonomy']
+    const savedTab = localStorage.getItem(SETTINGS_ACTIVE_TAB_KEY) || allModules[0]
+    const activeTab = allModules.includes(savedTab) ? savedTab : allModules[0]
+
+    // Build a tab button + panel for each settings module
+    for (const [mod, defs] of byModule) {
+      const btn = document.createElement('button')
+      btn.className = 'tab-btn' + (mod === activeTab ? ' active' : '')
+      btn.dataset.tab = mod
+      btn.textContent = settingsModuleLabel(mod)
+      btn.addEventListener('click', () => activateSettingsTab(mod))
+      tabNav.appendChild(btn)
+
+      const panel = document.createElement('div')
+      panel.className = 'tab-panel'
+      panel.id = `settings-panel-${mod}`
+      panel.hidden = mod !== activeTab
+
+      const group = document.createElement('div')
+      group.className = 'settings-group'
+      for (const def of defs) {
+        group.appendChild(buildSettingRow(def))
+      }
+      panel.appendChild(group)
+      tabPanels.appendChild(panel)
+    }
+
+    // Security tab (synthetic, like autonomy: exists even with zero registry
+    // entries). Hosts the auth card -- browser login, password change, device
+    // keys -- plus any module:'security' registry keys.
+    {
+      const mod = 'security'
+      const btn = document.createElement('button')
+      btn.className = 'tab-btn' + (mod === activeTab ? ' active' : '')
+      btn.dataset.tab = mod
+      btn.textContent = settingsModuleLabel(mod)
+      btn.addEventListener('click', () => activateSettingsTab(mod))
+      tabNav.appendChild(btn)
+
+      const panel = document.createElement('div')
+      panel.className = 'tab-panel'
+      panel.id = `settings-panel-${mod}`
+      panel.hidden = mod !== activeTab
+
+      const authCard = document.getElementById('authCard')
+      if (authCard) {
+        panel.appendChild(authCard)
+        authCard.hidden = false
+      }
+
+      if (securityDefs.length) {
+        const group = document.createElement('div')
+        group.className = 'settings-group'
+        for (const def of securityDefs) {
+          group.appendChild(buildSettingRow(def))
+        }
+        panel.appendChild(group)
+      }
+      tabPanels.appendChild(panel)
+    }
+
+    // Autonomy tab
+    {
+      const mod = 'autonomy'
+      const btn = document.createElement('button')
+      btn.className = 'tab-btn' + (mod === activeTab ? ' active' : '')
+      btn.dataset.tab = mod
+      btn.textContent = settingsModuleLabel(mod)
+      btn.addEventListener('click', () => activateSettingsTab(mod))
+      tabNav.appendChild(btn)
+
+      const panel = document.createElement('div')
+      panel.className = 'tab-panel'
+      panel.id = `settings-panel-${mod}`
+      panel.hidden = mod !== activeTab
+
+      const legend = document.createElement('div')
+      legend.className = 'autonomy-legend'
+      legend.innerHTML = `
+        <div class="autonomy-legend-item"><span class="autonomy-level-dot" style="background:var(--text-muted)"></span><span><strong>1</strong> ${t('autonomy.level.1')}</span></div>
+        <div class="autonomy-legend-item"><span class="autonomy-level-dot" style="background:var(--accent)"></span><span><strong>2</strong> ${t('autonomy.level.2')}</span></div>
+        <div class="autonomy-legend-item"><span class="autonomy-level-dot" style="background:var(--success)"></span><span><strong>3</strong> ${t('autonomy.level.3')}</span></div>
+      `
+      panel.appendChild(legend)
+
+      const grid = document.createElement('div')
+      grid.className = 'autonomy-grid'
+      grid.id = 'settingsAutonomyGrid'
+      panel.appendChild(grid)
+
+      const footer = document.createElement('p')
+      footer.className = 'autonomy-footer'
+      footer.id = 'settingsAutonomyUpdatedAt'
+      panel.appendChild(footer)
+
+      const refreshBtn = document.createElement('button')
+      refreshBtn.className = 'btn-secondary btn-compact'
+      refreshBtn.textContent = t('common.btn.refresh')
+      refreshBtn.addEventListener('click', () => renderAutonomyContent(grid, footer))
+      panel.appendChild(refreshBtn)
+
+      tabPanels.appendChild(panel)
+
+      if (mod === activeTab) {
+        renderAutonomyContent(grid, footer)
+      }
+    }
+  } catch (err) {
+    tabPanels.innerHTML = `<p style="padding:24px;color:var(--danger)">${t('settings.error')}</p>`
+  }
+}
+
+function activateSettingsTab(mod) {
+  document.querySelectorAll('#settingsTabNav .tab-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === mod)
+  })
+  document.querySelectorAll('#settingsTabPanels .tab-panel').forEach(panel => {
+    panel.hidden = panel.id !== `settings-panel-${mod}`
+  })
+  localStorage.setItem(SETTINGS_ACTIVE_TAB_KEY, mod)
+
+  if (mod === 'autonomy') {
+    const grid = document.getElementById('settingsAutonomyGrid')
+    const footer = document.getElementById('settingsAutonomyUpdatedAt')
+    if (grid && !grid.innerHTML.trim()) renderAutonomyContent(grid, footer)
+  }
+}
+
+function buildSettingRow(def) {
+  const row = document.createElement('div')
+  row.className = 'settings-row'
+
+  const info = document.createElement('div')
+  info.className = 'settings-row-info'
+
+  const title = document.createElement('div')
+  title.className = 'settings-row-key'
+  title.textContent = def.key
+  if (def.requiresRestart) {
+    const badge = document.createElement('span')
+    badge.className = 'settings-restart-badge'
+    badge.textContent = t('settings.restart_badge')
+    title.appendChild(badge)
+  }
+  info.appendChild(title)
+
+  const desc = document.createElement('div')
+  desc.className = 'settings-row-desc'
+  desc.textContent = t('settings.desc.' + def.key) || def.description
+  info.appendChild(desc)
+
+  const meta = document.createElement('div')
+  meta.className = 'settings-row-meta'
+  const metaParts = []
+  if (Array.isArray(def.valueSet) && def.valueSet.length) metaParts.push(t('settings.meta.values') + ': ' + def.valueSet.join(', '))
+  if (def.type === 'int' && (def.min !== undefined || def.max !== undefined)) {
+    metaParts.push(t('settings.meta.range') + ': ' + (def.min ?? '–') + '–' + (def.max ?? '–'))
+  }
+  if (def.type === 'color') metaParts.push(t('settings.meta.format') + ': #rrggbb')
+  metaParts.push(t('settings.meta.default') + ': ' + def.default)
+  meta.textContent = metaParts.join(' · ')
+  info.appendChild(meta)
+
+  row.appendChild(info)
+
+  const editor = document.createElement('div')
+  editor.className = 'settings-row-editor'
+
+  const originalValue = String(def.value)
+  let valueInput
+  if (Array.isArray(def.valueSet) && def.valueSet.length) {
+    valueInput = document.createElement('select')
+    valueInput.className = 'input'
+    for (const opt of def.valueSet) {
+      const o = document.createElement('option')
+      o.value = opt
+      o.textContent = opt
+      valueInput.appendChild(o)
+    }
+    valueInput.value = originalValue
+  } else if (def.type === 'boolean') {
+    valueInput = document.createElement('input')
+    valueInput.type = 'checkbox'
+    valueInput.className = 'settings-toggle'
+    valueInput.checked = String(def.value) === '1'
+  } else if (def.type === 'color') {
+    valueInput = document.createElement('input')
+    valueInput.type = 'color'
+    valueInput.className = 'settings-color-input'
+    valueInput.value = def.value
+  } else if (def.type === 'int') {
+    valueInput = document.createElement('input')
+    valueInput.type = 'number'
+    valueInput.className = 'input'
+    if (def.min !== undefined) valueInput.min = def.min
+    if (def.max !== undefined) valueInput.max = def.max
+    valueInput.value = def.value
+  } else {
+    valueInput = document.createElement('input')
+    valueInput.type = 'text'
+    valueInput.className = 'input'
+    valueInput.value = def.value
+  }
+  valueInput.dataset.settingKey = def.key
+  valueInput.dataset.settingType = def.type
+  valueInput.dataset.originalValue = originalValue
+  editor.appendChild(valueInput)
+
+  const errorEl = document.createElement('div')
+  errorEl.className = 'settings-row-error'
+  editor.appendChild(errorEl)
+
+  valueInput.addEventListener('input', () => markSettingDirty(def.key, valueInput, originalValue, def.type, errorEl))
+  valueInput.addEventListener('change', () => markSettingDirty(def.key, valueInput, originalValue, def.type, errorEl))
+
+  row.appendChild(editor)
+  return row
+}
+
+async function saveAllSettings() {
+  if (settingsDirty.size === 0) return
+  const btn = document.getElementById('settingsSaveAllBtn')
+  if (btn) { btn.disabled = true; btn.textContent = t('settings.save_btn.saving') }
+
+  const errors = []
+  let needsRestart = false
+
+  for (const [key, { input, type, errorEl }] of settingsDirty) {
+    errorEl.textContent = ''
+    const raw = type === 'int' ? Number(input.value) : settingInputValue(input, type)
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, value: raw }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        errorEl.textContent = data.error || 'Hiba'
+        errors.push(`${key}: ${data.error || 'hiba'}`)
+      } else {
+        input.dataset.originalValue = String(raw)
+        if (data.requiresRestart) needsRestart = true
+      }
+    } catch {
+      errorEl.textContent = 'Kapcsolati hiba'
+      errors.push(`${key}: kapcsolati hiba`)
+    }
+  }
+
+  // Remove successfully saved keys from dirty map
+  for (const [key, { input, type }] of settingsDirty) {
+    if (settingInputValue(input, type) === input.dataset.originalValue) settingsDirty.delete(key)
+  }
+  updateSettingsSaveBar()
+
+  if (btn) { btn.disabled = false; btn.textContent = t('settings.btn.save') }
+  if (errors.length) {
+    showToast(t('settings.toast.partial_error'), 'error')
+  } else {
+    showToast(needsRestart ? t('settings.toast.saved_restart') : t('settings.toast.saved'))
+  }
+}
+
+function resetAllSettings() {
+  for (const [key, { input, originalValue }] of settingsDirty) {
+    input.value = originalValue
+    const errorEl = document.querySelector(`[data-setting-key="${key}"]`)?.closest('.settings-row')?.querySelector('.settings-row-error')
+    if (errorEl) errorEl.textContent = ''
+  }
+  settingsDirty.clear()
+  updateSettingsSaveBar()
+}
+
+document.getElementById('settingsSaveAllBtn')?.addEventListener('click', saveAllSettings)
+document.getElementById('settingsResetBtn')?.addEventListener('click', resetAllSettings)
+
+// === connectors.hu install banner ===
+;(function () {
+  const DISMISSED_KEY = 'cxhu_banner_dismissed'
+  const banner = document.getElementById('cxhuBanner')
+  const closeBtn = document.getElementById('cxhuBannerClose')
+  if (!banner || !closeBtn) return
+  if (localStorage.getItem(DISMISSED_KEY) === '1') { banner.hidden = true; return }
+
+  // dismiss with animation
+  closeBtn.addEventListener('click', () => {
+    banner.style.transition = 'opacity 0.2s ease, max-height 0.3s ease'
+    banner.style.overflow = 'hidden'
+    banner.style.opacity = '0'
+    banner.style.maxHeight = banner.offsetHeight + 'px'
+    requestAnimationFrame(() => { banner.style.maxHeight = '0' })
+    setTimeout(() => { banner.hidden = true }, 300)
+    localStorage.setItem(DISMISSED_KEY, '1')
+  })
+
+  // --- state machine ---
+  const states = ['Loading','Done','Install','Installing','Token','Configuring','Error']
+  function showState(name) {
+    states.forEach(s => {
+      const el = document.getElementById('cxhuState' + s)
+      if (el) el.hidden = (s !== name)
+    })
+  }
+
+  let lastError = null
+
+  async function checkStatus() {
+    showState('Loading')
+    try {
+      const res = await fetch('/api/connectors-hu/status')
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      const data = await res.json()
+      if (data.installed && data.configured) {
+        showState('Done')
+      } else if (data.installed) {
+        showState('Token')
+      } else {
+        showState('Install')
+      }
+    } catch (e) {
+      showError(e.message || t('status.error.fetch'), checkStatus)
+    }
+  }
+
+  function showError(msg, retryFn) {
+    document.getElementById('cxhuErrorMsg').textContent = msg
+    showState('Error')
+    const retryBtn = document.getElementById('cxhuRetryBtn')
+    retryBtn.onclick = retryFn || checkStatus
+  }
+
+  // Telepítés gomb
+  const installBtn = document.getElementById('cxhuInstallBtn')
+  if (installBtn) {
+    installBtn.addEventListener('click', async () => {
+      showState('Installing')
+      try {
+        const res = await fetch('/api/connectors-hu/install', { method: 'POST' })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data.ok) throw new Error(data.error || t('connectors.error.install'))
+        showState('Token')
+      } catch (e) {
+        showError(e.message, () => { showState('Install') })
+      }
+    })
+  }
+
+  // Mentés és szinkron gomb
+  const configureBtn = document.getElementById('cxhuConfigureBtn')
+  if (configureBtn) {
+    configureBtn.addEventListener('click', async () => {
+      const token = (document.getElementById('cxhuTokenInput') || {}).value || ''
+      if (!token.trim()) {
+        document.getElementById('cxhuTokenInput').focus()
+        return
+      }
+      showState('Configuring')
+      try {
+        const res = await fetch('/api/connectors-hu/configure', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: token.trim() }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data.ok) throw new Error(data.error || t('connectors.error.configure'))
+        showState('Done')
+      } catch (e) {
+        showError(e.message, () => { showState('Token') })
+      }
+    })
+  }
+
+  // Enter key a token inputban
+  const tokenInput = document.getElementById('cxhuTokenInput')
+  if (tokenInput) {
+    tokenInput.addEventListener('keydown', e => { if (e.key === 'Enter') configureBtn && configureBtn.click() })
+  }
+
+  checkStatus()
+})()
+
+// === Token Usage Monitor ===
+const TU_COLORS = {
+  wraith: '#6366f1',
+  codi: '#f59e0b',
+  dexi: '#ec4899',
+  finci: '#10b981',
+  hilti: '#ef4444',
+  szurcsi: '#8b5cf6',
+}
+let tuSelectedAgent = ''
+let tuChartState = null
+
+// Model pricing in USD per million tokens (input / output / cache-write / cache-read).
+// Fallback row is used when model is unknown or not yet captured.
+// cache-write is 1.25x input, cache-read is 0.1x input -- keep the derived
+// columns consistent with `in` when editing a row.
+// Sonnet 5 launched on introductory pricing (2 / 10) that ends 2026-08-31;
+// the standard rate (3 / 15) applies from 2026-09-01. Resolved by date at load
+// time instead of pinned to one of the two, so the table neither understates
+// spend today nor silently overstates it the morning the intro rate expires.
+const TU_SONNET5_INTRO_END = Date.parse('2026-09-01T00:00:00Z')
+const TU_SONNET5_PRICE = Date.now() < TU_SONNET5_INTRO_END
+  ? { in: 2.0, out: 10.0, cw: 2.50, cr: 0.20 }
+  : { in: 3.0, out: 15.0, cw: 3.75, cr: 0.30 }
+
+const TU_MODEL_PRICING = {
+  // INFERRED, not from the published catalogue: Opus 5 is not listed in the
+  // model reference this table was checked against. The value follows the rest
+  // of the current Opus tier (4.6/4.7/4.8 at 5 / 25); treat it as an estimate
+  // until a published rate confirms it.
+  'claude-opus-5':       { in: 5.0,   out: 25.0,  cw: 6.25,  cr: 0.50 },
+  'claude-opus-4-8':     { in: 5.0,   out: 25.0,  cw: 6.25,  cr: 0.50 },
+  'claude-opus-4-7':     { in: 5.0,   out: 25.0,  cw: 6.25,  cr: 0.50 },
+  'claude-opus-4-6':     { in: 5.0,   out: 25.0,  cw: 6.25,  cr: 0.50 },
+  // Opus 4.0 / 4.1 -- the last generation still on the old Opus pricing.
+  'claude-opus-4':       { in: 15.0,  out: 75.0,  cw: 18.75, cr: 1.50 },
+  'claude-sonnet-5':     TU_SONNET5_PRICE,
+  'claude-sonnet-4-6':   { in: 3.0,   out: 15.0,  cw: 3.75,  cr: 0.30 },
+  'claude-sonnet-4-5':   { in: 3.0,   out: 15.0,  cw: 3.75,  cr: 0.30 },
+  'claude-fable-5':      { in: 10.0,  out: 50.0,  cw: 12.50, cr: 1.00 },
+  'claude-mythos-5':     { in: 10.0,  out: 50.0,  cw: 12.50, cr: 1.00 },
+  'claude-haiku-4-5':    { in: 1.0,   out: 5.0,   cw: 1.25,  cr: 0.10 },
+  default:               { in: 3.0,   out: 15.0,  cw: 3.75,  cr: 0.30 },
+}
+
+// Longest-prefix wins. A plain first-match loop is order-dependent and silently
+// wrong here: 'claude-opus-4-8' also startsWith 'claude-opus-4', so whichever
+// key the object happens to list first decides the price -- that is how Opus 4.8
+// was billed at the Opus 4.1 rate even once it had its own row.
+function tuPriceForModel(model) {
+  if (!model) return TU_MODEL_PRICING.default
+  const keys = Object.keys(TU_MODEL_PRICING)
+    .filter((k) => k !== 'default')
+    .sort((a, b) => b.length - a.length)
+  for (const key of keys) {
+    if (model.startsWith(key)) return TU_MODEL_PRICING[key]
+  }
+  return TU_MODEL_PRICING.default
+}
+
+function tuCalcCostUSD(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, model) {
+  const p = tuPriceForModel(model)
+  return (
+    (inputTokens || 0) * p.in +
+    (outputTokens || 0) * p.out +
+    (cacheCreationTokens || 0) * p.cw +
+    (cacheReadTokens || 0) * p.cr
+  ) / 1_000_000
+}
+
+function tuFormatCostUSD(usd) {
+  if (usd < 0.001) return '<$0.001'
+  if (usd < 1) return '$' + usd.toFixed(3)
+  return '$' + usd.toFixed(2)
+}
+
+// Pie chart color palette for model distribution (distinct from agent colors)
+const TU_MODEL_COLORS = ['#6366f1','#06b6d4','#f59e0b','#22c55e','#ef4444','#8b5cf6','#ec4899','#10b981']
+
+function tuGetModelColor(idx) { return TU_MODEL_COLORS[idx % TU_MODEL_COLORS.length] }
+
+function tuGetColor(agent) {
+  return TU_COLORS[agent] || '#64748b'
+}
+
+function tuMcpServerFromTool(toolName) {
+  if (!toolName || !toolName.startsWith('mcp__')) return null
+  const parts = toolName.split('__')
+  // parts: ['mcp', '<server>', '<tool>'] for a full tool name, or
+  // ['mcp', '<server>'] for a tuMcpGroupKey() group key -- without accepting
+  // the 2-part form, every grouped MCP row would be mislabelled as builtin.
+  return parts.length >= 2 && parts[1] ? parts[1] : null
+}
+
+function tuMcpGroupKey(toolName) {
+  if (!toolName || !toolName.startsWith('mcp__')) return toolName
+  const parts = toolName.split('__')
+  return parts.length >= 3 ? 'mcp__' + parts[1] : toolName
+}
+
+function tuFormatTokens(n) {
+  if (n == null || isNaN(n)) return '0'
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B'
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
+  return String(n)
+}
+
+function tuGetTimeRange() {
+  const period = document.getElementById('tuPeriod')?.value || '7d'
+  const now = Math.floor(Date.now() / 1000)
+  if (period === '1h') return { from: now - 3600, to: now }
+  if (period === '24h') return { from: now - 86400, to: now }
+  if (period === '7d') return { from: now - 7 * 86400, to: now }
+  if (period === '30d') return { from: now - 30 * 86400, to: now }
+  return { from: undefined, to: undefined }
+}
+
+async function loadTokenUsage() {
+  const { from, to } = tuGetTimeRange()
+  const agent = tuSelectedAgent
+
+  const params = new URLSearchParams()
+  if (from) params.set('from', from)
+  if (to) params.set('to', to)
+
+  const summaryRes = await fetch('/api/token-usage/summary?' + params)
+  if (!summaryRes.ok) return
+  const summary = await summaryRes.json()
+  summary.sort((a, b) => {
+    const aTotal = (a.totalInput || 0) + (a.totalCacheRead || 0) + (a.totalCacheCreation || 0)
+    const bTotal = (b.totalInput || 0) + (b.totalCacheRead || 0) + (b.totalCacheCreation || 0)
+    return bTotal - aTotal
+  })
+  renderTuSummary(summary)
+
+  const agentSelect = document.getElementById('tuAgent')
+  if (agentSelect && agentSelect.options.length <= 1) {
+    for (const s of summary) {
+      const opt = document.createElement('option')
+      opt.value = s.agent
+      opt.textContent = s.agent
+      agentSelect.appendChild(opt)
+    }
+  }
+  if (agentSelect) agentSelect.value = agent
+
+  const period = document.getElementById('tuPeriod')?.value || '7d'
+  const bucketMin = period === '1h' ? 5 : 60
+  const tlParams = new URLSearchParams(params)
+  tlParams.set('bucket', String(bucketMin))
+  const tlRes = await fetch('/api/token-usage/timeline?' + tlParams)
+  if (!tlRes.ok) return
+  const timeline = await tlRes.json()
+  renderTuTimeline(timeline, agent)
+  renderTuBudgetCards()
+
+  tuDetailSearch = ''
+  const searchEl = document.getElementById('tuSearchInput')
+  if (searchEl) searchEl.value = ''
+
+  const agentParam = agent ? '&agent=' + encodeURIComponent(agent) : ''
+  const baseQuery = params.toString()
+
+  const [modelDistRes, toolStatsRes] = await Promise.all([
+    fetch('/api/token-usage/model-dist?' + baseQuery + agentParam),
+    fetch('/api/token-usage/tool-stats?' + baseQuery + agentParam),
+  ])
+  if (modelDistRes.ok) renderTuModelDist(await modelDistRes.json())
+  if (toolStatsRes.ok) renderTuToolStats(await toolStatsRes.json())
+
+  await tuFetchDetails()
+}
+
+function renderTuSummary(summary) {
+  const el = document.getElementById('tuSummaryCards')
+  if (!el) return
+  if (!summary.length) {
+    el.innerHTML = `<div class="overview-stat"><div class="overview-stat-label">${t('tokenUsage.no_data')}</div><div class="overview-stat-value">0</div><div class="overview-stat-sub">${t('tokenUsage.collect_hint')}</div></div>`
+    return
+  }
+  el.innerHTML = summary.map(s => {
+    const totalIn = (s.totalInput || 0) + (s.totalCacheRead || 0) + (s.totalCacheCreation || 0)
+    const isActive = tuSelectedAgent === s.agent
+    const dimmed = tuSelectedAgent && !isActive
+    const costUSD = Array.isArray(s.perModel) && s.perModel.length
+      ? s.perModel.reduce((sum, m) => sum + tuCalcCostUSD(m.totalInput || 0, m.totalOutput || 0, m.totalCacheRead || 0, m.totalCacheCreation || 0, m.model && m.model !== '(unknown)' ? m.model : null), 0)
+      : tuCalcCostUSD(s.totalInput, s.totalOutput, s.totalCacheRead, s.totalCacheCreation, null)
+    const sessions = s.totalSessions || 0
+    const tokPerSession = sessions > 0 ? Math.round(totalIn / sessions) : 0
+    const costPerSession = sessions > 0 ? costUSD / sessions : 0
+    return `
+      <div class="overview-stat tu-agent-card${isActive ? ' tu-active' : ''}" data-agent="${escapeHtml(s.agent)}"
+        style="border-left:3px solid ${tuGetColor(s.agent)};cursor:pointer;${dimmed ? 'opacity:0.4;' : ''}transition:opacity 0.2s">
+        <div class="overview-stat-label">${escapeHtml(s.agent)}</div>
+        <div class="overview-stat-value">${tuFormatTokens(totalIn)}</div>
+        <div class="overview-stat-sub">${t('tokenUsage.calls_sub', { calls: (s.totalCalls || 0).toLocaleString(), out: tuFormatTokens(s.totalOutput) })}</div>
+        <div class="overview-stat-sub" style="margin-top:4px;color:var(--text-secondary)">${tuFormatCostUSD(costUSD)} &middot; ${sessions} sess</div>
+        <div class="overview-stat-sub" style="font-size:11px;color:var(--text-secondary)">${tuFormatTokens(tokPerSession)} tok/sess &middot; ${tuFormatCostUSD(costPerSession)}/sess</div>
+      </div>`
+  }).join('')
+
+  el.querySelectorAll('.tu-agent-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const clickedAgent = card.dataset.agent
+      if (tuSelectedAgent === clickedAgent) {
+        tuSelectedAgent = ''
+      } else {
+        tuSelectedAgent = clickedAgent
+      }
+      const agentSelect = document.getElementById('tuAgent')
+      if (agentSelect) agentSelect.value = tuSelectedAgent
+      loadTokenUsage()
+    })
+  })
+}
+
+function tuGetResetLines(bucketStart, bucketEnd) {
+  const lines = []
+  // 5h session lines
+  const win5h = 5 * 3600
+  let t5 = bucketStart - (bucketStart % win5h) + win5h
+  while (t5 < bucketEnd) {
+    lines.push({ ts: t5, type: '5h', label: '5h' })
+    t5 += win5h
+  }
+  // Daily midnight + weekly Monday midnight
+  const d = new Date(bucketStart * 1000)
+  d.setHours(0, 0, 0, 0)
+  d.setDate(d.getDate() + 1)
+  while (d.getTime() / 1000 < bucketEnd) {
+    const ts = Math.floor(d.getTime() / 1000)
+    const isMonday = d.getDay() === 1
+    const near5h = lines.find(l => l.type === '5h' && Math.abs(l.ts - ts) < 1800)
+    if (!near5h) lines.push({ ts, type: isMonday ? 'weekly' : 'daily', label: isMonday ? t('tokenUsage.chart.week') : t('tokenUsage.chart.day') })
+    else if (isMonday) { near5h.type = 'weekly'; near5h.label = t('tokenUsage.chart.week') }
+    d.setDate(d.getDate() + 1)
+  }
+  return lines
+}
+
+function tuFillBuckets(data, bucketSeconds) {
+  if (!data.length) return data
+  const agents = [...new Set(data.map(d => d.agent))]
+  const bucketMap = {}
+  for (const d of data) {
+    const key = d.bucket + ':' + d.agent
+    bucketMap[key] = d
+  }
+  const minB = Math.min(...data.map(d => d.bucket))
+  const maxB = Math.max(...data.map(d => d.bucket))
+  const filled = []
+  for (let b = minB; b <= maxB; b += bucketSeconds) {
+    for (const agent of agents) {
+      const key = b + ':' + agent
+      filled.push(bucketMap[key] || { bucket: b, agent, calls: 0, inputTokens: 0, outputTokens: 0 })
+    }
+  }
+  return filled
+}
+
+function tuFormatLocalDate(ts) {
+  return new Date(ts * 1000).toLocaleString(undefined, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function tuFormatLocalShort(ts) {
+  const d = new Date(ts * 1000)
+  const period = document.getElementById('tuPeriod')?.value || '7d'
+  if (period === '1h' || period === '24h') {
+    return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
+  }
+  return `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:00`
+}
+
+function tuIsPeakHour(ts) {
+  const d = new Date(ts * 1000)
+  if (d.getDay() === 0 || d.getDay() === 6) return false
+  try {
+    const ptHour = parseInt(d.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false }))
+    return ptHour >= 5 && ptHour < 11
+  } catch { return false }
+}
+
+function tuCalcCumulativeWindows(buckets, bucketTotals, windowSeconds) {
+  const result = []
+  let windowStart = null
+  let cumulative = 0
+  for (const b of buckets) {
+    const total = bucketTotals[b] || 0
+    if (windowStart === null) {
+      if (total > 0) { windowStart = b; cumulative = total }
+      else { cumulative = 0 }
+    } else if (b >= windowStart + windowSeconds) {
+      if (total > 0) { windowStart = b; cumulative = total }
+      else { windowStart = null; cumulative = 0 }
+    } else {
+      cumulative += total
+    }
+    result.push({ bucket: b, cumulative })
+  }
+  return result
+}
+
+let tuBudgetView = ''
+
+function renderTuTimeline(data, filterAgent) {
+  const canvas = document.getElementById('tuCanvas')
+  if (!canvas) return
+  const container = canvas.parentElement
+  const dpr = window.devicePixelRatio || 1
+  const cssW = container.offsetWidth
+  const cssH = 360
+  canvas.width = cssW * dpr
+  canvas.height = cssH * dpr
+  canvas.style.width = cssW + 'px'
+  canvas.style.height = cssH + 'px'
+  const ctx = canvas.getContext('2d')
+  ctx.scale(dpr, dpr)
+  ctx.clearRect(0, 0, cssW, cssH)
+
+  const textSecondary = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#64748b'
+  const textPrimary = getComputedStyle(document.documentElement).getPropertyValue('--text-primary').trim() || '#1e293b'
+  const borderColor = getComputedStyle(document.documentElement).getPropertyValue('--border').trim() || '#e2e8f0'
+
+  if (!data.length) {
+    ctx.fillStyle = textSecondary
+    ctx.font = '14px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.fillText(t('tokenUsage.no_period_data'), cssW / 2, 160)
+    tuChartState = null
+    return
+  }
+
+  renderTuTimeline.__lastData = data
+  renderTuTimeline.__lastAgent = filterAgent
+  const period = document.getElementById('tuPeriod')?.value || '7d'
+  const bucketSec = period === '1h' ? 300 : 3600
+  const filled = tuFillBuckets(data, bucketSec)
+  const agents = [...new Set(filled.map(d => d.agent))]
+  const buckets = [...new Set(filled.map(d => d.bucket))].sort((a, b) => a - b)
+  const pad = { top: 20, right: 65, bottom: 70, left: 70 }
+  const w = cssW - pad.left - pad.right
+  const h = cssH - pad.top - pad.bottom
+
+  const bucketMap = {}
+  for (const d of filled) {
+    if (!bucketMap[d.bucket]) bucketMap[d.bucket] = {}
+    bucketMap[d.bucket][d.agent] = (bucketMap[d.bucket][d.agent] || 0) + (d.inputTokens || 0)
+  }
+
+  const bucketTotals = {}
+  for (const b of buckets) {
+    let sum = 0
+    for (const a of agents) sum += (bucketMap[b]?.[a] || 0)
+    bucketTotals[b] = sum
+  }
+
+  let maxVal = 0
+  for (const b of buckets) {
+    if (filterAgent) {
+      const v = bucketMap[b]?.[filterAgent] || 0
+      if (v > maxVal) maxVal = v
+    } else {
+      if (bucketTotals[b] > maxVal) maxVal = bucketTotals[b]
+    }
+  }
+  if (maxVal === 0) maxVal = 1
+
+  const barW = Math.max(2, Math.min(20, w / buckets.length - 1))
+  const barGap = Math.max(0, (w / buckets.length) - barW)
+  const bucketRange = buckets[buckets.length - 1] - buckets[0] + bucketSec
+
+  // Peak hours shading
+  for (let i = 0; i < buckets.length; i++) {
+    if (tuIsPeakHour(buckets[i])) {
+      const x = pad.left + (i / buckets.length) * w
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.06)'
+      ctx.fillRect(x, pad.top, barW + barGap, h)
+    }
+  }
+
+  // Day/week reset lines
+  const resetLines = tuGetResetLines(buckets[0], buckets[buckets.length - 1] + 3600)
+  for (const rl of resetLines) {
+    const frac = (rl.ts - buckets[0]) / bucketRange
+    if (frac < 0 || frac > 1) continue
+    const x = pad.left + frac * w
+    ctx.save()
+    ctx.strokeStyle = rl.type === 'weekly' ? '#ef444480' : rl.type === '5h' ? '#3b82f680' : '#f59e0b60'
+    ctx.lineWidth = rl.type === 'weekly' ? 1.5 : 1
+    ctx.setLineDash(rl.type === 'weekly' ? [6, 4] : rl.type === '5h' ? [3, 3] : [4, 4])
+    ctx.beginPath()
+    ctx.moveTo(x, pad.top)
+    ctx.lineTo(x, pad.top + h)
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  // Bars (dimmed when budget view is active)
+  const barDimmed = tuBudgetView !== ''
+  const barRects = []
+  for (let i = 0; i < buckets.length; i++) {
+    const x = pad.left + (i / buckets.length) * w
+    let yOffset = 0
+    const segments = []
+    const drawAgents = filterAgent ? [filterAgent] : agents
+    for (const agent of drawAgents) {
+      const val = bucketMap[buckets[i]]?.[agent] || 0
+      const barH = (val / maxVal) * h
+      ctx.globalAlpha = barDimmed ? 0.2 : 1
+      ctx.fillStyle = tuGetColor(agent)
+      ctx.fillRect(x, pad.top + h - yOffset - barH, barW, barH)
+      ctx.globalAlpha = 1
+      if (val > 0) segments.push({ agent, val })
+      yOffset += barH
+    }
+    barRects.push({ x, w: barW + barGap, bucket: buckets[i], segments, totalH: yOffset })
+  }
+
+  // Cumulative budget lines
+  const win5h = tuCalcCumulativeWindows(buckets, bucketTotals, 5 * 3600)
+  const winWeekly = tuCalcCumulativeWindows(buckets, bucketTotals, 7 * 86400)
+  const maxCum = Math.max(
+    ...win5h.map(w => w.cumulative),
+    ...winWeekly.map(w => w.cumulative),
+    1
+  )
+
+  function drawCumLine(windows, color, lineW, active) {
+    ctx.save()
+    ctx.strokeStyle = color
+    ctx.lineWidth = active ? lineW + 1 : lineW
+    ctx.globalAlpha = active ? 1 : (tuBudgetView === '' ? 0.7 : 0.15)
+    ctx.setLineDash([])
+    ctx.beginPath()
+    let prevCum = 0
+    for (let i = 0; i < windows.length; i++) {
+      const x = pad.left + (i / buckets.length) * w + barW / 2
+      const y = pad.top + h - (windows[i].cumulative / maxCum) * h
+      if (i === 0) { ctx.moveTo(x, y) }
+      else if (windows[i].cumulative < prevCum) {
+        ctx.stroke()
+        ctx.beginPath()
+        ctx.moveTo(x, pad.top + h)
+        ctx.lineTo(x, y)
+      } else {
+        ctx.lineTo(x, y)
+      }
+      prevCum = windows[i].cumulative
+    }
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  const is5hActive = tuBudgetView === '5h'
+  const isWeeklyActive = tuBudgetView === 'weekly'
+  drawCumLine(winWeekly, '#8b5cf6', 1.5, isWeeklyActive)
+  drawCumLine(win5h, '#06b6d4', 2, is5hActive)
+
+  // X axis
+  ctx.strokeStyle = borderColor
+  ctx.lineWidth = 1
+  ctx.setLineDash([])
+  ctx.beginPath()
+  ctx.moveTo(pad.left, pad.top + h)
+  ctx.lineTo(pad.left + w, pad.top + h)
+  ctx.stroke()
+
+  // X labels
+  ctx.fillStyle = textSecondary
+  ctx.font = '11px sans-serif'
+  ctx.textAlign = 'center'
+  const labelInterval = Math.max(1, Math.floor(buckets.length / 8))
+  for (let i = 0; i < buckets.length; i += labelInterval) {
+    const x = pad.left + (i / buckets.length) * w + barW / 2
+    ctx.fillText(tuFormatLocalShort(buckets[i]), x, pad.top + h + 18)
+  }
+
+  // Left Y axis (per-bucket)
+  ctx.textAlign = 'right'
+  ctx.fillStyle = textSecondary
+  ctx.font = '10px sans-serif'
+  for (let i = 0; i <= 4; i++) {
+    const val = (maxVal / 4) * i
+    const y = pad.top + h - (i / 4) * h
+    ctx.fillText(tuFormatTokens(val), pad.left - 8, y + 4)
+  }
+
+  // Right Y axis (cumulative)
+  ctx.textAlign = 'left'
+  ctx.fillStyle = '#06b6d4'
+  for (let i = 0; i <= 4; i++) {
+    const val = (maxCum / 4) * i
+    const y = pad.top + h - (i / 4) * h
+    ctx.fillText(tuFormatTokens(val), pad.left + w + 6, y + 4)
+  }
+
+  // Legend: single dynamic row with wrapping
+  let legendY = pad.top + h + 38
+  let legendX = pad.left
+  const maxLegW = cssW - pad.right
+  function legWrap(needed) { if (legendX + needed > maxLegW) { legendX = pad.left; legendY += 16 } }
+
+  ctx.font = '11px sans-serif'
+  ctx.textAlign = 'left'
+  for (const agent of agents) {
+    const tw = ctx.measureText(agent).width + 28
+    legWrap(tw)
+    ctx.fillStyle = tuGetColor(agent)
+    ctx.fillRect(legendX, legendY - 7, 10, 10)
+    ctx.fillStyle = textPrimary
+    ctx.fillText(agent, legendX + 14, legendY + 2)
+    legendX += tw
+  }
+
+  const legendHits = []
+  const lineItems = [
+    { label: t('tokenUsage.chart.window_5h'), color: '#06b6d4', lw: 2, dash: [], id: '5h', active: is5hActive },
+    { label: t('tokenUsage.chart.window_weekly'), color: '#8b5cf6', lw: 1.5, dash: [], id: 'weekly', active: isWeeklyActive },
+    { label: '5h', color: '#3b82f680', lw: 1, dash: [3, 3] },
+    { label: t('tokenUsage.chart.day'), color: '#f59e0b60', lw: 1, dash: [4, 4] },
+    { label: t('tokenUsage.chart.week'), color: '#ef444480', lw: 1.5, dash: [6, 4] },
+  ]
+  for (const li of lineItems) {
+    const tw = ctx.measureText(li.label).width + 34
+    legWrap(tw)
+    ctx.save()
+    ctx.strokeStyle = li.color; ctx.lineWidth = li.lw; ctx.setLineDash(li.dash)
+    ctx.beginPath(); ctx.moveTo(legendX, legendY - 1); ctx.lineTo(legendX + 16, legendY - 1); ctx.stroke()
+    ctx.restore()
+    ctx.fillStyle = li.active ? li.color : textSecondary
+    ctx.font = li.active ? 'bold 10px sans-serif' : '10px sans-serif'
+    ctx.fillText(li.label, legendX + 20, legendY + 2)
+    if (li.id) legendHits.push({ x: legendX, y: legendY - 10, w: tw, h: 16, id: li.id })
+    legendX += tw
+  }
+  legWrap(70)
+  ctx.fillStyle = 'rgba(239, 68, 68, 0.15)'
+  ctx.fillRect(legendX, legendY - 7, 10, 10)
+  ctx.fillStyle = textSecondary; ctx.font = '10px sans-serif'
+  ctx.fillText('csúcsidő', legendX + 14, legendY + 2)
+
+  // Store legend hit areas for click handling
+  tuChartState = { barRects, pad, h, cssW, cssH, maxVal, maxCum, win5h, winWeekly, legendHits }
+}
+
+;(function setupTuTooltip() {
+  const canvas = document.getElementById('tuCanvas')
+  if (!canvas) return
+  let tooltip = document.getElementById('tuTooltip')
+  if (!tooltip) {
+    tooltip = document.createElement('div')
+    tooltip.id = 'tuTooltip'
+    tooltip.style.cssText = 'position:absolute;background:var(--bg-elevated,#1e293b);color:var(--text-primary,#f8fafc);padding:8px 12px;border-radius:6px;font-size:12px;pointer-events:none;z-index:100;display:none;box-shadow:0 4px 12px rgba(0,0,0,0.3);max-width:240px;line-height:1.5'
+    canvas.parentElement.appendChild(tooltip)
+  }
+
+  canvas.addEventListener('mousemove', e => {
+    if (!tuChartState) return
+    const rect = canvas.getBoundingClientRect()
+    const mx = e.clientX - rect.left
+    const my = e.clientY - rect.top
+    const { barRects, pad, h } = tuChartState
+
+    let hit = null
+    for (const br of barRects) {
+      if (mx >= br.x && mx < br.x + br.w) { hit = br; break }
+    }
+
+    if (hit && my >= pad.top && my <= pad.top + h) {
+      const isPeak = tuIsPeakHour(hit.bucket)
+      let html = `<div style="font-weight:600;margin-bottom:4px">${tuFormatLocalShort(hit.bucket)}${isPeak ? ` <span style="color:#ef4444;font-size:10px">${t('tokenUsage.chart.peak')}</span>` : ''}</div>`
+      let total = 0
+      for (const seg of hit.segments) {
+        html += `<div><span style="color:${tuGetColor(seg.agent)}">&#9632;</span> ${seg.agent}: ${tuFormatTokens(seg.val)}</div>`
+        total += seg.val
+      }
+      if (hit.segments.length > 1) html += `<div style="border-top:1px solid rgba(255,255,255,0.2);margin-top:4px;padding-top:4px;font-weight:600">${t('tokenUsage.total')} ${tuFormatTokens(total)}</div>`
+      if (tuChartState.win5h || tuChartState.winWeekly) {
+        const idx = barRects.indexOf(hit)
+        if (idx >= 0) {
+          const c5 = tuChartState.win5h?.[idx]
+          const cw = tuChartState.winWeekly?.[idx]
+          html += '<div style="border-top:1px solid rgba(255,255,255,0.2);margin-top:4px;padding-top:4px;font-size:11px">'
+          if (c5) html += `<div><span style="color:#06b6d4">━</span> 5h ablak: ${tuFormatTokens(c5.cumulative)}</div>`
+          if (cw) html += `<div><span style="color:#8b5cf6">━</span> Heti ablak: ${tuFormatTokens(cw.cumulative)}</div>`
+          html += '</div>'
+        }
+      }
+      tooltip.innerHTML = html
+      tooltip.style.display = 'block'
+      const tx = Math.min(e.clientX - rect.left + 12, canvas.parentElement.offsetWidth - 250)
+      tooltip.style.left = tx + 'px'
+      tooltip.style.top = (my - 10) + 'px'
+    } else {
+      tooltip.style.display = 'none'
+    }
+  })
+
+  canvas.addEventListener('mouseleave', () => {
+    tooltip.style.display = 'none'
+  })
+
+  canvas.addEventListener('click', e => {
+    if (!tuChartState?.legendHits) return
+    const rect = canvas.getBoundingClientRect()
+    const mx = e.clientX - rect.left
+    const my = e.clientY - rect.top
+    for (const lh of tuChartState.legendHits) {
+      if (mx >= lh.x && mx <= lh.x + lh.w && my >= lh.y && my <= lh.y + lh.h) {
+        tuBudgetView = tuBudgetView === lh.id ? '' : lh.id
+        if (renderTuTimeline.__lastData) renderTuTimeline(renderTuTimeline.__lastData, renderTuTimeline.__lastAgent)
+        return
+      }
+    }
+  })
+})()
+
+function renderTuBudgetCards() {
+  const el = document.getElementById('tuBudgetCards')
+  if (!el || !tuChartState) return
+  const { win5h, winWeekly } = tuChartState
+  const cur5h = win5h?.length ? win5h[win5h.length - 1].cumulative : 0
+  const curWeekly = winWeekly?.length ? winWeekly[winWeekly.length - 1].cumulative : 0
+
+  el.innerHTML = `
+    <div class="overview-stat tu-budget-card${tuBudgetView === '5h' ? ' tu-active' : ''}" data-budget="5h"
+      style="border-left:3px solid #06b6d4;cursor:pointer;${tuBudgetView === 'weekly' ? 'opacity:0.4;' : ''}transition:opacity 0.2s">
+      <div class="overview-stat-label">${t('tokenUsage.window_5h_label')}</div>
+      <div class="overview-stat-value" style="color:#06b6d4">${tuFormatTokens(cur5h)}</div>
+      <div class="overview-stat-sub">${t('tokenUsage.cumulative_sub')}</div>
+    </div>
+    <div class="overview-stat tu-budget-card${tuBudgetView === 'weekly' ? ' tu-active' : ''}" data-budget="weekly"
+      style="border-left:3px solid #8b5cf6;cursor:pointer;${tuBudgetView === '5h' ? 'opacity:0.4;' : ''}transition:opacity 0.2s">
+      <div class="overview-stat-label">${t('tokenUsage.window_weekly_label')}</div>
+      <div class="overview-stat-value" style="color:#8b5cf6">${tuFormatTokens(curWeekly)}</div>
+      <div class="overview-stat-sub">${t('tokenUsage.cumulative_sub')}</div>
+    </div>`
+
+  el.querySelectorAll('.tu-budget-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const id = card.dataset.budget
+      tuBudgetView = tuBudgetView === id ? '' : id
+      if (renderTuTimeline.__lastData) renderTuTimeline(renderTuTimeline.__lastData, renderTuTimeline.__lastAgent)
+      renderTuBudgetCards()
+    })
+  })
+}
+
+let tuDetailData = []
+let tuDetailSort = { col: 'timestamp', dir: 'desc' }
+let tuDetailSearch = ''
+let tuSearchTimer = null
+
+function tuSortDetails(data) {
+  return [...data].sort((a, b) => {
+    const { col, dir } = tuDetailSort
+    let va, vb
+    if (col === 'input') {
+      va = (a.input_tokens || 0) + (a.cache_read_tokens || 0) + (a.cache_creation_tokens || 0)
+      vb = (b.input_tokens || 0) + (b.cache_read_tokens || 0) + (b.cache_creation_tokens || 0)
+    } else if (col === 'output') {
+      va = a.output_tokens || 0; vb = b.output_tokens || 0
+    } else if (col === 'agent') {
+      va = a.agent || ''; vb = b.agent || ''
+      return dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va)
+    } else {
+      va = a.timestamp || 0; vb = b.timestamp || 0
+    }
+    return dir === 'asc' ? va - vb : vb - va
+  })
+}
+
+function renderTuDetailsTable() {
+  const tbody = document.getElementById('tuDetailsTbody')
+  const countEl = document.getElementById('tuDetailsCount')
+  if (!tbody) return
+
+  const sorted = tuSortDetails(tuDetailData)
+  if (countEl) countEl.textContent = `${sorted.length} sor`
+
+  if (!sorted.length) {
+    tbody.innerHTML = `<tr><td colspan="5" style="color:var(--text-secondary);font-size:13px;text-align:center;padding:16px">${t('tokenUsage.no_calls')}</td></tr>`
+    return
+  }
+
+  tbody.innerHTML = sorted.map(d => {
+    const totalIn = (d.input_tokens || 0) + (d.cache_read_tokens || 0) + (d.cache_creation_tokens || 0)
+    const timeStr = tuFormatLocalDate(d.timestamp)
+    const preview = d.content_preview ? d.content_preview.slice(0, 80) + (d.content_preview.length > 80 ? '...' : '') : ''
+    const taskInfo = d.task_title ? `<span style="color:var(--text-secondary);font-size:11px"> [${escapeHtml(d.task_title)}]</span>` : ''
+    return `<tr>
+      <td style="white-space:nowrap">${timeStr}</td>
+      <td><span style="color:${tuGetColor(d.agent)};font-weight:600">${escapeHtml(d.agent)}</span>${taskInfo}</td>
+      <td style="text-align:right;font-variant-numeric:tabular-nums">${tuFormatTokens(totalIn)}</td>
+      <td style="text-align:right;font-variant-numeric:tabular-nums">${tuFormatTokens(d.output_tokens)}</td>
+      <td style="font-size:12px;color:var(--text-secondary);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(preview || '')}">${d.tool_name ? '<code>' + escapeHtml(d.tool_name) + '</code> ' : ''}${escapeHtml(preview)}</td>
+    </tr>`
+  }).join('')
+}
+
+function renderTuDetails(data) {
+  if (data) tuDetailData = data
+  const el = document.getElementById('tuDetailsTable')
+  if (!el) return
+
+  if (!document.getElementById('tuDetailsTbody')) {
+    const arrow = col => tuDetailSort.col === col ? (tuDetailSort.dir === 'asc' ? ' ▲' : ' ▼') : ''
+    const thStyle = 'cursor:pointer;user-select:none'
+    const thStyleR = thStyle + ';text-align:right'
+    el.innerHTML = `<div style="margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <input id="tuSearchInput" type="text" placeholder="${t('tokenUsage.search_placeholder')}"
+        style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary);color:var(--text-primary);width:260px;font-size:13px">
+      <span id="tuDetailsCount" style="color:var(--text-secondary);font-size:12px"></span>
+    </div>
+    <div style="overflow-x:auto"><table class="mem-table" style="width:100%;min-width:600px">
+      <thead><tr>
+        <th style="${thStyle}" data-sort="timestamp">${t('tokenUsage.col.time')}${arrow('timestamp')}</th>
+        <th style="${thStyle}" data-sort="agent">${t('tokenUsage.col.agent')}${arrow('agent')}</th>
+        <th style="${thStyleR}" data-sort="input">Input${arrow('input')}</th>
+        <th style="${thStyleR}" data-sort="output">Output${arrow('output')}</th>
+        <th>${t('tokenUsage.col.content')}</th>
+      </tr></thead>
+      <tbody id="tuDetailsTbody"></tbody>
+    </table></div>`
+
+    el.querySelectorAll('th[data-sort]').forEach(th => {
+      th.addEventListener('click', () => {
+        const col = th.dataset.sort
+        if (tuDetailSort.col === col) {
+          tuDetailSort.dir = tuDetailSort.dir === 'asc' ? 'desc' : 'asc'
+        } else {
+          tuDetailSort = { col, dir: col === 'agent' ? 'asc' : 'desc' }
+        }
+        th.closest('thead').querySelectorAll('th[data-sort]').forEach(h => {
+          const c = h.dataset.sort
+          const arrow = tuDetailSort.col === c ? (tuDetailSort.dir === 'asc' ? ' ▲' : ' ▼') : ''
+          const labels = { timestamp: t('tokenUsage.col.time'), agent: t('tokenUsage.col.agent'), input: 'Input', output: 'Output' }
+          h.textContent = (labels[c] || c) + arrow
+        })
+        renderTuDetailsTable()
+      })
+    })
+
+    document.getElementById('tuSearchInput').addEventListener('input', e => {
+      tuDetailSearch = e.target.value
+      clearTimeout(tuSearchTimer)
+      tuSearchTimer = setTimeout(() => tuFetchDetails(), 400)
+    })
+  }
+
+  renderTuDetailsTable()
+}
+
+async function tuFetchDetails() {
+  const { from, to } = tuGetTimeRange()
+  const agent = tuSelectedAgent
+  const minTokens = document.getElementById('tuMinTokens')?.value || '50000'
+  const params = new URLSearchParams()
+  if (from) params.set('from', from)
+  if (to) params.set('to', to)
+  if (agent) params.set('agent', agent)
+  if (!tuDetailSearch) params.set('min_tokens', minTokens)
+  if (tuDetailSearch) params.set('q', tuDetailSearch)
+  params.set('limit', '200')
+  const detailRes = await fetch('/api/token-usage?' + params)
+  if (!detailRes.ok) return
+  const details = await detailRes.json()
+  renderTuDetails(details)
+}
+
+document.getElementById('tuCollectBtn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('tuCollectBtn')
+  btn.disabled = true
+  btn.textContent = t('tokenUsage.collect_btn.collecting')
+  try {
+    const res = await fetch('/api/token-usage/collect', { method: 'POST' }).then(r => r.json())
+    btn.textContent = t('tokenUsage.collect_done', { n: res.inserted || 0 })
+    setTimeout(() => { btn.textContent = t('tokenUsage.collect_btn.collect'); btn.disabled = false }, 2000)
+    loadTokenUsage()
+  } catch {
+    btn.textContent = t('tokenUsage.collect_error')
+    setTimeout(() => { btn.textContent = t('tokenUsage.collect_btn.collect'); btn.disabled = false }, 2000)
+  }
+})
+
+document.getElementById('tuPeriod')?.addEventListener('change', () => { tuSelectedAgent = ''; loadTokenUsage() })
+document.getElementById('tuAgent')?.addEventListener('change', () => { tuSelectedAgent = document.getElementById('tuAgent').value; loadTokenUsage() })
+document.getElementById('tuMinTokens')?.addEventListener('change', () => tuFetchDetails())
+document.getElementById('tuToolAgentBreakdown')?.addEventListener('change', () => {
+  if (tuToolStatsData) renderTuToolStats(tuToolStatsData)
+})
+
+window.addEventListener('resize', () => {
+  if (!document.getElementById('tokenUsagePage')?.hidden) {
+    if (tuChartState && renderTuTimeline.__lastData) renderTuTimeline(renderTuTimeline.__lastData, renderTuTimeline.__lastAgent)
+    if (tuModelDistData) renderTuModelDist(tuModelDistData)
+  }
+})
+
+// ============================================================
+// Token Monitor: Model distribution pie chart
+// ============================================================
+let tuModelDistData = null
+
+function renderTuModelDist(data) {
+  tuModelDistData = data
+  const section = document.getElementById('tuModelDistSection')
+  const tableEl = document.getElementById('tuModelDistTable')
+  const canvas = document.getElementById('tuModelPieCanvas')
+  if (!section || !tableEl || !canvas) return
+
+  if (!data || !data.length) {
+    tableEl.innerHTML = `<span style="color:var(--text-secondary);font-size:13px">${t('tokenUsage.model_dist_no_data')}</span>`
+    const ctx = canvas.getContext('2d')
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    return
+  }
+
+  // Pie chart
+  const dpr = window.devicePixelRatio || 1
+  const size = 180
+  canvas.width = size * dpr
+  canvas.height = size * dpr
+  canvas.style.width = size + 'px'
+  canvas.style.height = size + 'px'
+  const ctx = canvas.getContext('2d')
+  ctx.scale(dpr, dpr)
+  ctx.clearRect(0, 0, size, size)
+
+  const total = data.reduce((s, d) => s + (d.count || 0), 0)
+  const cx = size / 2, cy = size / 2, r = size / 2 - 8
+  let startAngle = -Math.PI / 2
+  for (let i = 0; i < data.length; i++) {
+    const frac = (data[i].count || 0) / total
+    const endAngle = startAngle + frac * Math.PI * 2
+    ctx.beginPath()
+    ctx.moveTo(cx, cy)
+    ctx.arc(cx, cy, r, startAngle, endAngle)
+    ctx.closePath()
+    ctx.fillStyle = tuGetModelColor(i)
+    ctx.fill()
+    // Thin separator
+    ctx.strokeStyle = 'var(--bg-primary, #0f172a)'
+    ctx.lineWidth = 1.5
+    ctx.stroke()
+    startAngle = endAngle
+  }
+
+  // Center hole (donut effect)
+  ctx.beginPath()
+  ctx.arc(cx, cy, r * 0.5, 0, Math.PI * 2)
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg-elevated') || '#1e293b'
+  ctx.fill()
+
+  // Legend + table
+  const thStyle = 'text-align:left;padding:4px 8px 4px 0;font-size:12px;color:var(--text-secondary);border-bottom:1px solid var(--border);font-weight:600'
+  const tdStyle = 'padding:4px 8px 4px 0;font-size:13px;vertical-align:middle'
+  const tdRStyle = tdStyle + ';text-align:right'
+
+  let rows = data.map((d, i) => {
+    const pct = total > 0 ? ((d.count / total) * 100).toFixed(1) : '0.0'
+    const costUSD = tuCalcCostUSD(d.totalInput, d.totalOutput, d.totalCacheRead, d.totalCacheCreation, d.model !== '(unknown)' ? d.model : null)
+    return `<tr>
+      <td style="${tdStyle}">
+        <span style="display:inline-block;width:10px;height:10px;background:${tuGetModelColor(i)};border-radius:2px;margin-right:6px;vertical-align:middle"></span>
+        <code style="font-size:12px">${escapeHtml(d.model)}</code>
+      </td>
+      <td style="${tdRStyle}">${(d.count || 0).toLocaleString()}</td>
+      <td style="${tdRStyle}">${pct}%</td>
+      <td style="${tdRStyle}">${tuFormatCostUSD(costUSD)}</td>
+    </tr>`
+  }).join('')
+
+  tableEl.innerHTML = `<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;min-width:300px">
+    <thead><tr>
+      <th style="${thStyle}">Modell</th>
+      <th style="${thStyle.replace('text-align:left','text-align:right')}">${t('tokenUsage.model_dist_calls', { n: '' }).trim()}</th>
+      <th style="${thStyle.replace('text-align:left','text-align:right')}">%</th>
+      <th style="${thStyle.replace('text-align:left','text-align:right')}">Becsült USD</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`
+}
+
+// ============================================================
+// Token Monitor: MCP tool usage grid
+// ============================================================
+let tuToolStatsData = null
+
+function renderTuToolStats(data) {
+  tuToolStatsData = data
+  const el = document.getElementById('tuToolStatsContent')
+  if (!el) return
+
+  if (!data || !data.length) {
+    el.innerHTML = `<span style="color:var(--text-secondary);font-size:13px">${t('tokenUsage.tool_stats_no_data')}</span>`
+    return
+  }
+
+  // Aggregate per-model rows into one entry per tool (MCP tools grouped by server)
+  const byTool = new Map()
+  for (const row of data) {
+    const key = tuMcpGroupKey(row.tool_name)
+    let entry = byTool.get(key)
+    if (!entry) {
+      entry = { tool_name: key, count: 0, agentSet: new Set(), costUSD: 0 }
+      byTool.set(key, entry)
+    }
+    entry.count += row.count || 0
+    ;(row.agents || '').split(',').forEach(a => { const s = a.trim(); if (s) entry.agentSet.add(s) })
+    entry.costUSD += tuCalcCostUSD(row.totalInput || 0, row.totalOutput || 0, row.totalCacheRead || 0, row.totalCacheCreation || 0, row.model || null)
+  }
+  const aggregated = Array.from(byTool.values()).sort((a, b) => b.count - a.count).slice(0, 50)
+
+  const showAgents = document.getElementById('tuToolAgentBreakdown')?.checked
+  const thStyle = 'text-align:left;padding:4px 8px 4px 0;font-size:12px;color:var(--text-secondary);border-bottom:1px solid var(--border);font-weight:600'
+  const tdStyle = 'padding:4px 8px 4px 0;font-size:13px;overflow:hidden;text-overflow:ellipsis;max-width:260px;white-space:nowrap'
+  const tdRStyle = 'padding:4px 8px 4px 0;font-size:13px;text-align:right;font-variant-numeric:tabular-nums'
+
+  const maxCount = Math.max(...aggregated.map(d => d.count || 0))
+
+  const rows = aggregated.map(d => {
+    const barPct = maxCount > 0 ? Math.round((d.count / maxCount) * 100) : 0
+    const server = tuMcpServerFromTool(d.tool_name)
+    const serverLabel = server
+      ? `<span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(server)}</span>`
+      : `<span style="font-size:11px;color:var(--text-secondary);opacity:0.6">${t('tokenUsage.tool_stats_builtin')}</span>`
+    const agentChips = Array.from(d.agentSet).map(a => {
+      const color = tuGetColor(a)
+      return `<span style="display:inline-block;padding:1px 6px;border-radius:10px;font-size:11px;font-weight:500;border:1px solid ${color};color:${color};margin:1px 2px 1px 0;white-space:nowrap">${escapeHtml(a)}</span>`
+    }).join('')
+    const agentCell = showAgents ? `<td style="${tdStyle};white-space:normal">${agentChips}</td>` : ''
+    return `<tr>
+      <td style="${tdStyle}" title="${escapeHtml(d.tool_name)}"><code style="font-size:12px">${escapeHtml(d.tool_name)}</code></td>
+      <td style="${tdRStyle}">${(d.count || 0).toLocaleString()}</td>
+      <td style="padding:4px 8px 4px 0;vertical-align:middle;min-width:70px">
+        <div style="background:var(--accent,#6366f1);height:6px;border-radius:3px;width:${barPct}%;opacity:0.7"></div>
+      </td>
+      <td style="${tdStyle}">${serverLabel}</td>
+      <td style="${tdRStyle}">${tuFormatCostUSD(d.costUSD)}</td>
+      ${agentCell}
+    </tr>`
+  }).join('')
+
+  const agentHeader = showAgents ? `<th style="${thStyle}">${t('tokenUsage.tool_stats_col_agents')}</th>` : ''
+
+  el.innerHTML = `<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;min-width:400px">
+    <thead><tr>
+      <th style="${thStyle}">${t('tokenUsage.tool_stats_col_tool')}</th>
+      <th style="${thStyle.replace('text-align:left','text-align:right')}">${t('tokenUsage.tool_stats_col_calls')}</th>
+      <th style="${thStyle}"></th>
+      <th style="${thStyle}">${t('tokenUsage.tool_stats_col_server')}</th>
+      <th style="${thStyle.replace('text-align:left','text-align:right')}">${t('tokenUsage.tool_stats_col_cost')}</th>
+      ${agentHeader}
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`
+}
+
+// ============================================================
+// Ideas (Ötletláda)
+// ============================================================
+let ideas = []
+let ideasPromoteId = null
+let ideaEditId = null
+let ideaDetailId = null
+const STATUS_COLORS = { new: 'var(--accent)', reviewed: '#f59e0b', kanban: '#22c55e', rejected: '#ef4444' }
+const STATUS_LABELS = { new: () => t('ideas.status.new'), reviewed: () => t('ideas.status.reviewed'), kanban: () => t('ideas.status.kanban'), rejected: () => t('ideas.status.rejected') }
+
+async function loadIdeasPage() {
+  const statusFilter = document.getElementById('ideaStatusFilter')?.value ?? 'active'
+  const categoryFilter = document.getElementById('ideaCategoryFilter')?.value || ''
+  const params = new URLSearchParams()
+  // 'active' = new+reviewed, fetched unfiltered then narrowed client-side
+  if (statusFilter && statusFilter !== 'active') params.set('status', statusFilter)
+  if (categoryFilter) params.set('category', categoryFilter)
+  const [ideasRes, catsRes] = await Promise.all([fetch('/api/ideas?' + params), fetch('/api/ideas/categories')])
+  ideas = await ideasRes.json()
+  if (statusFilter === 'active') ideas = ideas.filter(i => i.status === 'new' || i.status === 'reviewed')
+  const cats = await catsRes.json()
+  const catSel = document.getElementById('ideaCategoryFilter')
+  if (catSel) {
+    const prev = catSel.value
+    catSel.innerHTML = `<option value="">${t('ideas.filter.all_categories')}</option>` + cats.map(c => `<option value="${escapeHtml(c)}" ${c === prev ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')
+  }
+  renderIdeasStats()
+  renderIdeasList()
+}
+
+function renderIdeasStats() {
+  const counts = { new: 0, reviewed: 0, kanban: 0, rejected: 0 }
+  for (const i of ideas) counts[i.status] = (counts[i.status] || 0) + 1
+  const el = document.getElementById('ideasStats')
+  if (!el) return
+  el.innerHTML = Object.entries(counts).map(([s, n]) =>
+    `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:90px">
+      <div style="font-size:22px;font-weight:700;color:${STATUS_COLORS[s]}">${n}</div>
+      <div style="font-size:12px;color:var(--text-muted)">${typeof STATUS_LABELS[s] === 'function' ? STATUS_LABELS[s]() : STATUS_LABELS[s]}</div>
+    </div>`
+  ).join('')
+}
+
+function renderIdeasList() {
+  const el = document.getElementById('ideasList')
+  if (!el) return
+  if (!ideas.length) { el.innerHTML = `<div style="color:var(--text-muted);padding:32px;text-align:center">${t('ideas.empty')}</div>`; return }
+  const byCategory = {}
+  for (const idea of ideas) {
+    if (!byCategory[idea.category]) byCategory[idea.category] = []
+    byCategory[idea.category].push(idea)
+  }
+  el.innerHTML = Object.entries(byCategory).map(([cat, items]) => `
+    <div style="margin-bottom:8px">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);padding:4px 0 6px">${escapeHtml(cat)}</div>
+      ${items.map(renderIdeaCard).join('')}
+    </div>`).join('')
+}
+
+function ideaScoreBadge(idea) {
+  if (!idea.impact || !idea.effort) return ''
+  const score = idea.impact - idea.effort
+  const color = score > 0 ? '#22c55e' : score < 0 ? '#ef4444' : 'var(--text-muted)'
+  return `<span style="font-size:11px;color:${color};border:1px solid ${color};border-radius:4px;padding:2px 5px" title="Impact ${idea.impact} - Effort ${idea.effort}">I${idea.impact}·E${idea.effort}</span>`
+}
+
+function renderIdeaCard(idea) {
+  const statusColor = STATUS_COLORS[idea.status] || 'var(--text-muted)'
+  const statusLabelRaw = STATUS_LABELS[idea.status]; const statusLabel = statusLabelRaw ? (typeof statusLabelRaw === 'function' ? statusLabelRaw() : statusLabelRaw) : idea.status
+  const desc = idea.description ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${escapeHtml(idea.description.slice(0, 120))}${idea.description.length > 120 ? '…' : ''}</div>` : ''
+  const staleBadge = idea.stale ? `<span style="font-size:11px;background:#92400e22;color:#d97706;border:1px solid #d97706;border-radius:4px;padding:2px 5px" title="${t('ideas.stale_tooltip')}">${t('ideas.stale_badge')}</span>` : ''
+  return `<div class="card" style="padding:12px 16px;margin-bottom:4px${idea.stale ? ';border-left:3px solid #d97706' : ''}">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="idea-title-link" style="font-weight:600;font-size:14px;cursor:pointer" onclick="openIdeaDetail('${idea.id}')">${escapeHtml(idea.title)}</span>
+          <span style="font-size:11px;color:${statusColor};padding:2px 6px;border:1px solid ${statusColor};border-radius:4px">${statusLabel}</span>
+          ${ideaScoreBadge(idea)}
+          ${staleBadge}
+        </div>
+        ${desc}
+      </div>
+      <div style="display:flex;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
+        ${idea.status !== 'reviewed' && idea.status !== 'kanban' ? `<button class="btn-secondary btn-compact" onclick="setIdeaStatus('${idea.id}','reviewed')" style="font-size:11px">${t('ideas.btn.reviewed')}</button>` : ''}
+        ${idea.status !== 'rejected' ? `<button class="btn-secondary btn-compact" onclick="setIdeaStatus('${idea.id}','rejected')" style="font-size:11px;color:#ef4444">${t('ideas.btn.rejected')}</button>` : ''}
+        ${idea.status === 'reviewed' || idea.status === 'rejected' ? `<button class="btn-secondary btn-compact" onclick="setIdeaStatus('${idea.id}','new')" style="font-size:11px">${t('ideas.btn.reopen')}</button>` : ''}
+        <button class="btn-secondary btn-compact" onclick="openIdeaEdit('${idea.id}')" style="font-size:11px">${t('ideas.btn.edit')}</button>
+        ${idea.status !== 'kanban' && idea.status !== 'rejected' ? `<button class="btn-primary btn-compact" onclick="openIdeaBreakdown('${idea.id}')" style="font-size:11px">${t('ideas.btn.kanban_ai')}</button>` : ''}
+        <button class="btn-secondary btn-compact" onclick="deleteIdeaItem('${idea.id}')" style="font-size:11px;color:#ef4444">${t('ideas.btn.delete')}</button>
+      </div>
+    </div>
+  </div>`
+}
+
+function applyIdeaModalI18n() {
+  const labels = document.querySelectorAll('#ideaModalOverlay .form-label')
+  const keys = ['ideas.modal.title_label', 'ideas.modal.desc_label', 'ideas.modal.category_label', 'ideas.modal.impact_label', 'ideas.modal.effort_label']
+  labels.forEach((el, i) => { if (keys[i]) el.textContent = t(keys[i]) })
+  const saveBtn = document.getElementById('ideaModalSave')
+  const cancelBtn = document.getElementById('ideaModalCancel')
+  if (saveBtn) saveBtn.textContent = t('ideas.modal.save_btn')
+  if (cancelBtn) cancelBtn.textContent = t('ideas.modal.cancel_btn')
+}
+
+function openIdeaNew() {
+  ideaEditId = null
+  document.getElementById('ideaModalTitle').textContent = t('ideas.modal.title_new')
+  document.getElementById('ideaTitleInput').value = ''
+  document.getElementById('ideaDescInput').value = ''
+  applyIdeaModalI18n()
+  openModal(document.getElementById('ideaModalOverlay'))
+}
+
+function openIdeaEdit(id) {
+  const idea = ideas.find(i => i.id === id)
+  if (!idea) return
+  ideaEditId = id
+  document.getElementById('ideaModalTitle').textContent = t('ideas.modal.title_edit')
+  document.getElementById('ideaTitleInput').value = idea.title
+  document.getElementById('ideaDescInput').value = idea.description || ''
+  document.getElementById('ideaCategoryInput').value = idea.category
+  document.getElementById('ideaImpactInput').value = idea.impact ?? ''
+  document.getElementById('ideaEffortInput').value = idea.effort ?? ''
+  openModal(document.getElementById('ideaModalOverlay'))
+}
+
+async function saveIdea() {
+  const title = document.getElementById('ideaTitleInput').value.trim()
+  if (!title) { showToast(t('common.title') + ' ' + t('common.error'), 'error'); return }
+  const impactRaw = document.getElementById('ideaImpactInput').value
+  const effortRaw = document.getElementById('ideaEffortInput').value
+  const body = {
+    title,
+    description: document.getElementById('ideaDescInput').value.trim() || undefined,
+    category: document.getElementById('ideaCategoryInput').value,
+    source: 'manual',
+    impact: impactRaw ? parseInt(impactRaw) : null,
+    effort: effortRaw ? parseInt(effortRaw) : null,
+  }
+  if (ideaEditId) {
+    await fetch(`/api/ideas/${ideaEditId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  } else {
+    await fetch('/api/ideas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, status: 'new' }) })
+  }
+  closeModal(document.getElementById('ideaModalOverlay'))
+  loadIdeasPage()
+}
+
+async function deleteIdeaItem(id) {
+  if (!confirm(t('kanban.confirm.delete'))) return
+  await fetch(`/api/ideas/${id}`, { method: 'DELETE' })
+  loadIdeasPage()
+}
+
+// --- Idea detail modal (comments + impact/effort view) ---
+
+async function openIdeaDetail(id) {
+  const idea = ideas.find(i => i.id === id)
+  if (!idea) return
+  ideaDetailId = id
+  const statusLabel = STATUS_LABELS[idea.status] || idea.status
+  document.getElementById('ideaDetailTitle').textContent = idea.title
+  document.getElementById('ideaDetailMeta').textContent = `${idea.category} · ${statusLabel}`
+  document.getElementById('ideaDetailDesc').textContent = idea.description || t('ideas.no_description')
+  document.getElementById('ideaDetailImpact').value = idea.impact ?? ''
+  document.getElementById('ideaDetailEffort').value = idea.effort ?? ''
+  updateDetailScoreChip()
+  document.getElementById('ideaCommentsList').innerHTML = ''
+  document.getElementById('ideaCommentContent').value = ''
+  openModal(document.getElementById('ideaDetailOverlay'))
+  await loadIdeaComments(id)
+}
+
+function updateDetailScoreChip() {
+  const chip = document.getElementById('ideaDetailScoreChip')
+  if (!chip) return
+  const impact = Number(document.getElementById('ideaDetailImpact').value) || 0
+  const effort = Number(document.getElementById('ideaDetailEffort').value) || 0
+  if (!impact && !effort) { chip.textContent = ''; return }
+  if (!impact || !effort) { chip.textContent = ''; return }
+  const score = impact - effort
+  const color = score > 0 ? '#22c55e' : score < 0 ? '#ef4444' : 'var(--text-muted)'
+  chip.innerHTML = `<span class="idea-score-chip" style="border-color:${color};color:${color}">Pont: <strong>${score >= 0 ? '+' : ''}${score}</strong></span>`
+}
+
+document.getElementById('ideaDetailImpact')?.addEventListener('change', updateDetailScoreChip)
+document.getElementById('ideaDetailEffort')?.addEventListener('change', updateDetailScoreChip)
+
+document.getElementById('ideaDetailScoreSave')?.addEventListener('click', async () => {
+  if (!ideaDetailId) return
+  const impact = document.getElementById('ideaDetailImpact').value
+  const effort = document.getElementById('ideaDetailEffort').value
+  try {
+    const res = await fetch(`/api/ideas/${encodeURIComponent(ideaDetailId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        impact: impact ? Number(impact) : null,
+        effort: effort ? Number(effort) : null,
+      }),
+    })
+    if (!res.ok) { showToast(t('ideas.toast.score_saved_error'), 'error'); return }
+    // update local cache so card chip refreshes on close
+    const idea = ideas.find(i => i.id === ideaDetailId)
+    if (idea) {
+      idea.impact = impact ? Number(impact) : null
+      idea.effort = effort ? Number(effort) : null
+    }
+    updateDetailScoreChip()
+    showToast(t('ideas.toast.score_saved'))
+    renderIdeasList()
+  } catch { showToast(t('ideas.toast.score_saved_error'), 'error') }
+})
+
+async function loadIdeaComments(id) {
+  const list = document.getElementById('ideaCommentsList')
+  try {
+    const res = await fetch(`/api/ideas/${encodeURIComponent(id)}/comments`)
+    const data = await res.json()
+    if (!data.comments || !data.comments.length) {
+      list.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:6px 0">${t('ideas.comments.empty')}</div>`
+      return
+    }
+    list.innerHTML = ''
+    for (const c of data.comments) {
+      const date = new Date(c.created_at * 1000).toLocaleString('hu-HU', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      const div = document.createElement('div')
+      div.className = 'comment-item'
+      div.innerHTML = `<div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px"><span class="comment-author">${escapeHtml(c.author)}</span><span class="comment-date">${date}</span></div><div class="comment-body">${escapeHtml(c.content)}</div>`
+      list.appendChild(div)
+    }
+  } catch {
+    list.innerHTML = `<div style="color:var(--danger);font-size:12px">${t('ideas.comments.error')}</div>`
+  }
+}
+
+document.getElementById('ideaCommentSubmit')?.addEventListener('click', async () => {
+  if (!ideaDetailId) return
+  const content = document.getElementById('ideaCommentContent').value.trim()
+  if (!content) { document.getElementById('ideaCommentContent').focus(); return }
+  try {
+    const res = await fetch(`/api/ideas/${encodeURIComponent(ideaDetailId)}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    })
+    if (!res.ok) { showToast(t('ideas.toast.comment_error'), 'error'); return }
+    document.getElementById('ideaCommentContent').value = ''
+    await loadIdeaComments(ideaDetailId)
+  } catch { showToast(t('ideas.toast.comment_error'), 'error') }
+})
+
+document.getElementById('ideaDetailClose')?.addEventListener('click', () => closeModal(document.getElementById('ideaDetailOverlay')))
+document.getElementById('ideaDetailCloseBtn')?.addEventListener('click', () => closeModal(document.getElementById('ideaDetailOverlay')))
+document.getElementById('ideaDetailEditBtn')?.addEventListener('click', () => {
+  if (!ideaDetailId) return
+  closeModal(document.getElementById('ideaDetailOverlay'))
+  openIdeaEdit(ideaDetailId)
+})
+
+function openIdeaPromote(id) {
+  ideasPromoteId = id
+  openModal(document.getElementById('ideaPromoteOverlay'))
+}
+
+async function promoteIdea(phase) {
+  if (!ideasPromoteId) return
+  const res = await fetch(`/api/ideas/${ideasPromoteId}/promote`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase }) })
+  const data = await res.json()
+  ideasPromoteId = null
+  closeModal(document.getElementById('ideaPromoteOverlay'))
+  if (data.ok) showToast(t('kanban.toast.card_created') + ': ' + data.kanban_id)
+  loadIdeasPage()
+}
+
+async function setIdeaStatus(id, status) {
+  try {
+    const res = await fetch(`/api/ideas/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) })
+    if (!res.ok) { showToast(t('ideas.toast.status_error')); return }
+    loadIdeasPage()
+  } catch { showToast(t('ideas.toast.status_error')) }
+}
+
+// Promote an idea to the board via AI breakdown + per-subtask approval.
+// Reuses the shared breakdown modal (breakdownMode='idea').
+async function openIdeaBreakdown(id) {
+  const idea = ideas.find(i => i.id === id)
+  if (!idea) return
+  // The breakdown modal's assignee dropdown reads kanbanAssignees, which is only
+  // populated by loadKanban(). If the user lands here without visiting the board,
+  // fetch it so the AI-suggested assignees are selectable.
+  if (!kanbanAssignees.length) {
+    try { kanbanAssignees = await (await fetch('/api/kanban/assignees')).json() } catch { /* dropdown falls back to "nincs" */ }
+  }
+  showToast(t('ideas.toast.ai_elaborating'))
+  try {
+    const res = await fetch(`/api/ideas/${id}/breakdown`, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+    const data = await res.json()
+    if (!res.ok) { showToast(data.error || 'Breakdown hiba'); return }
+    if (!data.subtasks || !data.subtasks.length) { showToast('Az AI nem adott vissza alfeladatot'); return }
+    breakdownMode = 'idea'
+    breakdownIdeaId = id
+    breakdownSubtasks = data.subtasks
+    showBreakdownModal(data.subtasks, { title: idea.title })
+    // Show DoD field only in idea mode
+    const dodSection = document.getElementById('breakdownDoDSection')
+    if (dodSection) { dodSection.style.display = ''; document.getElementById('breakdownSuccessCriteria').value = '' }
+  } catch {
+    showToast('Breakdown hiba')
+  }
+}
+
+document.getElementById('ideaNewBtn')?.addEventListener('click', openIdeaNew)
+document.getElementById('ideaModalClose')?.addEventListener('click', () => { closeModal(document.getElementById('ideaModalOverlay')) })
+document.getElementById('ideaModalCancel')?.addEventListener('click', () => { closeModal(document.getElementById('ideaModalOverlay')) })
+document.getElementById('ideaModalSave')?.addEventListener('click', saveIdea)
+document.getElementById('ideaPromoteClose')?.addEventListener('click', () => { closeModal(document.getElementById('ideaPromoteOverlay')) })
+document.getElementById('ideaPromoteCancel')?.addEventListener('click', () => { closeModal(document.getElementById('ideaPromoteOverlay')) })
+document.getElementById('ideaPromoteDetail')?.addEventListener('click', () => promoteIdea('detail'))
+document.getElementById('ideaPromotePlan')?.addEventListener('click', () => promoteIdea('plan'))
+document.getElementById('ideaStatusFilter')?.addEventListener('change', loadIdeasPage)
+document.getElementById('ideaCategoryFilter')?.addEventListener('change', loadIdeasPage)
+
+
+// === Agent reauth login flow ===
+async function handleAgentLogin(agentName, btn) {
+  const phase = btn.dataset.phase || 'start'
+  btn.disabled = true
+  const origText = btn.textContent
+  btn.textContent = phase === 'start' ? t('agents.auth.btn_starting') : t('agents.auth.btn_confirming')
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phase }),
+    })
+    if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error || 'HTTP ' + res.status) }
+    if (phase === 'start') {
+      btn.dataset.phase = 'confirm'
+      btn.textContent = t('agents.auth.btn_confirm')
+      btn.disabled = false
+      showToast(t('agents.auth.toast_started'))
+    } else {
+      btn.textContent = t('agents.auth.btn_logged_in')
+      showToast(t('agents.auth.toast_success'))
+      setTimeout(() => loadAgents(), 1500)
+    }
+  } catch (e) {
+    showToast('Hiba: ' + (e.message || e))
+    btn.textContent = origText
+    btn.dataset.phase = 'start'
+    btn.disabled = false
+  }
+}
+
+// === Agent terminal modal (xterm.js) ===
+let terminalInstance = null
+let terminalSSE = null
+let terminalFit = null
+// Master input gate (mirrors the server-side terminal-input toggle). Keystrokes
+// are dropped locally when OFF so we never spam the audit log with 403s; the
+// server enforces the same gate independently (fail-closed). Owner flips it via
+// the checkbox in the modal header (POST /api/terminal-input).
+let terminalInputEnabled = false
+
+function syncTerminalInputToggleUI() {
+  const cb = document.getElementById('terminalInputToggle')
+  const label = document.getElementById('terminalInputToggleLabel')
+  if (cb) cb.checked = terminalInputEnabled
+  if (label) {
+    label.textContent = terminalInputEnabled ? 'Input on' : 'Input off'
+    label.style.color = terminalInputEnabled ? '#8fbf6f' : '#b8b2a6'
+  }
+}
+
+function openTerminalModal(agentName) {
+  const overlay = document.getElementById('terminalOverlay')
+  const container = document.getElementById('terminalContainer')
+  const title = document.getElementById('terminalModalTitle')
+  if (!overlay || !container) return
+
+  title.textContent = agentName + ' - Terminal'
+
+  // Read the current server-side gate so the modal reflects reality on open.
+  fetch('/api/terminal-input')
+    .then(r => r.ok ? r.json() : { enabled: false })
+    .then(d => { terminalInputEnabled = d.enabled === true; syncTerminalInputToggleUI() })
+    .catch(() => { terminalInputEnabled = false; syncTerminalInputToggleUI() })
+
+  // Cleanup previous
+  if (terminalSSE) { terminalSSE.close(); terminalSSE = null }
+  if (terminalInstance) { terminalInstance.dispose(); terminalInstance = null }
+  container.innerHTML = ''
+
+  // Init xterm — fontSize 12 + wider modal fits ~140 chars of tmux output
+  const term = new window.Terminal({
+    theme: { background: '#1a1a1a', foreground: '#e8e4da' },
+    fontFamily: 'JetBrains Mono, Menlo, monospace',
+    fontSize: 12,
+    cursorBlink: false,
+    disableStdin: false,
+    scrollback: 4000,
+    convertEol: true,
+    allowProposedApi: true,
+  })
+  const fitAddon = new window.FitAddon.FitAddon()
+  term.loadAddon(fitAddon)
+  term.open(container)
+  fitAddon.fit()
+  terminalInstance = term
+  terminalFit = fitAddon
+
+  openModal(overlay)
+  setTimeout(() => term.focus(), 50)
+
+  // SSE pane stream.
+  // The pane snapshot now includes scrollback history (server uses
+  // `capture-pane -S -2000`), so the user can scroll back. To keep scrolling
+  // stable we (a) only repaint when the snapshot actually changed, and (b) only
+  // repaint while the viewport is at the bottom — if the user has scrolled up we
+  // freeze their view and resume painting when they return to the bottom (the
+  // onScroll handler below). The repaint clears the scrollback (CSI 3 J) before
+  // rewriting the full snapshot so frames don't accumulate duplicate history.
+  let latestPane = null
+  let paintedPane = null
+  const isAtBottom = () => {
+    const buf = term.buffer.active
+    return buf.viewportY >= buf.baseY
+  }
+  const repaint = () => {
+    if (latestPane === null || latestPane === paintedPane) return
+    if (!isAtBottom()) return // user scrolled up — keep their view put
+    paintedPane = latestPane
+    term.write('\x1b[3J\x1b[2J\x1b[H' + latestPane)
+  }
+  // EventSource cannot set an Authorization header. In token mode we pass the
+  // token via ?token=; in password-login (session-cookie) mode there is no
+  // token, so we open a plain URL and the browser attaches the mv_session
+  // cookie automatically -- the gate's cookie branch covers the SSE path.
+  const token = localStorage.getItem('wraith-dashboard-token') || ''
+  const streamBase = `/api/agents/${encodeURIComponent(agentName)}/pane/stream`
+  const sse = new EventSource(token ? `${streamBase}?token=${encodeURIComponent(token)}` : streamBase)
+  sse.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data)
+      if (msg.pane !== undefined) {
+        latestPane = msg.pane.replace(/\x1b]8;[^\x1b]*\x1b\\/g, '')
+        repaint()
+      }
+    } catch {}
+  }
+  sse.onerror = () => term.write(`\r\n${t('terminal.stream_error')}\r\n`)
+  terminalSSE = sse
+  // When the user scrolls back down to the bottom, resume live repainting.
+  term.onScroll(() => { if (isAtBottom()) repaint() })
+
+  // Single onData handler — maps escape sequences to {special}, plain chars to {keys}
+  // Using onData only (no onKey) avoids double-firing on arrow/Enter keys.
+  // PageUp/PageDown are intentionally NOT forwarded: they scroll the xterm
+  // scrollback locally (history viewing) instead of going to the agent.
+  const ESC_TO_SPECIAL = {
+    '\r': 'Enter', '\x1b': 'Escape',
+    '\x1b[A': 'Up', '\x1b[B': 'Down', '\x1b[C': 'Right', '\x1b[D': 'Left',
+    '\x7f': 'BSpace', '\t': 'Tab', '\x1b[Z': 'S-Tab',
+    '\x03': 'C-c', '\x04': 'C-d', '\x15': 'C-u', '\x0c': 'C-l',
+  }
+  term.onData(data => {
+    if (data === '\x1b[5~') { term.scrollPages(-1); return } // PageUp -> scroll history up
+    if (data === '\x1b[6~') { term.scrollPages(1); return }  // PageDown -> scroll history down
+    if (!terminalInputEnabled) {
+      // Read-only mode: input gate is OFF. Drop the keystroke locally (server
+      // would 403 it anyway) and nudge the user to the toggle.
+      showToast('Terminal input is off. Enable it with the header toggle first.')
+      return
+    }
+    const special = ESC_TO_SPECIAL[data]
+    const body = special ? { special } : { keys: data }
+    fetch(`/api/agents/${encodeURIComponent(agentName)}/keys`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).catch(() => {})
+  })
+
+  // Resize fit on modal resize — observe the modal wrapper (not the xterm container
+  // itself) to avoid a ResizeObserver->fit->resize->ResizeObserver infinite loop
+  let fitTimer = null
+  const ro = new ResizeObserver(() => {
+    clearTimeout(fitTimer)
+    fitTimer = setTimeout(() => { try { fitAddon.fit() } catch {} }, 50)
+  })
+  const modalEl = container.closest('.terminal-modal') || container.parentElement
+  if (modalEl) ro.observe(modalEl)
+}
+
+document.getElementById('terminalClose')?.addEventListener('click', () => {
+  const overlay = document.getElementById('terminalOverlay')
+  if (overlay) closeModal(overlay)
+  if (terminalSSE) { terminalSSE.close(); terminalSSE = null }
+  if (terminalInstance) { terminalInstance.dispose(); terminalInstance = null }
+})
+
+// Owner flips the master terminal-input gate. Optimistically reflect the desired
+// state, POST it, then reconcile with the server's authoritative response.
+document.getElementById('terminalInputToggle')?.addEventListener('change', (e) => {
+  const desired = e.target.checked === true
+  fetch('/api/terminal-input', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: desired }),
+  })
+    .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+    .then(d => {
+      terminalInputEnabled = d.enabled === true
+      syncTerminalInputToggleUI()
+      showToast(terminalInputEnabled ? 'Terminal input enabled (audit-logged)' : 'Terminal input disabled')
+    })
+    .catch(() => {
+      terminalInputEnabled = false
+      syncTerminalInputToggleUI()
+      showToast('Could not change terminal input state')
+    })
+})
+
+// === Agent conversation (readable transcript) modal ===
+// Renders the agent's Claude Code transcript as a chat-style timeline: inbound
+// Telegram messages, the agent's replies, and (optionally) its notes/actions.
+// Solves what the raw terminal can't: a readable, searchable review of what
+// actually happened -- also the support view for customer-hosted Wraiths.
+const CONVERSATION_PAGE_SIZE = 400
+let conversationEntries = []
+let conversationAgentName = null
+let conversationHasOlder = false
+let conversationLoadingOlder = false
+
+async function openConversationModal(agentName, displayName) {
+  const overlay = document.getElementById('conversationOverlay')
+  const container = document.getElementById('conversationContainer')
+  const title = document.getElementById('conversationModalTitle')
+  if (!overlay || !container) return
+  conversationAgentName = agentName
+  title.textContent = t('conversation.title', { name: displayName || agentName })
+  container.innerHTML = `<div class="conversation-empty">${t('conversation.loading')}</div>`
+  openModal(overlay)
+  await loadConversation()
+}
+
+// Latest page (offset=0); resets the loaded window.
+async function loadConversation() {
+  const container = document.getElementById('conversationContainer')
+  const token = localStorage.getItem('wraith-dashboard-token') || ''
+  try {
+    const r = await fetch(`/api/agents/${encodeURIComponent(conversationAgentName)}/conversation?limit=${CONVERSATION_PAGE_SIZE}&offset=0`, {
+      headers: { 'Authorization': 'Bearer ' + token },
+    })
+    const d = await r.json()
+    conversationEntries = Array.isArray(d.entries) ? d.entries : []
+    conversationHasOlder = !!d.hasOlder
+    renderConversation()
+  } catch {
+    if (container) container.innerHTML = `<div class="conversation-empty">${t('conversation.error')}</div>`
+  }
+}
+
+// Page further back: fetch the window of entries immediately before the oldest
+// loaded one and PREPEND it, keeping the scroll position so the view does not
+// jump. Lets the operator read history beyond the on-screen window (and beyond
+// the old fixed cap).
+async function loadOlderConversation() {
+  if (conversationLoadingOlder || !conversationHasOlder) return
+  conversationLoadingOlder = true
+  const btn = document.getElementById('conversationLoadOlder')
+  if (btn) { btn.disabled = true; btn.textContent = t('conversation.loading') }
+  const token = localStorage.getItem('wraith-dashboard-token') || ''
+  try {
+    const offset = conversationEntries.length
+    const r = await fetch(`/api/agents/${encodeURIComponent(conversationAgentName)}/conversation?limit=${CONVERSATION_PAGE_SIZE}&offset=${offset}`, {
+      headers: { 'Authorization': 'Bearer ' + token },
+    })
+    const d = await r.json()
+    const older = Array.isArray(d.entries) ? d.entries : []
+    conversationHasOlder = !!d.hasOlder
+    if (older.length) {
+      conversationEntries = older.concat(conversationEntries)
+      renderConversation({ preserveScroll: true })
+    } else {
+      renderConversation()
+    }
+  } catch {
+    if (btn) { btn.disabled = false; btn.textContent = t('conversation.load_more') }
+  } finally {
+    conversationLoadingOlder = false
+  }
+}
+
+function fmtConvTs(ts) {
+  if (!ts) return ''
+  try {
+    return new Date(ts).toLocaleString('hu-HU', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  } catch { return '' }
+}
+
+function renderConversation(opts = {}) {
+  const container = document.getElementById('conversationContainer')
+  if (!container) return
+  const prevH = container.scrollHeight
+  const prevTop = container.scrollTop
+  const q = (document.getElementById('conversationSearch')?.value || '').toLowerCase().trim()
+  const showActions = document.getElementById('conversationShowActions')?.checked
+  let list = conversationEntries
+  if (!showActions) list = list.filter(e => e.kind === 'in' || e.kind === 'out')
+  if (q) list = list.filter(e => (e.text || '').toLowerCase().includes(q))
+  // "Korábbiak betöltése" sits at the top so the operator can page further back;
+  // shown whenever the server still has older entries beyond the loaded window.
+  const olderBtn = conversationHasOlder
+    ? `<button id="conversationLoadOlder" class="conv-load-older">${t('conversation.load_more')}</button>`
+    : ''
+  if (!list.length) {
+    container.innerHTML = olderBtn || `<div class="conversation-empty">${t('conversation.empty')}</div>`
+  } else {
+    container.innerHTML = olderBtn + list.map(renderConvEntry).join('')
+  }
+  document.getElementById('conversationLoadOlder')?.addEventListener('click', loadOlderConversation)
+  if (opts.preserveScroll) {
+    // After prepending older messages, keep the previously-visible ones in place.
+    container.scrollTop = prevTop + (container.scrollHeight - prevH)
+  } else {
+    container.scrollTop = container.scrollHeight
+  }
+}
+
+function renderConvEntry(e) {
+  const ts = fmtConvTs(e.ts)
+  const txt = escapeHtml(e.text || '').replace(/\n/g, '<br>')
+  if (e.kind === 'in') {
+    return `<div class="conv-row conv-in"><div class="conv-bubble"><div class="conv-meta">Telegram be · ${ts}</div><div class="conv-text">${txt}</div></div></div>`
+  }
+  if (e.kind === 'out') {
+    const lbl = escapeHtml(e.label || t('messages.conv.reply_label'))
+    return `<div class="conv-row conv-out"><div class="conv-bubble"><div class="conv-meta">${lbl} · ${ts}</div><div class="conv-text">${txt}</div></div></div>`
+  }
+  if (e.kind === 'note') {
+    return `<div class="conv-row conv-note"><div class="conv-note-text">📝 ${txt}</div></div>`
+  }
+  return `<div class="conv-row conv-action"><div class="conv-action-text">⚙ ${txt}<span class="conv-action-ts">${ts}</span></div></div>`
+}
+
+document.getElementById('conversationClose')?.addEventListener('click', () => {
+  const overlay = document.getElementById('conversationOverlay')
+  if (overlay) closeModal(overlay)
+})
+document.getElementById('conversationSearch')?.addEventListener('input', () => renderConversation())
+document.getElementById('conversationShowActions')?.addEventListener('change', () => renderConversation())
+document.getElementById('conversationRefresh')?.addEventListener('click', () => loadConversation())
+
+// === Federation page ===
+// State lets live BEFORE the router IIFE (top-level code runs in order; a
+// first-load #federation route must not hit a TDZ on these).
+let fedPageWired = false
+let fedPeersViewCache = null
+
+async function loadFederationPage() {
+  wireFederationPage()
+  const statsEl = document.getElementById('federationStats')
+  const masterEl = document.getElementById('federationMaster')
+  const peersEl = document.getElementById('federationPeers')
+  if (!statsEl || !masterEl || !peersEl) return
+  peersEl.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('common.loading')}</p>`
+  try {
+    const [peersRes, statusRes] = await Promise.all([
+      fetch('/api/federation/peers'),
+      fetch('/api/federation/status').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ])
+    if (!peersRes.ok) throw new Error('HTTP ' + peersRes.status)
+    fedPeersViewCache = await peersRes.json()
+    if (statusRes && Array.isArray(statusRes.peers)) federatedPeerStatus = statusRes.peers
+    renderFederationPage()
+  } catch (e) {
+    peersEl.innerHTML = `<p style="color:var(--danger)">${t('federation.error', { msg: escapeHtml(String(e.message || e)) })}</p>`
+  }
+}
+
+function fedStateLabel(state) {
+  const key = 'federation.peer_state.' + (state || 'unknown')
+  return t(key)
+}
+
+function renderFederationPage() {
+  const view = fedPeersViewCache
+  if (!view) return
+  const statsEl = document.getElementById('federationStats')
+  const masterEl = document.getElementById('federationMaster')
+  const peersEl = document.getElementById('federationPeers')
+  const statusById = new Map(federatedPeerStatus.map((p) => [p.id, p]))
+  const okCount = federatedPeerStatus.filter((p) => p.state === 'ok').length
+
+  const statBox = (value, label) => `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:110px">
+    <div style="font-size:20px;font-weight:600">${value}</div>
+    <div style="font-size:12px;color:var(--text-muted)">${label}</div>
+  </div>`
+  statsEl.innerHTML = [
+    statBox(view.enabled ? t('common.yes') : t('common.no'), t('federation.stat.enabled')),
+    statBox(String(view.peers.length), t('federation.stat.peers')),
+    statBox(String(okCount), t('federation.stat.reachable')),
+    statBox(escapeHtml(view.systemId || '-'), t('federation.stat.system_id')),
+  ].join('')
+
+  const routingMode = view.routingMode || 'catalog-first'
+  const routingRadios = ['strong', 'catalog-first', 'advisory'].map((m) => `
+    <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;padding:5px 0">
+      <input type="radio" name="fedRoutingMode" value="${m}" ${routingMode === m ? 'checked' : ''} style="margin-top:3px;accent-color:var(--accent)">
+      <span>
+        <span style="font-weight:600">${t('federation.routing.mode.' + m + '.label')}</span>
+        <span style="display:block;font-size:12px;color:var(--text-muted)">${t('federation.routing.mode.' + m + '.hint')}</span>
+      </span>
+    </label>`).join('')
+  masterEl.innerHTML = `
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+      <input type="checkbox" id="fedEnabledToggle" style="width:16px;height:16px;accent-color:var(--accent)" ${view.enabled ? 'checked' : ''}>
+      <span style="font-weight:600">${t('federation.master_label')}</span>
+    </label>
+    <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0 26px">${t('federation.master_hint')}</p>
+    <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+      <div style="font-weight:600">${t('federation.routing.title')}</div>
+      <p style="font-size:12px;color:var(--text-muted);margin:2px 0 8px 0">${t('federation.routing.subtitle')}</p>
+      ${routingRadios}
+      <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0">${t('federation.routing.apply_note')}</p>
+    </div>`
+  document.getElementById('fedEnabledToggle').addEventListener('change', async (e) => {
+    const enabled = e.target.checked
+    if (!enabled && !confirm(t('federation.confirm.disable'))) { e.target.checked = true; return }
+    try {
+      const res = await fetch('/api/federation/enabled', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); e.target.checked = !enabled; return }
+      showToast(enabled ? t('federation.toast.enabled') : t('federation.toast.disabled'))
+      fedRefreshAndReload()
+    } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })); e.target.checked = !enabled }
+  })
+  document.querySelectorAll('input[name="fedRoutingMode"]').forEach((radio) => {
+    radio.addEventListener('change', async (e) => {
+      const mode = e.target.value
+      try {
+        const res = await fetch('/api/federation/routing-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+        showToast(t('federation.routing.toast_set', { mode: t('federation.routing.mode.' + mode + '.label') }))
+      } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+    })
+  })
+
+  if (!view.peers.length) {
+    peersEl.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('federation.peers_empty')}</p>`
+    return
+  }
+  peersEl.innerHTML = ''
+  for (const peer of view.peers) {
+    const st = statusById.get(peer.id)
+    const state = peer.hasOutboundToken ? (st ? st.state : 'unknown') : 'unpaired'
+    const reachable = state === 'ok'
+    const lastOk = st && st.lastOkAt ? new Date(st.lastOkAt).toLocaleString() : '-'
+    const agentCount = st && st.manifest && Array.isArray(st.manifest.agents) ? String(st.manifest.agents.length) : '-'
+    const card = document.createElement('div')
+    card.className = 'card'
+    card.style.cssText = 'padding:12px 16px;display:flex;flex-direction:column;gap:8px'
+    // Peer ids/baseUrls are OWNER-entered and segment-validated; state labels
+    // come from t(). Still: text nodes only, escapeHtml everywhere.
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <strong style="font-size:15px">${escapeHtml(peer.id)}</strong>
+        <span class="tg-status"><span class="tg-dot ${reachable ? 'connected' : 'disconnected'}"></span> ${fedStateLabel(state)}</span>
+        <span style="color:var(--text-muted);font-size:12px;margin-left:auto">${t('federation.card.last_ok')}: ${escapeHtml(lastOk)} · ${t('federation.card.agents')}: ${escapeHtml(agentCount)}</span>
+      </div>
+      <div style="font-size:13px;color:var(--text-muted);word-break:break-all">${escapeHtml(peer.baseUrl)}</div>
+      ${st && st.error ? `<div style="font-size:12px;color:var(--danger)">${escapeHtml(st.error)}</div>` : ''}
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-muted);cursor:pointer">
+        <input type="checkbox" class="fed-share-cap" ${peer.shareCapabilitySummaries ? 'checked' : ''} style="accent-color:var(--accent)">
+        ${t('federation.share_cap_label')}
+      </label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn-secondary btn-compact" data-action="reveal">${t('federation.btn.reveal')}</button>
+        <button class="btn-secondary btn-compact" data-action="rotate">${t('federation.btn.rotate')}</button>
+        <button class="btn-secondary btn-compact" data-action="edit">${t('common.edit')}</button>
+        <button class="btn-secondary btn-compact" data-action="delete" style="color:var(--danger)">${t('common.delete')}</button>
+      </div>
+      <div class="fed-token-reveal" hidden style="font-family:monospace;font-size:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px;word-break:break-all"></div>`
+    card.querySelector('[data-action="reveal"]').addEventListener('click', () => fedRevealToken(peer.id, card))
+    card.querySelector('[data-action="rotate"]').addEventListener('click', () => fedRotateToken(peer.id))
+    card.querySelector('[data-action="edit"]').addEventListener('click', () => fedOpenPeerModal(peer))
+    card.querySelector('[data-action="delete"]').addEventListener('click', () => fedDeletePeer(peer.id))
+    card.querySelector('.fed-share-cap').addEventListener('change', (e) => fedToggleShareCap(peer.id, e.target.checked))
+    peersEl.appendChild(card)
+  }
+}
+
+async function fedRevealToken(peerId, card) {
+  const box = card.querySelector('.fed-token-reveal')
+  if (!box.hidden) { box.hidden = true; box.textContent = ''; return }
+  try {
+    const res = await fetch(`/api/federation/peers/${encodeURIComponent(peerId)}/inbound-token`)
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+    box.textContent = data.inboundToken
+    box.hidden = false
+    navigator.clipboard?.writeText(data.inboundToken).then(
+      () => showToast(t('federation.toast.token_copied')),
+      () => {},
+    )
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+}
+
+async function fedRotateToken(peerId) {
+  if (!confirm(t('federation.confirm.rotate', { peer: peerId }))) return
+  try {
+    const res = await fetch(`/api/federation/peers/${encodeURIComponent(peerId)}/rotate-inbound-token`, { method: 'POST' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+    showToast(t('federation.toast.rotated'))
+    loadFederationPage()
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+}
+
+async function fedToggleShareCap(peerId, share) {
+  try {
+    const res = await fetch(`/api/federation/peers/${encodeURIComponent(peerId)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shareCapabilitySummaries: share }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); loadFederationPage(); return }
+    showToast(share ? t('federation.toast.share_cap_on') : t('federation.toast.share_cap_off'))
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })); loadFederationPage() }
+}
+
+async function fedDeletePeer(peerId) {
+  if (!confirm(t('federation.confirm.delete_peer', { peer: peerId }))) return
+  try {
+    const res = await fetch(`/api/federation/peers/${encodeURIComponent(peerId)}`, { method: 'DELETE' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+    // Sweep browser leftovers scoped to the removed peer.
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i)
+      if (key && key.startsWith('chat_last_seen_' + peerId + '/')) localStorage.removeItem(key)
+    }
+    if (chatSelectedAgent && chatSelectedAgent.startsWith(peerId + '/')) chatSelectedAgent = null
+    showToast(t('federation.toast.peer_deleted'))
+    loadFederationPage()
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+}
+
+// Apply federation config changes to the RUNNING main agent by restarting it
+// (it reloads CLAUDE.md, which carries the federation onboarding + delegation
+// directive). Reuses the existing main-agent restart endpoint -- no new
+// backend, no terminal command for the operator.
+async function fedApplyToMainAgent() {
+  if (!confirm(t('federation.confirm.apply'))) return
+  try {
+    // Server-side apply: restarts the main channels agent by MAIN_AGENT_ID,
+    // so the client does not depend on window._wraith being loaded (the
+    // Federation page does not populate it -> the old /api/agents/:name path
+    // 404'd when it fell back to the 'wraith' default).
+    const res = await fetch('/api/federation/apply', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+    showToast(t('federation.toast.applied'))
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+}
+
+// Re-poll peer reachability then re-render. Called after config mutations
+// (enable, peer add/edit) so the status shows fresh -- there is no separate
+// manual "refresh" button anymore (the apply action owns the top-right slot).
+async function fedRefreshAndReload() {
+  try { await fetch('/api/federation/refresh', { method: 'POST' }) } catch { /* best effort */ }
+  loadFederationPage()
+}
+
+let fedPeerModalEditId = null
+
+function fedOpenPeerModal(peer) {
+  fedPeerModalEditId = peer ? peer.id : null
+  document.getElementById('fedPeerModalTitle').textContent = peer ? t('federation.modal.edit_title', { peer: peer.id }) : t('federation.modal.add_title')
+  const idInput = document.getElementById('fedPeerId')
+  idInput.value = peer ? peer.id : ''
+  idInput.disabled = !!peer
+  document.getElementById('fedPeerBaseUrl').value = peer ? peer.baseUrl : ''
+  document.getElementById('fedPeerOutboundToken').value = ''
+  document.getElementById('fedPeerOutboundToken').placeholder = peer && peer.hasOutboundToken ? t('federation.modal.outbound_keep') : ''
+  document.getElementById('fedPeerAbandonWindow').value = peer && peer.abandonWindowMinutes ? String(peer.abandonWindowMinutes) : ''
+  openModal(document.getElementById('fedPeerModalOverlay'))
+}
+
+async function fedSavePeerModal() {
+  // Ids are case-insensitive server-side (stored lowercase); fold here too so
+  // the operator immediately sees the canonical form.
+  const id = document.getElementById('fedPeerId').value.trim().toLowerCase()
+  const baseUrl = document.getElementById('fedPeerBaseUrl').value.trim()
+  const outbound = document.getElementById('fedPeerOutboundToken').value.trim()
+  const abandonRaw = document.getElementById('fedPeerAbandonWindow').value.trim()
+  try {
+    let res, data
+    if (fedPeerModalEditId) {
+      const body = { baseUrl }
+      if (outbound) body.outboundToken = outbound
+      if (abandonRaw) body.abandonWindowMinutes = parseInt(abandonRaw, 10)
+      else body.abandonWindowMinutes = null
+      res = await fetch(`/api/federation/peers/${encodeURIComponent(fedPeerModalEditId)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      data = await res.json().catch(() => ({}))
+      if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+      showToast(t('federation.toast.peer_saved'))
+    } else {
+      const body = { id, baseUrl }
+      if (outbound) body.outboundToken = outbound
+      res = await fetch('/api/federation/peers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      data = await res.json().catch(() => ({}))
+      if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+      // The minted inbound token is shown ONCE right away: the owner hands it
+      // to the peer's operator during pairing.
+      prompt(t('federation.modal.minted_token_hint'), data.inboundToken)
+      showToast(t('federation.toast.peer_added'))
+    }
+    closeModal(document.getElementById('fedPeerModalOverlay'))
+    fedRefreshAndReload()
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+}
+
+async function fedRemoveAll() {
+  if (!confirm(t('federation.confirm.remove'))) return
+  try {
+    const res = await fetch('/api/federation/remove', { method: 'POST' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+    federatedPeerStatus = []
+    // Sweep browser leftovers for ALL federated (qualified) threads -- the
+    // per-peer DELETE path does this per peer, full removal must do it wholesale.
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i)
+      if (key && /^chat_last_seen_[^/]+\//.test(key)) localStorage.removeItem(key)
+    }
+    if (chatSelectedAgent && chatSelectedAgent.includes('/')) chatSelectedAgent = null
+    showToast(t('federation.toast.removed'))
+    loadFederationPage()
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+}
+
+function wireFederationPage() {
+  if (fedPageWired) return
+  fedPageWired = true
+  const fedApplyBtn = document.getElementById('federationApplyBtn')
+  if (fedApplyBtn) { fedApplyBtn.title = t('federation.apply_hint'); fedApplyBtn.addEventListener('click', fedApplyToMainAgent) }
+  document.getElementById('federationAddPeerBtn')?.addEventListener('click', () => fedOpenPeerModal(null))
+  document.getElementById('federationRemoveBtn')?.addEventListener('click', fedRemoveAll)
+  document.getElementById('fedPeerModalSave')?.addEventListener('click', fedSavePeerModal)
+  document.getElementById('fedPeerModalCancel')?.addEventListener('click', () => closeModal(document.getElementById('fedPeerModalOverlay')))
+  document.getElementById('fedPeerModalClose')?.addEventListener('click', () => closeModal(document.getElementById('fedPeerModalOverlay')))
+  const overlay = document.getElementById('fedPeerModalOverlay')
+  overlay?.addEventListener('click', (e) => { if (e.target === overlay) closeModal(overlay) })
+}
+
+;(() => {
+  function routeFromHash() {
+    let pageId = decodeURIComponent((location.hash || '').replace(/^#/, ''))
+    if (!pageId) pageId = new URLSearchParams(window.location.search).get('page') || ''
+    // 'team' page is merged into 'agents' (org-chart view toggle).
+    if (pageId === 'team') { pageId = 'agents'; _agentsActiveView = 'tree' }
+    if (pageId && document.getElementById(pageId + 'Page')) switchPage(pageId)
+  }
+  window.addEventListener('hashchange', routeFromHash)
+  routeFromHash()
+})()
+
+// ============================================================
+// === Docs (read-only viewer for the project's docs/ folder) ===
+// ============================================================
+
+function escapeAttr(s) {
+  return escapeHtml(String(s)).replace(/"/g, '&quot;')
+}
+
+// Minimal, dependency-free Markdown -> HTML renderer. Inputs come from the
+// repo's own docs/ folder (trusted), but we HTML-escape everything anyway and
+// only emit a fixed set of tags. Covers the constructs our docs use: fenced
+// code, headings, hr, tables, ordered/unordered lists, blockquotes, paragraphs,
+// and inline code/bold/italic/links.
+function mdInline(text) {
+  let s = escapeHtml(text)
+  s = s.replace(/`([^`]+)`/g, (m, c) => '<code>' + c + '</code>')
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>')
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, txt, url) =>
+    '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener noreferrer">' + txt + '</a>')
+  return s
+}
+
+function renderMarkdown(md) {
+  const lines = String(md).replace(/\r\n/g, '\n').split('\n')
+  const out = []
+  let i = 0
+  const isBlockStart = (l) =>
+    /^```/.test(l) || /^(#{1,6})\s/.test(l) || /^\s*[-*]\s+/.test(l) ||
+    /^\s*\d+\.\s+/.test(l) || /^\s*\|.*\|\s*$/.test(l) || /^\s*>\s?/.test(l) ||
+    /^\s*([-*_])\1{2,}\s*$/.test(l) || /^\s*$/.test(l)
+  while (i < lines.length) {
+    const line = lines[i]
+    const fence = line.match(/^```(\w*)\s*$/)
+    if (fence) {
+      const code = []
+      i++
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) { code.push(lines[i]); i++ }
+      i++
+      out.push('<pre><code' + (fence[1] ? ' class="language-' + escapeHtml(fence[1]) + '"' : '') + '>' + escapeHtml(code.join('\n')) + '</code></pre>')
+      continue
+    }
+    const h = line.match(/^(#{1,6})\s+(.*)$/)
+    if (h) { const lvl = h[1].length; out.push('<h' + lvl + '>' + mdInline(h[2].trim()) + '</h' + lvl + '>'); i++; continue }
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { out.push('<hr>'); i++; continue }
+    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length &&
+        /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+      const parseRow = (r) => r.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim())
+      const headers = parseRow(line)
+      i += 2
+      const rows = []
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { rows.push(parseRow(lines[i])); i++ }
+      let t = '<table><thead><tr>' + headers.map(c => '<th>' + mdInline(c) + '</th>').join('') + '</tr></thead><tbody>'
+      for (const r of rows) t += '<tr>' + r.map(c => '<td>' + mdInline(c) + '</td>').join('') + '</tr>'
+      t += '</tbody></table>'
+      out.push(t)
+      continue
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      const items = []
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*[-*]\s+/, '')); i++ }
+      out.push('<ul>' + items.map(it => '<li>' + mdInline(it) + '</li>').join('') + '</ul>')
+      continue
+    }
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const items = []
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*\d+\.\s+/, '')); i++ }
+      out.push('<ol>' + items.map(it => '<li>' + mdInline(it) + '</li>').join('') + '</ol>')
+      continue
+    }
+    if (/^\s*>\s?/.test(line)) {
+      const q = []
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) { q.push(lines[i].replace(/^\s*>\s?/, '')); i++ }
+      out.push('<blockquote>' + q.map(mdInline).join('<br>') + '</blockquote>')
+      continue
+    }
+    if (/^\s*$/.test(line)) { i++; continue }
+    const para = []
+    while (i < lines.length && !isBlockStart(lines[i])) { para.push(lines[i]); i++ }
+    if (para.length) out.push('<p>' + para.map(mdInline).join('<br>') + '</p>')
+  }
+  return out.join('\n')
+}
+
+async function loadDocs() {
+  const listEl = document.getElementById('docsList')
+  const contentEl = document.getElementById('docsContent')
+  if (!listEl) return
+  listEl.innerHTML = '<p class="muted">' + t('docs.loading') + '</p>'
+  let docs = []
+  try {
+    const res = await fetch('/api/docs')
+    docs = await res.json()
+    if (!Array.isArray(docs)) docs = []
+  } catch (e) {
+    listEl.innerHTML = '<p class="muted">' + t('docs.list_load_error') + ': ' + escapeHtml(String(e.message || e)) + '</p>'
+    return
+  }
+  if (!docs.length) {
+    listEl.innerHTML = '<p class="muted">' + t('docs.empty_list') + '</p>'
+    if (contentEl) contentEl.innerHTML = '<p class="muted">' + t('docs.empty_content') + '</p>'
+    return
+  }
+  listEl.innerHTML = docs.map(d =>
+    '<a href="#" class="docs-list-item" data-doc="' + escapeAttr(d.name) + '">' +
+      '<span class="docs-list-title">' + escapeHtml(d.title || d.name) + '</span>' +
+      (d.created ? '<span class="docs-list-date">' + escapeHtml(d.created) + '</span>' : '') +
+    '</a>'
+  ).join('')
+  listEl.querySelectorAll('.docs-list-item').forEach(a => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault()
+      listEl.querySelectorAll('.docs-list-item').forEach(x => x.classList.remove('active'))
+      a.classList.add('active')
+      openDoc(a.dataset.doc)
+    })
+  })
+  const first = listEl.querySelector('.docs-list-item')
+  if (first) { first.classList.add('active'); openDoc(first.dataset.doc) }
+}
+
+async function openDoc(name) {
+  const contentEl = document.getElementById('docsContent')
+  if (!contentEl) return
+  contentEl.innerHTML = '<p class="muted">' + t('docs.loading') + '</p>'
+  try {
+    const res = await fetch('/api/docs/' + encodeURIComponent(name))
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const doc = await res.json()
+    const content = doc.content || ''
+    // Toolbar with a raw-.md download, then the rendered markdown.
+    contentEl.innerHTML =
+      '<div class="docs-content-toolbar">' +
+        '<button class="btn-secondary btn-compact" id="docsDownloadBtn">' + t('docs.download_btn') + '</button>' +
+      '</div>' +
+      '<div class="docs-rendered markdown-body md-rendered">' + renderMarkdown(content) + '</div>'
+    const dl = document.getElementById('docsDownloadBtn')
+    if (dl) dl.addEventListener('click', () => downloadMarkdown(name, content))
+  } catch (e) {
+    contentEl.innerHTML = '<p class="muted">' + t('docs.open_error') + ': ' + escapeHtml(String(e.message || e)) + '</p>'
+  }
+}
+
+// Download a doc's raw markdown as a .md file (client-side Blob, no server).
+function downloadMarkdown(name, content) {
+  try {
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = /\.md$/.test(name) ? name : (name + '.md')
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (e) {
+    showToast(t('common.toast.download_failed', { msg: String(e && e.message || e) }))
+  }
+}
+
+// === Research (read-only viewer for each agent's research/ folder) ===
+// Mirrors the Docs tab above, but the API groups docs by agent
+// ([{agent, docs:[{name,title,updated}]}]), so the list needs a per-agent
+// header and each item's dataset carries both agent+name for the detail
+// fetch. Reuses escapeHtml/escapeAttr/renderMarkdown/downloadMarkdown as-is.
+async function loadResearch() {
+  const listEl = document.getElementById('researchList')
+  const contentEl = document.getElementById('researchContent')
+  if (!listEl) return
+  listEl.innerHTML = '<p class="muted">' + t('research.loading') + '</p>'
+  let groups = []
+  try {
+    const res = await fetch('/api/research')
+    groups = await res.json()
+    if (!Array.isArray(groups)) groups = []
+  } catch (e) {
+    listEl.innerHTML = '<p class="muted">' + t('research.list_load_error') + ': ' + escapeHtml(String(e.message || e)) + '</p>'
+    return
+  }
+  if (!groups.length) {
+    listEl.innerHTML = '<p class="muted">' + t('research.empty_list') + '</p>'
+    if (contentEl) contentEl.innerHTML = '<p class="muted">' + t('research.empty_content') + '</p>'
+    return
+  }
+  listEl.innerHTML = groups.map(g =>
+    '<div class="docs-list-group-label">' + escapeHtml(g.agent) + '</div>' +
+    g.docs.map(d =>
+      '<a href="#" class="docs-list-item" data-agent="' + escapeAttr(g.agent) + '" data-doc="' + escapeAttr(d.name) + '">' +
+        '<span class="docs-list-title">' + escapeHtml(d.title || d.name) + '</span>' +
+        (d.updated ? '<span class="docs-list-date">' + escapeHtml(d.updated) + '</span>' : '') +
+      '</a>'
+    ).join('')
+  ).join('')
+  listEl.querySelectorAll('.docs-list-item').forEach(a => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault()
+      listEl.querySelectorAll('.docs-list-item').forEach(x => x.classList.remove('active'))
+      a.classList.add('active')
+      openResearchDoc(a.dataset.agent, a.dataset.doc)
+    })
+  })
+  const first = listEl.querySelector('.docs-list-item')
+  if (first) { first.classList.add('active'); openResearchDoc(first.dataset.agent, first.dataset.doc) }
+}
+
+async function openResearchDoc(agent, name) {
+  const contentEl = document.getElementById('researchContent')
+  if (!contentEl) return
+  contentEl.innerHTML = '<p class="muted">' + t('research.loading') + '</p>'
+  try {
+    const res = await fetch('/api/research/' + encodeURIComponent(agent) + '/' + encodeURIComponent(name))
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const doc = await res.json()
+    const content = doc.content || ''
+    contentEl.innerHTML =
+      '<div class="docs-content-toolbar">' +
+        '<button class="btn-secondary btn-compact" id="researchDownloadBtn">' + t('docs.download_btn') + '</button>' +
+      '</div>' +
+      '<div class="docs-rendered markdown-body">' + renderMarkdown(content) + '</div>'
+    const dl = document.getElementById('researchDownloadBtn')
+    if (dl) dl.addEventListener('click', () => downloadMarkdown(name, content))
+  } catch (e) {
+    contentEl.innerHTML = '<p class="muted">' + t('research.open_error') + ': ' + escapeHtml(String(e.message || e)) + '</p>'
+  }
+}
+
+// === Mobile login (QR of the ?token= bootstrap URL) ===
+// The desktop is already authenticated, so the token lives in localStorage.
+// We render it as a QR purely client-side and show it in a modal; the phone
+// scans it and stores the token locally. The token never travels through chat.
+(function setupMobileLogin() {
+  const btn = document.getElementById('mobileLoginBtn')
+  const overlay = document.getElementById('mobileLoginOverlay')
+  if (!btn || !overlay) return
+  const qrBox = document.getElementById('mobileLoginQr')
+  const closeBtn = document.getElementById('mobileLoginClose')
+
+  async function render() {
+    const token = localStorage.getItem('wraith-dashboard-token')
+    if (!token) {
+      qrBox.innerHTML = `<p class="muted">${t('mobile_login.no_token')}</p>`
+      return
+    }
+    if (typeof qrcode !== 'function') {
+      qrBox.innerHTML = `<p class="muted">${t('mobile_login.cdn_error')}</p>`
+      return
+    }
+    // The QR must encode a URL the phone can reach. If the desktop opened the
+    // dashboard on localhost/127.0.0.1, window.location.origin would put
+    // "localhost" in the QR and the phone would hit its OWN localhost. In that
+    // case ask the server for its LAN IP and build the QR from that. If the
+    // dashboard is already open on a LAN IP or a tunnel host, the origin works
+    // as-is.
+    let base = window.location.origin
+    const host = window.location.hostname
+    if (host === 'localhost' || host === '127.0.0.1') {
+      qrBox.innerHTML = `<p class="muted">${t('mobile_login.generating')}</p>`
+      try {
+        const r = await fetch('/api/network-info', { headers: { 'Authorization': 'Bearer ' + token } })
+        const info = r.ok ? await r.json() : {}
+        if (info.lan_ip) {
+          base = 'http://' + info.lan_ip + ':' + (info.port || window.location.port || '3420')
+        } else {
+          qrBox.innerHTML = `<p class="mobile-login-warn">${t('mobile_login.localhost_warn')}</p>`
+          return
+        }
+      } catch (e) {
+        qrBox.innerHTML = `<p class="mobile-login-warn">${t('mobile_login.lan_error')}</p>`
+        return
+      }
+    }
+    const url = base + '/?token=' + token
+    try {
+      const qr = qrcode(0, 'M') // typeNumber 0 = auto-fit, ECC level M
+      qr.addData(url)
+      qr.make()
+      qrBox.innerHTML = qr.createSvgTag({ cellSize: 6, margin: 4, scalable: true })
+    } catch (e) {
+      qrBox.innerHTML = `<p class="muted">${t('mobile_login.qr_error', { msg: escapeHtml(String(e && e.message || e)) })}</p>`
+    }
+  }
+
+  btn.addEventListener('click', () => { render(); openModal(overlay) })
+  if (closeBtn) closeBtn.addEventListener('click', () => closeModal(overlay))
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(overlay) })
+})()
+
+// === Archivalt kartyak ===
+;(() => {
+  let archivedInit = false
+
+  const STATUS_LABELS = {
+    planned:     () => t('kanban.status.planned'),
+    in_progress: () => t('kanban.status.in_progress'),
+    waiting:     () => t('kanban.status.waiting'),
+    done:        () => t('kanban.status.done')
+  }
+  const STATUS_COLORS = { planned: '#6b7280', in_progress: '#3b82f6', waiting: '#f59e0b', done: '#10b981' }
+  const PRIORITY_LABELS = {
+    low:    () => t('kanban.priority.low'),
+    normal: () => t('kanban.priority.normal'),
+    high:   () => t('kanban.priority.high'),
+    urgent: () => t('kanban.priority.urgent')
+  }
+  const PRIORITY_COLORS = { low: '#9ca3af', normal: '#6b7280', high: '#f59e0b', urgent: '#ef4444' }
+
+  function fmtDate(unix) {
+    if (!unix) return ''
+    return new Date(unix * 1000).toLocaleString('hu-HU', { dateStyle: 'short', timeStyle: 'short' })
+  }
+
+  // Render an archived card with the same visual language as the live board:
+  // project pill + #seq title + colored rounded priority/label chips, wrapped in
+  // the .kanban-card frame. The whole card opens a read-only detail modal on
+  // click; the restore button stops propagation so it doesn't also open it.
+  function renderArchivedCard(card) {
+    const prioColor = PRIORITY_COLORS[card.priority] || '#6b7280'
+    const prioLabel = PRIORITY_LABELS[card.priority]?.() ?? card.priority
+    const seqHtml = card.seq != null
+      ? `<span class="kanban-card-seq" style="font-family:monospace;font-size:11px;color:var(--text-muted);margin-right:5px">#${card.seq}</span>`
+      : ''
+    const projectHtml = card.project
+      ? `<span class="kanban-card-project">${esc(card.project)}</span>`
+      : ''
+    let labelsHtml = ''
+    if (Array.isArray(card.labels) && card.labels.length > 0) {
+      const pills = card.labels
+        .map(l => `<span class="kanban-card-label-pill" style="--label-color:${esc(l.color)}">#${esc(l.name)}</span>`)
+        .join('')
+      labelsHtml = `<div class="kanban-card-labels">${pills}</div>`
+    }
+    const prioPill = `<span class="archived-prio-pill" style="--prio-color:${prioColor}">${prioLabel}</span>`
+    return `<div class="kanban-card archived-card" data-id="${esc(card.id)}" data-priority="${esc(card.priority)}">
+      ${projectHtml}
+      <div class="kanban-card-title">${seqHtml}${esc(card.title)}</div>
+      <div class="kanban-card-footer">${prioPill}</div>
+      ${labelsHtml}
+      <div class="archived-card-foot">
+        <span class="archived-date">${t('archived.label.archived_at', {date: fmtDate(card.archived_at)})}</span>
+        <button class="btn-secondary btn-compact archived-restore-btn" data-id="${esc(card.id)}" title="${t('archived.btn.restore_to_board')}" style="white-space:nowrap;flex-shrink:0;">${t('archived.btn.restore')}</button>
+      </div>
+    </div>`
+  }
+
+  // Read-only detail modal for an archived card: meta grid, labels, description,
+  // comments -- no editing affordances. Restore button mirrors the card button.
+  async function showArchivedDetail(card) {
+    const seqPrefix = card.seq != null ? `#${card.seq} ` : ''
+    document.getElementById('archivedDetailTitle').textContent = `${seqPrefix}${card.title}`
+    const meta = document.getElementById('archivedDetailMeta')
+    const idLabel = (card.seq != null ? `#${card.seq} · ` : '') + card.id
+    meta.innerHTML = `
+      <div class="meta-item"><span class="meta-label">${t('kanban.meta.id')}</span><span class="meta-value" style="font-family:monospace">${esc(idLabel)}</span></div>
+      <div class="meta-item"><span class="meta-label">${t('kanban.meta.status')}</span><span class="meta-value">${STATUS_LABELS[card.status]?.() ?? card.status}</span></div>
+      <div class="meta-item"><span class="meta-label">${t('kanban.meta.assignee')}</span><span class="meta-value">${card.assignee ? esc(card.assignee) : t('kanban.meta.none')}</span></div>
+      <div class="meta-item"><span class="meta-label">${t('kanban.meta.priority')}</span><span class="meta-value">${PRIORITY_LABELS[card.priority]?.() ?? card.priority}</span></div>
+      <div class="meta-item"><span class="meta-label">${t('kanban.meta.project')}</span><span class="meta-value">${card.project ? esc(card.project) : t('kanban.meta.none')}</span></div>
+      <div class="meta-item"><span class="meta-label">${t('archived.meta.archived_at')}</span><span class="meta-value">${fmtDate(card.archived_at)}</span></div>
+    `
+    const labelsWrap = document.getElementById('archivedDetailLabelsWrap')
+    const labelsBox = document.getElementById('archivedDetailLabels')
+    if (Array.isArray(card.labels) && card.labels.length > 0) {
+      labelsBox.innerHTML = card.labels
+        .map(l => `<span class="kanban-card-label-pill" style="--label-color:${esc(l.color)}">#${esc(l.name)}</span>`)
+        .join('')
+      labelsWrap.style.display = ''
+    } else {
+      labelsWrap.style.display = 'none'
+    }
+    document.getElementById('archivedDetailDesc').textContent = card.description || ''
+
+    const commentsWrap = document.getElementById('archivedDetailCommentsWrap')
+    const commentsBox = document.getElementById('archivedDetailComments')
+    commentsBox.innerHTML = ''
+    try {
+      const res = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/comments`)
+      const comments = res.ok ? await res.json() : []
+      if (Array.isArray(comments) && comments.length > 0) {
+        for (const c of comments) {
+          const date = new Date(c.created_at * 1000).toLocaleString('hu-HU')
+          const div = document.createElement('div')
+          div.className = 'comment-item'
+          div.innerHTML = `<div><span class="comment-author">${esc(c.author)}</span><span class="comment-date">${date}</span></div><div class="comment-body">${esc(c.content)}</div>`
+          commentsBox.appendChild(div)
+        }
+        commentsWrap.style.display = ''
+      } else {
+        commentsWrap.style.display = 'none'
+      }
+    } catch { commentsWrap.style.display = 'none' }
+
+    const restoreBtn = document.getElementById('archivedDetailRestoreBtn')
+    restoreBtn.disabled = false
+    restoreBtn.textContent = t('archived.btn.restore_to_board')
+    restoreBtn.onclick = async () => {
+      restoreBtn.disabled = true
+      restoreBtn.textContent = t('archived.btn.restoring')
+      try {
+        const resp = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/unarchive`, { method: 'POST' })
+        if (resp.ok) {
+          closeModal(document.getElementById('archivedDetailOverlay'))
+          doArchivedSearch()
+        } else {
+          restoreBtn.disabled = false
+          restoreBtn.textContent = t('archived.btn.restore_to_board')
+          showToast(t('archived.restore_error'))
+        }
+      } catch {
+        restoreBtn.disabled = false
+        restoreBtn.textContent = t('archived.btn.restore_to_board')
+      }
+    }
+    openModal(document.getElementById('archivedDetailOverlay'))
+  }
+
+  async function populateArchivedProjects() {
+    try {
+      const r = await fetch('/api/kanban-projects')
+      if (!r.ok) return
+      const projects = await r.json()
+      const sel = document.getElementById('archivedProject')
+      const cur = sel.value
+      sel.innerHTML = '<option value="">' + t('archived.filter.all_projects') + '</option>'
+      for (const p of projects) {
+        const opt = document.createElement('option')
+        opt.value = p
+        opt.textContent = p
+        if (p === cur) opt.selected = true
+        sel.appendChild(opt)
+      }
+    } catch { /* best-effort */ }
+  }
+
+  async function doArchivedSearch() {
+    const list = document.getElementById('archivedList')
+    const summary = document.getElementById('archivedSummary')
+    list.className = ''
+    list.innerHTML = '<p class="naplo-empty">' + t('common.loading') + '</p>'
+    summary.textContent = ''
+
+    const params = new URLSearchParams()
+    const q = document.getElementById('archivedQ').value.trim()
+    const project = document.getElementById('archivedProject').value
+    const from = document.getElementById('archivedFrom').value
+    const to = document.getElementById('archivedTo').value
+    if (q) params.set('q', q)
+    if (project) params.set('project', project)
+    if (from) params.set('from', Math.floor(new Date(from).getTime() / 1000))
+    if (to) params.set('to', Math.floor(new Date(to + 'T23:59:59').getTime() / 1000))
+
+    try {
+      const r = await fetch('/api/kanban/archived?' + params.toString())
+      if (!r.ok) { list.innerHTML = '<p class="naplo-empty error">' + t('archived.error.http', {status: r.status}) + '</p>'; return }
+      const data = await r.json()
+      const cards = data.cards || []
+      summary.textContent = t('archived.summary', {count: cards.length, limit: data.limit})
+      if (cards.length === 0) { list.innerHTML = '<p class="naplo-empty">' + t('archived.empty') + '</p>'; return }
+      list.className = 'archived-grid'
+      list.innerHTML = cards.map(renderArchivedCard).join('')
+      const byId = new Map(cards.map(c => [c.id, c]))
+      // Whole card opens the read-only detail; restore button acts on its own.
+      list.querySelectorAll('.archived-card').forEach(el => {
+        el.addEventListener('click', () => {
+          const card = byId.get(el.dataset.id)
+          if (card) showArchivedDetail(card)
+        })
+      })
+      list.querySelectorAll('.archived-restore-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation()
+          const id = btn.dataset.id
+          btn.disabled = true
+          btn.textContent = '...'
+          try {
+            const resp = await fetch(`/api/kanban/${id}/unarchive`, { method: 'POST' })
+            if (resp.ok) {
+              const cardEl = btn.closest('.archived-card')
+              if (cardEl) cardEl.style.opacity = '0.4'
+              btn.textContent = t('archived.btn.restored')
+            } else {
+              btn.disabled = false
+              btn.textContent = t('archived.btn.restore')
+              showToast(t('archived.restore_error'))
+            }
+          } catch {
+            btn.disabled = false
+            btn.textContent = t('archived.btn.restore')
+          }
+        })
+      })
+    } catch (err) {
+      list.innerHTML = '<p class="naplo-empty error">' + t('common.error_network', {msg: err.message}) + '</p>'
+    }
+  }
+
+  function loadArchivedPage() {
+    if (!archivedInit) {
+      archivedInit = true
+      document.getElementById('archivedSearchBtn').addEventListener('click', doArchivedSearch)
+      document.getElementById('archivedRefreshBtn').addEventListener('click', doArchivedSearch)
+      document.getElementById('archivedQ').addEventListener('keydown', e => { if (e.key === 'Enter') doArchivedSearch() })
+      // Back button mirrors the kanban row's Archivaltak entry point; explicit
+      // switchPage (not history.back) so it works on direct-link arrivals too.
+      const backBtn = document.getElementById('archivedBackToKanban')
+      if (backBtn) backBtn.addEventListener('click', () => switchPage('kanban'))
+      const adOverlay = document.getElementById('archivedDetailOverlay')
+      document.getElementById('archivedDetailClose').addEventListener('click', () => closeModal(adOverlay))
+      adOverlay.addEventListener('click', e => { if (e.target === adOverlay) closeModal(adOverlay) })
+    }
+    populateArchivedProjects()
+    doArchivedSearch()
+  }
+
+  window.loadArchivedPage = loadArchivedPage
+})()
+
+// === Naplo (Audit Timeline) ===
+;(() => {
+  let naploInitialized = false
+  let naploActiveSource = ''
+
+  const SOURCE_LABELS = { config: () => t('naplo.source.config'), idea: () => t('naplo.source.idea'), store: () => t('naplo.source.store'), diary: () => t('naplo.source.diary') }
+  const SOURCE_COLORS = { config: '#3b82f6', idea: '#10b981', store: '#f59e0b', diary: '#8b5cf6' }
+  const DIARY_ENTRY_LABELS = { log: () => t('naplo.diary.log_badge'), memory: () => t('naplo.diary.memory_badge') }
+  const DIARY_ENTRY_COLORS = { log: '#6b7280', memory: '#a78bfa' }
+
+  function fmtTs(unix) {
+    return new Date(unix * 1000).toLocaleString('hu-HU', { dateStyle: 'short', timeStyle: 'short' })
+  }
+
+  function renderEntry(e) {
+    const sourceColor = SOURCE_COLORS[e.source] || '#6b7280'
+    const sourceLabelRaw = SOURCE_LABELS[e.source]; const sourceLabel = sourceLabelRaw ? (typeof sourceLabelRaw === 'function' ? sourceLabelRaw() : sourceLabelRaw) : e.source
+    const badge = `<span class="naplo-badge" style="background:${sourceColor}">${sourceLabel}</span>`
+    const ts = `<span class="naplo-ts">${fmtTs(e.created_at)}</span>`
+    let detail = ''
+    if (e.source === 'config') {
+      const oldV = e.old_value != null ? `<code>${esc(e.old_value)}</code>` : '<em>nincs</em>'
+      const newV = e.new_value != null ? `<code>${esc(e.new_value)}</code>` : '<em>nincs</em>'
+      detail = `<strong>${esc(e.key)}</strong> ${oldV} &rarr; ${newV} <span class="naplo-actor">${esc(e.actor || '')}</span>`
+    } else if (e.source === 'idea') {
+      const from = e.from_status ? `<code>${esc(e.from_status)}</code> &rarr; ` : ''
+      detail = `<strong>${esc(e.idea_id)}</strong> ${from}<code>${esc(e.to_status)}</code>`
+      if (e.note) detail += ` <span class="naplo-note">${esc(e.note)}</span>`
+      if (e.actor) detail += ` <span class="naplo-actor">${esc(e.actor)}</span>`
+    } else if (e.source === 'store') {
+      const sizeStr = e.file_size != null ? ` (${(e.file_size / 1024).toFixed(1)} KB)` : ''
+      const agentStr = e.agent ? ` <span class="naplo-actor">${esc(e.agent)}</span>` : ''
+      const sens = e.is_sensitive ? ` <span class="naplo-sensitive">${t('naplo.entry.sensitive')}</span>` : ''
+      detail = `<code>${esc(e.rel_path)}</code> <span class="naplo-event-type">${esc(e.event_type)}</span>${sizeStr}${agentStr}${sens}`
+    } else if (e.source === 'diary') {
+      const entryColor = DIARY_ENTRY_COLORS[e.entry_type] || '#6b7280'
+      const entryLabelRaw = DIARY_ENTRY_LABELS[e.entry_type]; const entryLabel = entryLabelRaw ? (typeof entryLabelRaw === 'function' ? entryLabelRaw() : entryLabelRaw) : e.entry_type
+      const entryBadge = `<span class="naplo-badge" style="background:${entryColor};font-size:10px">${entryLabel}</span>`
+      const agentStr = e.agent_id ? ` <span class="naplo-actor">${esc(e.agent_id)}</span>` : ''
+      let contentSnippet = esc(e.content || '').replace(/\n/g, ' ').slice(0, 200)
+      if ((e.content || '').length > 200) contentSnippet += '…'
+      const keywordsStr = e.keywords ? `<div class="naplo-note" style="margin-top:2px">Kulcsszavak: ${esc(e.keywords)}</div>` : ''
+      const catStr = e.category ? ` <span class="naplo-event-type">${esc(e.category)}</span>` : ''
+      detail = `${entryBadge}${catStr}${agentStr}<div class="naplo-diary-content">${contentSnippet}</div>${keywordsStr}`
+    }
+    return `<div class="naplo-entry"><div class="naplo-entry-meta">${ts}${badge}</div><div class="naplo-entry-detail">${detail}</div></div>`
+  }
+
+  async function doNaplo() {
+    const timeline = document.getElementById('naplo-timeline')
+    const summary = document.getElementById('naplo-summary')
+    timeline.innerHTML = `<p class="naplo-empty">${t('naplo.loading')}</p>`
+    summary.textContent = ''
+
+    const params = new URLSearchParams()
+    if (naploActiveSource) params.set('source', naploActiveSource)
+    const from = document.getElementById('naplo-from').value
+    const to = document.getElementById('naplo-to').value
+    const q = document.getElementById('naplo-q').value.trim()
+    const agentEl = document.getElementById('naplo-agent')
+    const agentVal = agentEl ? agentEl.value.trim() : ''
+    if (from) params.set('from', Math.floor(new Date(from).getTime() / 1000))
+    if (to)   params.set('to', Math.floor(new Date(to + 'T23:59:59').getTime() / 1000))
+    if (q)    params.set('q', q)
+    if (agentVal) params.set('agent', agentVal)
+    params.set('limit', '200')
+
+    try {
+      const res = await fetch('/api/audit-log?' + params.toString())
+      if (!res.ok) { timeline.innerHTML = `<p class="naplo-empty error">Hiba: ${res.status}</p>`; return }
+      const data = await res.json()
+      const entries = data.entries || []
+      summary.textContent = t('naplo.summary', { n: entries.length })
+      if (entries.length === 0) { timeline.innerHTML = `<p class="naplo-empty">${t('naplo.empty')}</p>`; return }
+      timeline.innerHTML = entries.map(renderEntry).join('')
+    } catch (err) {
+      timeline.innerHTML = `<p class="naplo-empty error">${t('naplo.error', { msg: err.message })}</p>`
+    }
+  }
+
+  function loadNaplo() {
+    if (!naploInitialized) {
+      naploInitialized = true
+      document.querySelectorAll('#naplo-source-tabs .naplo-tab').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('#naplo-source-tabs .naplo-tab').forEach((b) => b.classList.remove('active'))
+          btn.classList.add('active')
+          naploActiveSource = btn.dataset.source
+          const agentFilter = document.getElementById('naplo-agent-wrap')
+          if (agentFilter) agentFilter.style.display = naploActiveSource === 'diary' ? '' : 'none'
+          doNaplo()
+        })
+      })
+      document.getElementById('naplo-search-btn').addEventListener('click', doNaplo)
+      document.getElementById('naplo-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') doNaplo() })
+      document.getElementById('naplo-refresh-btn').addEventListener('click', doNaplo)
+    }
+    doNaplo()
+  }
+
+  window.loadNaplo = loadNaplo
+})()
+
+// === Kanban Gantt / timeline view ===
+;(function () {
+  // --- State ---
+  let ganttPeriod = 'week'  // 'week' | 'month' | 'quarter'
+  let ganttPeriodOffset = 0  // periods stepped from the current one (0 = current, -1 = prev, +1 = next)
+  let ganttOverdueOnly = false
+  let _initialized = false
+
+  // --- Color map by status (vars from theme) ---
+  const STATUS_COLOR = {
+    planned:     { bg: 'var(--accent)',  border: 'var(--accent)' },
+    in_progress: { bg: '#4f8ef7',        border: '#3a7be0' },
+    waiting:     { bg: '#e8a838',        border: '#c88c20' },
+    done:        { bg: '#3dbf79',        border: '#28a560' },
+  }
+
+  // Period window: returns { rangeStart: Date, rangeEnd: Date } (midnight boundaries)
+  function periodWindow() {
+    const now = new Date()
+    const start = new Date(now)
+    start.setHours(0, 0, 0, 0)
+    const end = new Date(start)
+    if (ganttPeriod === 'week') {
+      // Mon..Sun of current week, shifted by ganttPeriodOffset weeks
+      const dow = (start.getDay() + 6) % 7  // Mon=0
+      start.setDate(start.getDate() - dow + ganttPeriodOffset * 7)
+      end.setTime(start.getTime())
+      end.setDate(start.getDate() + 7)
+    } else if (ganttPeriod === 'month') {
+      start.setDate(1)
+      start.setMonth(start.getMonth() + ganttPeriodOffset)
+      end.setFullYear(start.getFullYear(), start.getMonth() + 1, 1)
+    } else {  // quarter
+      const qStart = Math.floor(start.getMonth() / 3) * 3 + ganttPeriodOffset * 3
+      start.setMonth(qStart, 1)
+      end.setFullYear(start.getFullYear(), start.getMonth() + 3, 1)
+    }
+    return { rangeStart: start, rangeEnd: end }
+  }
+
+  // Format date as short label (e.g. "jún 15" / "Jun 15")
+  function fmtDateShort(d) {
+    return d.toLocaleDateString(typeof _lang !== 'undefined' && _lang === 'en' ? 'en-US' : 'hu-HU', { month: 'short', day: 'numeric' })
+  }
+
+  // Return header tick labels for the visible range
+  function buildHeaderTicks(rangeStart, rangeEnd) {
+    const ticks = []
+    const totalMs = rangeEnd - rangeStart
+    // Aim for ~5-8 ticks; snap to day boundaries
+    let stepDays = 1
+    if (ganttPeriod === 'month') stepDays = 7
+    else if (ganttPeriod === 'quarter') stepDays = 14
+    const cur = new Date(rangeStart)
+    while (cur < rangeEnd) {
+      ticks.push({
+        date: new Date(cur),
+        pct: (cur - rangeStart) / totalMs * 100,
+      })
+      cur.setDate(cur.getDate() + stepDays)
+    }
+    return ticks
+  }
+
+  // Group visible cards by project (or 'Nincs projekt' for null)
+  function groupCardsByProject(cards) {
+    const map = new Map()
+    for (const c of cards) {
+      const key = c.project || t('kanban.gantt.no_project')
+      if (!map.has(key)) map.set(key, [])
+      map.get(key).push(c)
+    }
+    return map
+  }
+
+  // Build and inject the Gantt DOM into #kanbanGanttView
+  function renderGantt() {
+    const container = document.getElementById('kanbanGanttView')
+    if (!container) return
+    container.innerHTML = ''
+
+    const { rangeStart, rangeEnd } = periodWindow()
+    const totalMs = rangeEnd - rangeStart
+    const nowMs = Date.now()
+    const todayPct = Math.max(0, Math.min(100, (nowMs - rangeStart) / totalMs * 100))
+
+    // Filter: cards that have a due_date
+    let cards = (Array.isArray(kanbanCards) ? kanbanCards : []).filter(c => c.due_date)
+
+    if (ganttOverdueOnly) {
+      // Keep cards that are overdue OR due within 7 days
+      const cutoff = (nowMs + 7 * 86400000) / 1000
+      cards = cards.filter(c => c.due_date <= cutoff / 1 && c.status !== 'done')
+    }
+
+    // Exclude cards whose entire bar lies outside the window
+    cards = cards.filter(c => {
+      const barStart = c.created_at ? c.created_at * 1000 : rangeStart.getTime()
+      const barEnd   = c.due_date * 1000
+      return barEnd >= rangeStart && barStart <= rangeEnd
+    })
+
+    if (cards.length === 0) {
+      container.innerHTML = `<p style="color:var(--muted);padding:24px 0;text-align:center;">${t('kanban.gantt.no_cards')}</p>`
+      return
+    }
+
+    const grouped = groupCardsByProject(cards)
+
+    // --- Outer layout ---
+    const wrap = document.createElement('div')
+    wrap.className = 'gantt-wrap'
+    wrap.style.cssText = 'display:flex;flex-direction:column;overflow:hidden;'
+
+    // --- Header row: left label + tick strip ---
+    const headerRow = document.createElement('div')
+    headerRow.style.cssText = 'display:flex;border-bottom:1px solid var(--border);margin-bottom:4px;'
+
+    const headerLabel = document.createElement('div')
+    headerLabel.style.cssText = 'width:220px;min-width:220px;font-size:12px;color:var(--muted);padding:4px 8px;border-right:1px solid var(--border);'
+    headerLabel.textContent = t('kanban.gantt.col_label')
+    headerRow.appendChild(headerLabel)
+
+    const headerTrack = document.createElement('div')
+    headerTrack.style.cssText = 'flex:1;position:relative;height:28px;overflow:hidden;'
+    const ticks = buildHeaderTicks(rangeStart, rangeEnd)
+    for (const tick of ticks) {
+      const el = document.createElement('div')
+      el.style.cssText = `position:absolute;left:${tick.pct.toFixed(2)}%;transform:translateX(-50%);font-size:11px;color:var(--muted);top:6px;white-space:nowrap;`
+      el.textContent = fmtDateShort(tick.date)
+      headerTrack.appendChild(el)
+    }
+    // Today marker in header
+    if (todayPct >= 0 && todayPct <= 100) {
+      const todayHead = document.createElement('div')
+      todayHead.style.cssText = `position:absolute;left:${todayPct.toFixed(2)}%;top:0;bottom:0;width:2px;background:var(--danger,#e05252);opacity:0.6;`
+      headerTrack.appendChild(todayHead)
+    }
+    headerRow.appendChild(headerTrack)
+    wrap.appendChild(headerRow)
+
+    // --- Body rows ---
+    const body = document.createElement('div')
+    body.style.cssText = 'overflow-y:auto;max-height:70vh;'
+
+    for (const [project, projCards] of grouped) {
+      // Group header
+      const groupHeader = document.createElement('div')
+      groupHeader.style.cssText = 'display:flex;align-items:center;background:var(--bg2,var(--sidebar-bg));border-bottom:1px solid var(--border);'
+      const ghLabel = document.createElement('div')
+      ghLabel.style.cssText = 'width:220px;min-width:220px;font-size:12px;font-weight:600;color:var(--fg);padding:5px 8px;border-right:1px solid var(--border);'
+      ghLabel.textContent = `${project} (${projCards.length})`
+      groupHeader.appendChild(ghLabel)
+      const ghStripe = document.createElement('div')
+      ghStripe.style.cssText = 'flex:1;height:26px;background:var(--bg2,var(--sidebar-bg));'
+      groupHeader.appendChild(ghStripe)
+      body.appendChild(groupHeader)
+
+      // Card rows
+      for (const card of projCards) {
+        const barStartMs = card.created_at ? card.created_at * 1000 : rangeStart.getTime()
+        const barEndMs   = card.due_date * 1000
+        const isOverdue  = card.status !== 'done' && barEndMs < nowMs
+
+        // Clamp to window
+        const clampedStart = Math.max(barStartMs, rangeStart.getTime())
+        const clampedEnd   = Math.min(barEndMs,   rangeEnd.getTime())
+        const leftPct  = (clampedStart - rangeStart) / totalMs * 100
+        const widthPct = Math.max(0.5, (clampedEnd - clampedStart) / totalMs * 100)
+
+        const col = isOverdue ? { bg: 'var(--danger,#e05252)', border: '#b83030' }
+                              : (STATUS_COLOR[card.status] || STATUS_COLOR.planned)
+
+        const row = document.createElement('div')
+        row.style.cssText = 'display:flex;align-items:center;border-bottom:1px solid var(--border);min-height:32px;'
+
+        const rowLabel = document.createElement('div')
+        rowLabel.style.cssText = 'width:220px;min-width:220px;font-size:12px;color:var(--fg);padding:4px 8px;border-right:1px solid var(--border);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;cursor:pointer;'
+        rowLabel.title = card.title
+        // Show the running display number (#N, card.seq) like the board, not the hex id.
+        const seqLabel = card.seq != null ? `#${card.seq}` : `#${card.id}`
+        rowLabel.textContent = `${seqLabel} ${card.title}`
+        rowLabel.addEventListener('click', () => { if (typeof openCardDetail === 'function') openCardDetail(card.id) })
+
+        const rowTrack = document.createElement('div')
+        rowTrack.style.cssText = 'flex:1;position:relative;height:32px;overflow:hidden;'
+
+        // Today line (in each row)
+        if (todayPct >= 0 && todayPct <= 100) {
+          const tl = document.createElement('div')
+          tl.style.cssText = `position:absolute;left:${todayPct.toFixed(2)}%;top:0;bottom:0;width:2px;background:var(--danger,#e05252);z-index:1;pointer-events:none;`
+          rowTrack.appendChild(tl)
+        }
+
+        const bar = document.createElement('div')
+        bar.style.cssText = [
+          `position:absolute`,
+          `left:${leftPct.toFixed(2)}%`,
+          `width:${widthPct.toFixed(2)}%`,
+          `top:5px`,
+          `bottom:5px`,
+          `background:${col.bg}`,
+          `border:1px solid ${col.border}`,
+          `border-radius:4px`,
+          `overflow:hidden`,
+          `white-space:nowrap`,
+          `font-size:11px`,
+          `color:#fff`,
+          `display:flex`,
+          `align-items:center`,
+          `padding:0 6px`,
+          `box-sizing:border-box`,
+          `cursor:pointer`,
+          `z-index:2`,
+          isOverdue ? 'background-image:repeating-linear-gradient(45deg,rgba(0,0,0,.12) 0px,rgba(0,0,0,.12) 4px,transparent 4px,transparent 8px)' : '',
+        ].filter(Boolean).join(';')
+        bar.title = `${seqLabel} ${card.title}\n${fmtDateShort(new Date(barStartMs))} - ${fmtDateShort(new Date(barEndMs))}`
+        bar.textContent = `${seqLabel} ${card.title}`
+        bar.addEventListener('click', () => { if (typeof openCardDetail === 'function') openCardDetail(card.id) })
+        rowTrack.appendChild(bar)
+        row.appendChild(rowLabel)
+        row.appendChild(rowTrack)
+        body.appendChild(row)
+      }
+    }
+
+    wrap.appendChild(body)
+
+    // --- Legend ---
+    const legend = document.createElement('div')
+    legend.style.cssText = 'display:flex;align-items:center;gap:16px;margin-top:10px;font-size:12px;flex-wrap:wrap;'
+    const legendItems = [
+      { key: 'planned',     color: STATUS_COLOR.planned.bg },
+      { key: 'in_progress', color: STATUS_COLOR.in_progress.bg },
+      { key: 'waiting',     color: STATUS_COLOR.waiting.bg },
+      { key: 'done',        color: STATUS_COLOR.done.bg },
+      { key: 'overdue',     color: 'var(--danger,#e05252)' },
+    ]
+    for (const item of legendItems) {
+      const dot = document.createElement('span')
+      dot.innerHTML = `<span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:${item.color};vertical-align:middle;margin-right:4px;"></span>${t('kanban.gantt.legend.' + item.key)}`
+      legend.appendChild(dot)
+    }
+    const todayLegend = document.createElement('span')
+    todayLegend.style.cssText = 'margin-left:auto;color:var(--muted);'
+    todayLegend.innerHTML = `<span style="display:inline-block;width:12px;height:2px;background:var(--danger,#e05252);vertical-align:middle;margin-right:4px;"></span>${t('kanban.gantt.legend.today')}`
+    legend.appendChild(todayLegend)
+    wrap.appendChild(legend)
+
+    container.appendChild(wrap)
+
+    // --- Period stepper (below the timeline): step back/forward by one period unit ---
+    const nav = document.createElement('div')
+    nav.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:10px;margin-top:12px;'
+    const prevBtn = document.createElement('button')
+    prevBtn.className = 'view-btn'
+    prevBtn.style.cssText = 'width:auto;padding:0 14px;'
+    prevBtn.textContent = '‹ ' + t('kanban.gantt.nav_prev')
+    prevBtn.addEventListener('click', () => { ganttPeriodOffset--; renderGantt() })
+    const rangeLbl = document.createElement('span')
+    rangeLbl.style.cssText = 'font-size:12px;color:var(--muted);min-width:130px;text-align:center;'
+    rangeLbl.textContent = `${fmtDateShort(rangeStart)} - ${fmtDateShort(new Date(rangeEnd.getTime() - 1))}`
+    const nextBtn = document.createElement('button')
+    nextBtn.className = 'view-btn'
+    nextBtn.style.cssText = 'width:auto;padding:0 14px;'
+    nextBtn.textContent = t('kanban.gantt.nav_next') + ' ›'
+    nextBtn.addEventListener('click', () => { ganttPeriodOffset++; renderGantt() })
+    nav.append(prevBtn, rangeLbl, nextBtn)
+    container.appendChild(nav)
+  }
+
+  // --- View switcher init (called once after DOM ready) ---
+  function initGanttViewSwitcher() {
+    if (_initialized) return
+    _initialized = true
+
+    const boardBtn  = document.getElementById('kanbanViewBoard')
+    const ganttBtn  = document.getElementById('kanbanViewGantt')
+    const boardFilters = document.getElementById('kanbanBoardFilters')
+    const ganttFilters = document.getElementById('kanbanGanttFilters')
+    const boardEls  = [document.getElementById('kanbanBoard'), document.getElementById('kanbanSwimlaneBoard')]
+    const ganttEl   = document.getElementById('kanbanGanttView')
+
+    function activateBoard() {
+      boardBtn.classList.add('active')
+      ganttBtn.classList.remove('active')
+      boardFilters.style.display = 'flex'
+      ganttFilters.style.display = 'none'
+      boardEls.forEach(el => { if (el) el.style.removeProperty('display') })
+      ganttEl.style.display = 'none'
+    }
+
+    function activateGantt() {
+      ganttBtn.classList.add('active')
+      boardBtn.classList.remove('active')
+      ganttFilters.style.display = 'flex'
+      boardFilters.style.display = 'none'
+      boardEls.forEach(el => { if (el) el.style.display = 'none' })
+      ganttEl.style.display = 'block'
+      renderGantt()
+    }
+
+    boardBtn.addEventListener('click', activateBoard)
+    ganttBtn.addEventListener('click', activateGantt)
+
+    // Archived button: navigates AWAY to the archived page (its sidebar entry
+    // was removed -- this button is now the entry point). It never takes the
+    // 'active' state here because leaving the kanban page hides the row.
+    const archivedBtn = document.getElementById('kanbanViewArchived')
+    if (archivedBtn) archivedBtn.addEventListener('click', () => switchPage('archived'))
+
+    // Period buttons
+    document.querySelectorAll('#kanbanGanttFilters [data-period]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        ganttPeriod = btn.dataset.period
+        ganttPeriodOffset = 0  // recenter on the current period when switching granularity
+        document.querySelectorAll('#kanbanGanttFilters [data-period]').forEach(b => b.classList.remove('active'))
+        btn.classList.add('active')
+        renderGantt()
+      })
+    })
+
+    // Overdue toggle
+    const overdueChk = document.getElementById('ganttOverdueOnly')
+    if (overdueChk) {
+      overdueChk.addEventListener('change', () => {
+        ganttOverdueOnly = overdueChk.checked
+        renderGantt()
+      })
+    }
+
+    // Re-render on data refresh (hook into global loadKanban completion)
+    const _origRenderKanban = window.renderKanban
+    if (typeof _origRenderKanban === 'function') {
+      window.renderKanban = function () {
+        _origRenderKanban.apply(this, arguments)
+        if (ganttEl.style.display !== 'none') renderGantt()
+      }
+    }
+  }
+
+  window._initGanttViewSwitcher = initGanttViewSwitcher
+  window.renderGantt = renderGantt
+})()
