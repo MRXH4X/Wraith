@@ -940,6 +940,49 @@ export function initDatabase(dbPathOverride?: string): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_otel_spans_trace ON otel_spans(trace_id, start_ms)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_otel_spans_agent ON otel_spans(agent_id, start_ms)`)
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS postex_sessions (
+      id         TEXT PRIMARY KEY,
+      target     TEXT NOT NULL,
+      os         TEXT NOT NULL CHECK(os IN ('linux','windows')),
+      priv       TEXT NOT NULL,
+      env        TEXT NOT NULL CHECK(env IN ('standalone','domain','cloud','container')),
+      label      TEXT,
+      notes      TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS postex_items (
+      session_id TEXT NOT NULL,
+      item_key   TEXT NOT NULL,
+      checked    INTEGER NOT NULL DEFAULT 0,
+      notes      TEXT,
+      loot_ref   TEXT,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (session_id, item_key),
+      FOREIGN KEY (session_id) REFERENCES postex_sessions(id) ON DELETE CASCADE
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_postex_items_session ON postex_items(session_id)`)
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wordlists (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      path        TEXT NOT NULL,
+      category    TEXT NOT NULL DEFAULT 'custom',
+      tags        TEXT NOT NULL DEFAULT '',
+      description TEXT,
+      size_lines  INTEGER,
+      uploaded_by TEXT,
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_wordlists_category ON wordlists(category)`)
+
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
   // re-importing. Wrapped in a transaction so a crash mid-import is safe.
@@ -3336,5 +3379,62 @@ export function listOtelTraces(limit = 50): OtelTraceSummary[] {
     ORDER BY s.start_ms DESC
     LIMIT ?
   `).all(limit) as OtelTraceSummary[]
+}
+
+// --- Wordlists ---
+
+export interface WordlistRow {
+  id: string
+  name: string
+  path: string
+  category: string
+  tags: string
+  description: string | null
+  size_lines: number | null
+  uploaded_by: string | null
+  created_at: number
+  updated_at: number
+}
+
+export function listWordlists(opts?: { category?: string; tag?: string }): WordlistRow[] {
+  let sql = 'SELECT * FROM wordlists'
+  const params: string[] = []
+  const conditions: string[] = []
+  if (opts?.category) { conditions.push('category = ?'); params.push(opts.category) }
+  if (opts?.tag) { conditions.push("(',' || tags || ',' LIKE '%,' || ? || ',%')"); params.push(opts.tag) }
+  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ')
+  sql += ' ORDER BY name ASC'
+  return db.prepare(sql).all(...params) as WordlistRow[]
+}
+
+export function getWordlist(id: string): WordlistRow | undefined {
+  return db.prepare('SELECT * FROM wordlists WHERE id = ?').get(id) as WordlistRow | undefined
+}
+
+export function createWordlist(row: Omit<WordlistRow, 'created_at' | 'updated_at'>): void {
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(`
+    INSERT INTO wordlists (id, name, path, category, tags, description, size_lines, uploaded_by, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(row.id, row.name, row.path, row.category, row.tags, row.description ?? null, row.size_lines ?? null, row.uploaded_by ?? null, now, now)
+}
+
+export function updateWordlist(id: string, patch: Partial<Pick<WordlistRow, 'name' | 'description' | 'category' | 'tags' | 'size_lines'>>): boolean {
+  const fields: string[] = []
+  const vals: unknown[] = []
+  if (patch.name !== undefined) { fields.push('name = ?'); vals.push(patch.name) }
+  if (patch.description !== undefined) { fields.push('description = ?'); vals.push(patch.description) }
+  if (patch.category !== undefined) { fields.push('category = ?'); vals.push(patch.category) }
+  if (patch.tags !== undefined) { fields.push('tags = ?'); vals.push(patch.tags) }
+  if (patch.size_lines !== undefined) { fields.push('size_lines = ?'); vals.push(patch.size_lines) }
+  if (!fields.length) return false
+  fields.push('updated_at = ?')
+  vals.push(Math.floor(Date.now() / 1000), id)
+  const result = db.prepare(`UPDATE wordlists SET ${fields.join(', ')} WHERE id = ?`).run(...vals)
+  return result.changes > 0
+}
+
+export function deleteWordlist(id: string): boolean {
+  return db.prepare('DELETE FROM wordlists WHERE id = ?').run(id).changes > 0
 }
 

@@ -66,6 +66,7 @@ import { tryHandleApprovals, startApprovalTimeoutSweeper } from './web/routes/ap
 import { tryHandleTokenUsage } from './web/routes/token-usage.js'
 import { tryHandleCosts, startCostsSyncTask } from './web/routes/costs.js'
 import { tryHandleIdeas } from './web/routes/ideas.js'
+import { tryHandlePostex } from './web/routes/postex.js'
 import { tryHandleToolLog } from './web/routes/tool-log.js'
 import { tryHandleSpans } from './web/routes/spans.js'
 import { tryHandleSkillUsage } from './web/routes/skill-usage.js'
@@ -78,6 +79,7 @@ import { tryHandleVaultSsh } from './web/routes/vault-ssh.js'
 import { tryHandleVaultLoot } from './web/routes/vault-loot.js'
 import { tryHandleFleet } from './web/routes/fleet.js'
 import { tryHandleVaultSshKeys } from './web/routes/vault-ssh-keys.js'
+import { tryHandleWordlists } from './web/routes/wordlists.js'
 import type { RouteContext } from './web/routes/types.js'
 
 const WEB_DIR = join(PROJECT_ROOT, 'web')
@@ -202,7 +204,9 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleApprovals(routeCtx)) return
       if (await tryHandleTokenUsage(routeCtx)) return
       if (await tryHandleCosts(routeCtx)) return
+      if (await tryHandleWordlists(routeCtx)) return
       if (await tryHandleIdeas(routeCtx)) return
+      if (await tryHandlePostex(routeCtx)) return
       if (await tryHandleSpans(routeCtx)) return
       if (await tryHandleToolLog(routeCtx)) return
       if (await tryHandleSkillUsage(routeCtx)) return
