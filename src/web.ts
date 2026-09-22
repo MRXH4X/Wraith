@@ -80,6 +80,8 @@ import { tryHandleVaultLoot } from './web/routes/vault-loot.js'
 import { tryHandleFleet } from './web/routes/fleet.js'
 import { tryHandleVaultSshKeys } from './web/routes/vault-ssh-keys.js'
 import { tryHandleWordlists } from './web/routes/wordlists.js'
+import { tryHandleBloodHound } from './web/routes/bloodhound.js'
+import { tryHandleCmeParser } from './web/routes/cme-parser.js'
 import type { RouteContext } from './web/routes/types.js'
 
 const WEB_DIR = join(PROJECT_ROOT, 'web')
@@ -205,6 +207,8 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleTokenUsage(routeCtx)) return
       if (await tryHandleCosts(routeCtx)) return
       if (await tryHandleWordlists(routeCtx)) return
+      if (await tryHandleBloodHound(routeCtx)) return
+      if (await tryHandleCmeParser(routeCtx)) return
       if (await tryHandleIdeas(routeCtx)) return
       if (await tryHandlePostex(routeCtx)) return
       if (await tryHandleSpans(routeCtx)) return

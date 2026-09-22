@@ -136,6 +136,10 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
             <span class="sb-label">Ötletláda</span>
           </a>
+          <a href="#" class="sb-link" data-page="postex">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 12l2 2 4-4"/></svg>
+            <span class="sb-label">Post-Ex</span>
+          </a>
         </div>
       </div>
       <div class="sb-group" data-group="stats">
@@ -176,6 +180,10 @@
           <a href="#" class="sb-link" data-page="vault">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/></svg>
             <span class="sb-label">Vault</span>
+          </a>
+          <a href="#" class="sb-link" data-page="tools">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+            <span class="sb-label">Tools</span>
           </a>
         </div>
       </div>
@@ -2050,6 +2058,200 @@
         </button>
       </div>
     </div>
+
+    <!-- ═══════════════════════════ TOOLS PAGE ═══════════════════════════ -->
+    <div class="page" id="toolsPage" hidden>
+      <div class="page-header">
+        <div class="page-header-row">
+          <div>
+            <h1>Tools</h1>
+            <p class="subtitle">Utility widgetek — encoder, decoder, payload generator</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- String Encoder -->
+      <div class="card" style="padding:16px;margin-bottom:16px">
+        <h2 style="font-size:15px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          String Encoder / Decoder
+        </h2>
+        <textarea id="toolsEncoderInput" rows="3" placeholder="Input szöveg…" style="width:100%;font-family:var(--font-mono);font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--text);resize:vertical;box-sizing:border-box"></textarea>
+        <div id="toolsEncoderResults" style="display:flex;flex-direction:column;gap:6px;margin-top:10px"></div>
+      </div>
+
+      <!-- CME Parser -->
+      <div class="card" style="padding:16px;margin-bottom:16px">
+        <h2 style="font-size:15px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          NetExec / nxc Parser
+        </h2>
+        <textarea id="cmeInput" rows="6" placeholder="Illeszd be az nxc outputot… (nxc smb, nxc ldap, stb.)" style="width:100%;font-family:var(--font-mono);font-size:11px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--text);resize:vertical;box-sizing:border-box"></textarea>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <button id="cmeParsBtn" onclick="runCmeParse()" style="background:var(--accent);border:none;border-radius:4px;padding:6px 14px;font-size:12px;font-weight:700;color:#000;cursor:pointer">Parse</button>
+          <button id="cmeImportBtn" onclick="runCmeImport()" style="background:transparent;border:1px solid var(--accent);border-radius:4px;padding:6px 14px;font-size:12px;font-weight:700;color:var(--accent);cursor:pointer">Import → Vault</button>
+          <span id="cmeStatus" style="font-size:11px;color:var(--text-muted);align-self:center"></span>
+        </div>
+        <div id="cmeAlerts" style="margin-top:8px"></div>
+        <div id="cmeSummary" style="margin-top:8px"></div>
+        <div id="cmeResults" style="margin-top:10px;overflow-x:auto"></div>
+      </div>
+
+      <!-- msfvenom Generator -->
+      <div class="card" style="padding:16px">
+        <h2 style="font-size:15px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+          msfvenom Payload Generator
+        </h2>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:12px">
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">LHOST</label>
+            <input id="msfLhost" type="text" value="10.10.14.1" placeholder="10.10.14.1" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-family:var(--font-mono);font-size:12px;box-sizing:border-box">
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">LPORT</label>
+            <input id="msfLport" type="text" value="4444" placeholder="4444" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-family:var(--font-mono);font-size:12px;box-sizing:border-box">
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Platform</label>
+            <select id="msfPlatform" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-size:12px;box-sizing:border-box">
+              <option value="linux">Linux</option>
+              <option value="windows">Windows</option>
+              <option value="osx">macOS</option>
+              <option value="android">Android</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Arch</label>
+            <select id="msfArch" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-size:12px;box-sizing:border-box">
+              <option value="x64">x64</option>
+              <option value="x86">x86</option>
+              <option value="arm">arm</option>
+              <option value="aarch64">arm64</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Payload</label>
+            <select id="msfPayload" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-size:12px;box-sizing:border-box">
+              <option value="reverse_tcp">reverse_tcp</option>
+              <option value="reverse_https">reverse_https</option>
+              <option value="bind_tcp">bind_tcp</option>
+              <option value="reverse_tcp_meterpreter">meterpreter/reverse_tcp</option>
+              <option value="reverse_https_meterpreter">meterpreter/reverse_https</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Format</label>
+            <select id="msfFormat" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-size:12px;box-sizing:border-box">
+              <option value="elf">elf</option>
+              <option value="exe">exe</option>
+              <option value="raw">raw</option>
+              <option value="python">python</option>
+              <option value="bash">bash</option>
+              <option value="ps1">ps1</option>
+              <option value="dll">dll</option>
+            </select>
+          </div>
+        </div>
+        <div style="position:relative">
+          <code id="msfOutput" style="display:block;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:10px 12px;font-family:var(--font-mono);font-size:11px;color:var(--accent);word-break:break-all;min-height:38px"></code>
+          <button id="msfCopyBtn" onclick="copyMsfCmd()" style="position:absolute;top:6px;right:8px;background:var(--accent);border:none;border-radius:3px;padding:3px 8px;font-size:10px;font-weight:700;color:#000;cursor:pointer;letter-spacing:.04em">COPY</button>
+        </div>
+      </div>
+    </div>
+    <!-- ═══════════════════════════ END TOOLS PAGE ══════════════════════ -->
+
+    <!-- ══════════════════════════ POST-EX PAGE ═════════════════════════ -->
+    <div class="page" id="postexPage" hidden>
+      <div class="page-header">
+        <div class="page-header-row">
+          <div>
+            <h1>Post-Ex Checklist</h1>
+            <p class="subtitle">Pentest session-ök nyomon követése — lépések, credential harvest, lateral movement</p>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn-primary btn-compact" id="postexNewBtn">+ Új session</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Session list -->
+      <div id="postexSessionList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:24px"></div>
+
+      <!-- Checklist detail panel (hidden until session selected) -->
+      <div id="postexDetailPanel" hidden>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+          <button id="postexBackBtn" style="background:none;border:1px solid var(--border);border-radius:4px;padding:4px 10px;color:var(--text-muted);cursor:pointer;font-size:12px">← Vissza</button>
+          <div>
+            <span id="postexDetailLabel" style="font-weight:600;font-size:15px"></span>
+            <span id="postexDetailMeta" style="font-size:12px;color:var(--text-muted);margin-left:8px"></span>
+          </div>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+            <span id="postexProgressText" style="font-size:12px;color:var(--text-muted)"></span>
+            <div style="width:120px;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
+              <div id="postexProgressBar" style="height:100%;background:var(--accent);width:0%;transition:width .3s"></div>
+            </div>
+            <a id="postexExportBtn" style="font-size:12px;color:var(--accent);text-decoration:none;cursor:pointer">⬇ MD</a>
+          </div>
+        </div>
+        <div id="postexChecklist" style="display:flex;flex-direction:column;gap:12px"></div>
+      </div>
+
+      <!-- New session modal -->
+      <div class="modal-overlay" id="postexModalOverlay">
+        <div class="modal" style="max-width:480px">
+          <div class="modal-header">
+            <h2>Új Post-Ex Session</h2>
+            <button class="modal-close" id="postexModalClose">&times;</button>
+          </div>
+          <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
+            <div class="form-group">
+              <label class="form-label">Target *</label>
+              <input type="text" id="postexTargetInput" class="input" placeholder="pl. 10.10.10.5 vagy dc01.corp.local">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Label (opcionális)</label>
+              <input type="text" id="postexLabelInput" class="input" placeholder="pl. OSCP Lab — web01">
+            </div>
+            <div style="display:flex;gap:8px">
+              <div class="form-group" style="flex:1">
+                <label class="form-label">OS</label>
+                <select id="postexOsInput" class="input">
+                  <option value="linux">Linux</option>
+                  <option value="windows">Windows</option>
+                </select>
+              </div>
+              <div class="form-group" style="flex:1">
+                <label class="form-label">Privilege szint</label>
+                <select id="postexPrivInput" class="input">
+                  <option value="user">user</option>
+                  <option value="sudo">sudo</option>
+                  <option value="root">root</option>
+                  <option value="local-admin">local-admin</option>
+                  <option value="system">system</option>
+                  <option value="domain-admin">domain-admin</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Környezet</label>
+              <select id="postexEnvInput" class="input">
+                <option value="standalone">standalone</option>
+                <option value="domain">domain</option>
+                <option value="cloud">cloud</option>
+                <option value="container">container</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+              <button class="btn-secondary btn-compact" id="postexModalCancelBtn">Mégse</button>
+              <button class="btn-primary btn-compact" id="postexModalSaveBtn">Létrehozás</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- ═════════════════════════ END POST-EX PAGE ══════════════════════ -->
+
   </div>
 
   <!-- Modal: Kanban kártya részletek -->
