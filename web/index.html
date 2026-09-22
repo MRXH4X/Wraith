@@ -2097,6 +2097,22 @@
         <div id="cmeResults" style="margin-top:10px;overflow-x:auto"></div>
       </div>
 
+      <!-- Trivy Container Scan -->
+      <div class="card" style="padding:16px;margin-bottom:16px">
+        <h2 style="font-size:15px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Trivy Container Scan
+        </h2>
+        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+          <input id="trivyImage" type="text" placeholder="nginx:latest, alpine:3.18, ghcr.io/…" style="flex:1;min-width:220px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:12px;color:var(--text);font-family:var(--font-mono)"/>
+          <button onclick="runTrivyScan()" style="background:var(--accent);border:none;border-radius:4px;padding:6px 14px;font-size:12px;font-weight:700;color:#000;cursor:pointer">Scan</button>
+          <button id="trivySbomBtn" onclick="runTrivySbom()" style="display:none;background:transparent;border:1px solid var(--accent);border-radius:4px;padding:6px 14px;font-size:12px;font-weight:700;color:var(--accent);cursor:pointer">SBOM letöltés</button>
+          <span id="trivyStatus" style="font-size:11px;color:var(--text-muted);align-self:center"></span>
+        </div>
+        <div id="trivySummary" style="margin-top:8px"></div>
+        <div id="trivyResults" style="margin-top:10px;overflow-x:auto"></div>
+      </div>
+
       <!-- msfvenom Generator -->
       <div class="card" style="padding:16px">
         <h2 style="font-size:15px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px">

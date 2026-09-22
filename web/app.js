@@ -17121,3 +17121,116 @@ document.getElementById('postexBackBtn').addEventListener('click', () => {
     }
   }
 })()
+
+// ═══════════════════════════════════════════════════════════════
+// TRIVY CONTAINER SCAN
+// ═══════════════════════════════════════════════════════════════
+;(() => {
+  const SEV_COLOR = { CRITICAL: '#ff4d6d', HIGH: '#ff8c42', MEDIUM: '#ffb547', LOW: '#00d4ff', UNKNOWN: '#888' }
+  const SEV_BG    = { CRITICAL: '#ff4d6d18', HIGH: '#ff8c4218', MEDIUM: '#ffb54718', LOW: '#00d4ff18', UNKNOWN: '#88888818' }
+
+  function statusEl()  { return document.getElementById('trivyStatus') }
+  function summaryEl() { return document.getElementById('trivySummary') }
+  function resultsEl() { return document.getElementById('trivyResults') }
+  function imageEl()   { return document.getElementById('trivyImage') }
+  function sbomBtn()   { return document.getElementById('trivySbomBtn') }
+
+  function renderSummary(data) {
+    const c = data.counts ?? {}
+    const tiles = ['CRITICAL','HIGH','MEDIUM','LOW','UNKNOWN']
+      .filter(s => c[s])
+      .map(s => `<div style="background:var(--bg);border:1px solid ${SEV_COLOR[s]};border-radius:4px;padding:4px 10px;text-align:center">
+        <div style="font-size:15px;font-weight:700;color:${SEV_COLOR[s]}">${c[s]}</div>
+        <div style="font-size:9px;color:var(--text-muted);letter-spacing:.06em">${s}</div>
+      </div>`)
+    return `<div style="margin-bottom:6px;font-size:11px;color:var(--text-muted)">
+      <span style="color:var(--text)">${data.image}</span> — ${data.total} CVE összesen
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;font-family:var(--font-mono);font-size:11px">${tiles.join('')}</div>`
+  }
+
+  function renderTable(vulns) {
+    if (!vulns?.length) return '<p style="font-size:12px;color:var(--text-muted)">Nincs CVE találat.</p>'
+    const rows = vulns.map(v => {
+      const sc = SEV_COLOR[v.severity] ?? '#888'
+      const bg = SEV_BG[v.severity] ?? ''
+      const fixed = v.fixed ? `<span style="color:#00ff87;font-size:10px">${v.fixed}</span>` : '<span style="color:var(--text-muted);font-size:10px">—</span>'
+      const score = v.score != null ? `<span style="color:${sc};font-size:10px;font-weight:700">${v.score.toFixed(1)}</span>` : ''
+      return `<tr style="background:${bg}">
+        <td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap"><a href="https://nvd.nist.gov/vuln/detail/${encodeURIComponent(v.id)}" target="_blank" style="color:var(--accent);text-decoration:none">${v.id}</a></td>
+        <td><span style="background:${sc}22;color:${sc};border:1px solid ${sc};border-radius:3px;padding:1px 5px;font-size:9px;font-weight:700">${v.severity}</span></td>
+        <td style="font-family:var(--font-mono);font-size:11px">${v.pkg}</td>
+        <td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted)">${v.installed}</td>
+        <td>${fixed}</td>
+        <td>${score}</td>
+        <td style="font-size:11px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${v.title.replace(/"/g,'&quot;')}">${v.title}</td>
+      </tr>`
+    }).join('')
+    return `<table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)">
+        <th style="text-align:left;padding:4px 8px">CVE</th>
+        <th style="text-align:left;padding:4px 8px">Súlyosság</th>
+        <th style="text-align:left;padding:4px 8px">Csomag</th>
+        <th style="text-align:left;padding:4px 8px">Verzió</th>
+        <th style="text-align:left;padding:4px 8px">Javítva</th>
+        <th style="text-align:left;padding:4px 8px">CVSS</th>
+        <th style="text-align:left;padding:4px 8px">Leírás</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`
+  }
+
+  let lastScanImage = ''
+
+  window.runTrivyScan = async function() {
+    const image = imageEl()?.value?.trim()
+    if (!image) return
+    const st = statusEl()
+    if (st) st.textContent = 'Scanning… (lehet 1-2 perc pull-lal)'
+    if (summaryEl()) summaryEl().innerHTML = ''
+    if (resultsEl()) resultsEl().innerHTML = ''
+    if (sbomBtn()) sbomBtn().style.display = 'none'
+    try {
+      const r = await fetch('/api/trivy/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image }),
+      })
+      const data = await r.json()
+      if (!r.ok) { if (st) st.textContent = 'Hiba: ' + (data.error ?? r.status); return }
+      if (summaryEl()) summaryEl().innerHTML = renderSummary(data)
+      if (resultsEl()) resultsEl().innerHTML  = renderTable(data.vulns)
+      if (st) st.textContent = `Kész — ${data.total} CVE`
+      lastScanImage = image
+      if (sbomBtn()) sbomBtn().style.display = ''
+    } catch(e) {
+      if (st) st.textContent = 'Hiba: ' + e.message
+    }
+  }
+
+  window.runTrivySbom = async function() {
+    const image = lastScanImage || imageEl()?.value?.trim()
+    if (!image) return
+    const st = statusEl()
+    if (st) st.textContent = 'SBOM generálás…'
+    try {
+      const r = await fetch('/api/trivy/sbom', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image }),
+      })
+      const data = await r.json()
+      if (!r.ok) { if (st) st.textContent = 'SBOM hiba: ' + (data.error ?? r.status); return }
+      const blob = new Blob([JSON.stringify(data.sbom, null, 2)], { type: 'application/json' })
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href = url
+      a.download = `sbom-${image.replace(/[^a-z0-9]/gi, '_')}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+      if (st) st.textContent = 'SBOM letöltve'
+    } catch(e) {
+      if (st) st.textContent = 'SBOM hiba: ' + e.message
+    }
+  }
+})()
